@@ -8,7 +8,6 @@ Copyright (c) 2024 Yeogiaen
 
 원래 OpenAI Whisper를 사용하였으나, Google Cloud STT V2로 변경됨
 """
-
 import sys, os
 import threading
 import time
@@ -20,6 +19,24 @@ import logging
 import socket
 import winsound  # winsound import 추가 확인
 import re # 정규식 모듈 임포트
+import queue # 스트리밍용 큐 임포트
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+def get_app_dir():
+    """실행 파일 또는 스크립트가 있는 실제 디렉토리 경로를 반환합니다."""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller로 패키징된 경우
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 # 메시지 모듈 가져오기
 from messages import messages, get_message
@@ -76,9 +93,14 @@ KeyCode = None
 # Google Cloud STT 관련 변수
 google_speech = None
 google_stt_client = None
-google_credentials_path = None
-google_project_id = None
+google_credentials_path = None  # 인증용 JSON 키 경로
+google_project_id = None         # 구글 프로젝트 ID
 google_stt_model = "long"  # 기본 모델
+audio_queue = queue.Queue() # 실시간 스트리밍용 오디오 큐
+is_streaming = False      # 스트리밍 활성화 플래그
+streaming_transcript = "" # 실시간 인식 최종 확정 결과 저장용
+latest_interim_transcript = "" # 실시간 인식 최신 중간 결과 저장용 (is_final 이전)
+streaming_thread = None   # 실시간 STT 스레드 저장용
 
 # 단축키 전역 변수 추가 (파일 상단 전역 변수 섹션에 추가)
 hotkey_modifiers = {"ctrl": True, "shift": True, "alt": True}  # 기본 단축키: Ctrl+Shift+Alt
@@ -229,7 +251,19 @@ def load_modules_async():
                 google_stt_client = google_speech.SpeechClient.from_service_account_file(
                     google_credentials_path
                 )
-                logging.info(f"Google Cloud STT 클라이언트 초기화 완료 (프로젝트: {google_project_id})")
+
+                # 클래스 참조 로드
+                global StreamingRecognizeRequest, StreamingRecognitionConfig, RecognitionConfig
+                global RecognitionFeatures, StreamingRecognitionFeatures, AutoDetectDecodingConfig, RecognizeRequest
+                StreamingRecognizeRequest = google_speech.StreamingRecognizeRequest
+                StreamingRecognitionConfig = google_speech.StreamingRecognitionConfig
+                RecognitionConfig = google_speech.RecognitionConfig
+                RecognitionFeatures = google_speech.RecognitionFeatures
+                StreamingRecognitionFeatures = google_speech.StreamingRecognitionFeatures
+                AutoDetectDecodingConfig = google_speech.AutoDetectDecodingConfig
+                RecognizeRequest = google_speech.RecognizeRequest
+
+                logging.info(f"Google Cloud STT 클라이언트 및 클래스 로드 완료 (프로젝트: {google_project_id})")
             except Exception as e:
                 logging.error(f"Google Cloud STT 클라이언트 초기화 오류: {str(e)}")
     except ImportError as e:
@@ -847,6 +881,13 @@ def load_settings():
                 if "google_credentials_path" in settings:
                     google_credentials_path = settings["google_credentials_path"]
 
+                # 경로가 유효하지 않으면 앱 디렉토리 내의 기본 파일 확인 (백업/이동 대응)
+                if not google_credentials_path or not os.path.exists(google_credentials_path):
+                    default_path = os.path.join(get_app_dir(), "google_credentials.json")
+                    if os.path.exists(default_path):
+                        google_credentials_path = default_path
+                        logging.info(f"기본 위치에서 인증 파일 발견: {google_credentials_path}")
+
                 # Google STT 설정 로드
                 if "google_settings" in settings:
                     if "model" in settings["google_settings"]:
@@ -901,6 +942,9 @@ def create_image():
 
         # 리소스 파일 경로 계산 (패키지 내부 또는 현재 디렉토리)
         favicon_paths = []
+
+        # PyInstaller 리소스 경로 (_MEIPASS) 추가
+        favicon_paths.append(resource_path("favicon.ico"))
 
         # 실행 파일 경로 기준 (PyInstaller로 패키징된 경우)
         base_path = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
@@ -1402,7 +1446,7 @@ def show_api_key_dialog(required=False):
         try:
             # 앱 폴더에 복사할 파일명
             dest_filename = "google_credentials.json"
-            dest_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), dest_filename)
+            dest_path = os.path.join(get_app_dir(), dest_filename)
 
             # 파일 복사 (이미 같은 위치가 아니면)
             if os.path.abspath(selected_path) != os.path.abspath(dest_path):
@@ -1801,7 +1845,7 @@ def show_hotkey_dialog():
 # 녹음 관련 함수
 def start_recording():
     """녹음 시작 함수"""
-    global recording, audio_data, sd, np, stream, selected_device, winsound # winsound 전역 변수 사용 명시
+    global recording, audio_data, sd, np, stream, selected_device, winsound, streaming_thread
 
     if recording:
         logging.info("이미 녹음 중입니다.")
@@ -1850,6 +1894,17 @@ def start_recording():
 
         # 오디오 데이터 초기화
         audio_data = []
+
+        # 스트리밍 초기화
+        while not audio_queue.empty():
+            try: audio_queue.get_nowait()
+            except: pass
+
+        global is_streaming
+        is_streaming = True
+        streaming_thread = threading.Thread(target=google_stt_streaming_thread, daemon=True)
+        streaming_thread.start()
+
         recording = True
 
         # 녹음 콜백 함수
@@ -1859,9 +1914,14 @@ def start_recording():
             if recording:
                 try:
                     if indata.shape[1] == channels:  # 채널 수 확인
+                        # 기존 방식: 오디오 파일 저장용으로 리스트에도 보관
                         audio_data.append(indata.copy())
+
+                        # 스트리밍 방식: 실시간 큐에 데이터 주입
+                        # float32 데이터를 int16 PCM 데이터로 변환
+                        pcm_data = (indata.copy() * 32767).astype(np.int16).tobytes()
+                        audio_queue.put(pcm_data)
                     else:
-                        # 채널 수가 맞지 않으면 로그만 남기고 계속 진행
                         logging.warning(f"채널 수 불일치: 예상 {channels}, 실제 {indata.shape[1]}")
                 except Exception as cb_e:
                     logging.error(f"오디오 콜백 오류: {str(cb_e)}")
@@ -1869,11 +1929,13 @@ def start_recording():
         # 스트림 시작
         try:
             device_id = selected_device if selected_device is not None else None
+            # blocksize를 8000 (16000Hz 기준 500ms)으로 설정하여 더 여유롭고 효율적으로 처리
             stream = sd.InputStream(
                 device=device_id,
                 samplerate=samplerate,
                 channels=channels,
-                callback=audio_callback
+                callback=audio_callback,
+                blocksize=8000
             )
             stream.start()
             logging.info("오디오 스트림 시작됨")
@@ -1896,7 +1958,6 @@ def start_recording():
             return
 
         # 녹음 시작 알림
-        log_to_console("녹음 중... (단축키를 떼면 종료)") # 메시지 수정
 
     except Exception as e:
         error_msg = f"녹음 시작 오류: {str(e)}"
@@ -1907,10 +1968,159 @@ def start_recording():
         if root:
             root.after(10, lambda: messagebox.showerror("녹음 오류", error_msg))
 
+def ensure_google_client():
+    """Google Cloud STT 클라이언트를 초기화하고 유효성을 확인합니다."""
+    global google_stt_client, google_project_id, google_speech, google_credentials_path
+    global StreamingRecognizeRequest, StreamingRecognitionConfig, RecognitionConfig
+    global RecognitionFeatures, StreamingRecognitionFeatures, AutoDetectDecodingConfig, RecognizeRequest
+
+    if google_stt_client and google_project_id and StreamingRecognizeRequest:
+        return True
+
+    if google_credentials_path and os.path.exists(google_credentials_path):
+        try:
+            # 전역 모듈이 없으면 여기서 임포트
+            if google_speech is None:
+                from google.cloud import speech_v2
+                google_speech = speech_v2
+
+            # JSON에서 project_id 추출
+            with open(google_credentials_path, 'r', encoding='utf-8') as f:
+                creds_data = json.load(f)
+                google_project_id = creds_data.get('project_id')
+
+            if google_speech and google_project_id:
+                google_stt_client = google_speech.SpeechClient.from_service_account_file(google_credentials_path)
+
+                # 클래스 참조 로드
+                StreamingRecognizeRequest = google_speech.StreamingRecognizeRequest
+                StreamingRecognitionConfig = google_speech.StreamingRecognitionConfig
+                RecognitionConfig = google_speech.RecognitionConfig
+                RecognitionFeatures = google_speech.RecognitionFeatures
+                StreamingRecognitionFeatures = google_speech.StreamingRecognitionFeatures
+                AutoDetectDecodingConfig = google_speech.AutoDetectDecodingConfig
+                ExplicitDecodingConfig = google_speech.ExplicitDecodingConfig # 추가
+                RecognizeRequest = google_speech.RecognizeRequest
+                return True
+        except Exception as e:
+            logging.error(f"Google client initialization failed: {e}")
+    return False
+
+class AudioGenerator:
+    """오디오 큐에서 데이터를 조각내어 반환하는 생성기 클래스"""
+    def __init__(self, audio_queue, is_streaming_flag_func):
+        self.audio_queue = audio_queue
+        self.is_streaming_flag_func = is_streaming_flag_func
+
+    def __iter__(self):
+        while True:
+            try:
+                # 큐에서 데이터를 기다림 (약간의 타임아웃)
+                chunk = self.audio_queue.get(timeout=0.5)
+                if chunk is None: # 종료 센티넬 확인
+                    return
+                yield chunk
+            except queue.Empty:
+                if not self.is_streaming_flag_func():
+                    return
+                continue
+            except Exception as e:
+                logging.error(f"AudioGenerator error: {e}")
+                break
+
+def google_stt_streaming_thread():
+    """별도 스레드에서 구글 STT 스트리밍을 처리하고 결과를 실시간으로 파싱합니다."""
+    global is_streaming, google_stt_client, google_project_id, google_stt_model
+    global streaming_transcript, latest_interim_transcript
+    global active_mode, auto_language_detection, current_language, google_speech
+
+    try:
+        # 클라이언트 초기화 보장
+        if not ensure_google_client():
+            is_streaming = False
+            return
+
+        global google_speech
+
+
+        # 1. 스트리밍 설정 구성 (Raw PCM이므로 Explicit 감지 사용)
+        lang_codes = ["ko-KR"]
+        if not auto_language_detection:
+            if current_language == "en": lang_codes = ["en-US"]
+        else:
+            lang_codes = ["ko-KR", "en-US"]
+
+        config = google_speech.RecognitionConfig(
+            explicit_decoding_config=google_speech.ExplicitDecodingConfig(
+                encoding=google_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=16000,
+                audio_channel_count=1,
+            ),
+            language_codes=lang_codes,
+            model=google_stt_model,
+            features=google_speech.RecognitionFeatures(
+                enable_automatic_punctuation=(active_mode != "address_poi"),
+            ),
+        )
+
+        streaming_config = google_speech.StreamingRecognitionConfig(
+            config=config,
+            streaming_features=google_speech.StreamingRecognitionFeatures(
+                interim_results=True  # 중간 결과 활성화
+            )
+        )
+
+        # 2. 스트리밍 요청 제너레이터 정의
+        def request_generator():
+            try:
+                # 첫 번째 요청: 설정 정보 전송
+                yield google_speech.StreamingRecognizeRequest(
+                    recognizer=f"projects/{google_project_id}/locations/global/recognizers/_",
+                    streaming_config=streaming_config
+                )
+
+                # 이후 요청: 오디오 데이터 조각들 전송
+                audio_gen = AudioGenerator(audio_queue, lambda: is_streaming)
+                for chunk in audio_gen:
+                    if chunk is not None:
+                        yield google_speech.StreamingRecognizeRequest(audio=chunk)
+            except Exception as e:
+                logging.error(f"Streaming generator error: {e}")
+
+        # 3. 비동기 스트리밍 호출 및 응답 루프
+        responses = google_stt_client.streaming_recognize(requests=request_generator())
+
+        streaming_transcript = ""
+        latest_interim_transcript = ""
+        for response in responses:
+            # 모든 결과 블록을 조합하여 전체 중간 결과를 생성
+            temp_interim = ""
+            for result in response.results:
+                if len(result.alternatives) > 0:
+                    transcript = result.alternatives[0].transcript
+                    if result.is_final:
+                        streaming_transcript += transcript + " "
+                    else:
+                        temp_interim += transcript
+
+            # 현재 응답의 모든 중간 결과를 합쳐서 업데이트
+            current_interim = temp_interim.strip()
+            # 텍스트가 이전과 달라졌을 때만 로그 출력 (리소스 절약)
+            if current_interim and current_interim != latest_interim_transcript:
+                latest_interim_transcript = current_interim
+            elif not current_interim:
+                latest_interim_transcript = ""
+
+    except Exception as e:
+        error_msg = f"스트리밍 스레드 치명적 오류: {str(e)}"
+        logging.error(error_msg)
+        log_to_console(error_msg)
+        is_streaming = False
+
 def stop_recording():
     """녹음 중지 및 오디오 처리 함수"""
     global recording, audio_data, stream, openai, openai_client, api_key, pyperclip
-    global google_speech, google_stt_client, google_credentials_path, google_project_id
+    global google_speech, google_stt_client, google_credentials_path, google_project_id, streaming_thread
 
     if not recording:
         logging.info("녹음 중이 아닙니다.")
@@ -1919,7 +2129,6 @@ def stop_recording():
     try:
         # 녹음 중지
         recording = False
-        log_to_console("녹음 종료 중...")
 
         # 스트림 종료
         if stream:
@@ -1955,279 +2164,119 @@ def stop_recording():
             filename = os.path.join(recordings_dir, f"recording_{timestamp}.flac")
 
             # FLAC 파일로 저장 (Whisper API에 최적)
-            log_to_console(get_msg("saving_audio_file", filename))
             soundfile.write(filename, audio, 16000)
 
-            # Google Cloud 인증 확인 및 자동 복구 (강화된 버전)
-            if not google_stt_client:
-                if google_credentials_path and os.path.exists(google_credentials_path):
-                    try:
-                        log_to_console("Google Cloud STT 클라이언트 초기화 시도...")
-
-                        # 전역 모듈이 없으면 여기서 임포트
-                        global google_speech
-                        if google_speech is None:
-                            try:
-                                from google.cloud import speech_v2 as google_speech_module
-                                google_speech = google_speech_module
-                            except ImportError:
-                                log_to_console("[오류] google-cloud-speech 패키지가 설치되지 않았습니다.")
-                                raise ImportError("google-cloud-speech package missing")
-
-                        # JSON에서 project_id 추출
-                        with open(google_credentials_path, 'r', encoding='utf-8') as f:
-                            creds_data = json.load(f)
-                            global google_project_id
-                            google_project_id = creds_data.get('project_id')
-
-                        if google_speech and google_project_id:
-                            google_stt_client = google_speech.SpeechClient.from_service_account_file(google_credentials_path)
-                            log_to_console(f"클라이언트 초기화 성공: {google_project_id}")
-                        else:
-                            log_to_console(f"[오류] 정보 부족 - Speech: {google_speech is not None}, Project: {google_project_id is not None}")
-                    except Exception as e:
-                        logging.error(f"초기화 실패: {str(e)}")
-                        log_to_console(f"[오류] 초기화 실패: {str(e)}")
-
-            # 최종 체크
-            if not google_stt_client:
-                log_to_console(f"[오류] 인증 정보 미설정 (Client: {google_stt_client is not None}, Path: {google_credentials_path is not None})")
+            # Google Cloud 인증 확인
+            if not ensure_google_client():
                 log_to_console(get_msg("no_api_key_set"))
-                # 메인 스레드에서 API 키 설정 창 표시
                 if root:
                     root.after(100, lambda: show_api_key_dialog(required=True))
                 return
 
-            # Google Cloud STT V2로 음성 인식
-            if google_stt_client and google_project_id:
-                log_to_console("Google Cloud STT로 음성 데이터 전송 중...")
+            # 스트리밍 종료 신호 및 대기
+            global is_streaming, streaming_transcript, latest_interim_transcript
+            is_streaming = False
+            audio_queue.put(None) # 종료 알림
 
+            # 스트리밍 결과 마무리 대기 (큐가 비었더라도 서버 응답을 받을 시간 확보)
+            wait_start = time.time()
+            # 1.5초 정도로 약간 더 기다리면서 중간 결과가 확정으로 바뀌거나 마지막 데이터가 오길 대기
+            while time.time() - wait_start < 1.5:
+                time.sleep(0.1)
+                # 만약 streaming_thread가 끝났다면 더 기다리지 않음
+                if not streaming_thread.is_alive():
+                    break
+
+            # 2. 결과 조합 (확정 결과 + 마지막 중간 결과)
+            # 만약 중간 결과의 시작이 확정 결과의 끝과 겹친다면 중복 제거
+            final_part = streaming_transcript.strip()
+            interim_part = latest_interim_transcript.strip()
+
+            if final_part and interim_part:
+                # 간단한 중복 체크: interim_part가 final_part에 이미 포함되어 있는지 확인
+                if interim_part in final_part:
+                    transcript_text = final_part
+                else:
+                    transcript_text = final_part + " " + interim_part
+            else:
+                transcript_text = final_part or interim_part
+
+            transcript_text = transcript_text.strip()
+            original_text = transcript_text
+
+            # 3. 결과가 없을 경우에만 일반 인식(Unary)으로 백업 시도
+            if not transcript_text and ensure_google_client():
                 try:
-                    # API 호출 시간 측정 시작
-                    api_start_time = time.time()
-
-                    # 언어 코드 설정
-                    if auto_language_detection:
-                        lang_codes = ["ko-KR", "en-US"]  # 자동 감지용 다중 언어
-                        log_to_console("언어 자동 감지 모드 사용 중...")
-                    else:
-                        if current_language == "ko":
-                            lang_codes = ["ko-KR"]
-                            log_to_console("언어 설정: 한국어")
-                        elif current_language == "en":
-                            lang_codes = ["en-US"]
-                            log_to_console("언어 설정: English")
-                        else:
-                            lang_codes = ["ko-KR"]
-                            log_to_console("언어 설정: 한국어(기본값)")
-
-                    # 오디오 파일 읽기
+                    log_to_console("실시간 결과 없음 - 일반 인식으로 전환 중...")
                     with open(filename, "rb") as audio_file:
                         audio_content = audio_file.read()
 
-                    # Google STT V2 설정
-                    from google.cloud.speech_v2 import RecognizeRequest, RecognitionConfig, RecognitionFeatures, AutoDetectDecodingConfig
-
-                    config = RecognitionConfig(
-                        auto_decoding_config=AutoDetectDecodingConfig(),
-                        language_codes=lang_codes,
+                    config = google_speech.RecognitionConfig(
+                        auto_decoding_config=google_speech.AutoDetectDecodingConfig(),
+                        language_codes=["ko-KR", "en-US"] if auto_language_detection else ([ "en-US"] if current_language == "en" else ["ko-KR"]),
                         model=google_stt_model,
-                        features=RecognitionFeatures(
-                            enable_automatic_punctuation=(active_mode != "address_poi"),
-                        ),
+                        features=google_speech.RecognitionFeatures(enable_automatic_punctuation=(active_mode != "address_poi")),
                     )
-
-                    request = RecognizeRequest(
+                    request = google_speech.RecognizeRequest(
                         recognizer=f"projects/{google_project_id}/locations/global/recognizers/_",
                         config=config,
                         content=audio_content,
                     )
-
-                    # Google STT API 호출
                     response = google_stt_client.recognize(request=request)
-
-                    # 결과 추출
-                    transcript_text = ""
                     for result in response.results:
                         if len(result.alternatives) > 0:
                             transcript_text += result.alternatives[0].transcript + " "
-
                     transcript_text = transcript_text.strip()
+                except Exception as backup_e:
+                    logging.error(f"Backup recognition failed: {backup_e}")
+                    log_to_console(f"백업 인식 실패: {backup_e}")
 
-                    # API 호출 시간 측정 종료 및 레이턴시 계산
-                    api_end_time = time.time()
-                    api_latency = (api_end_time - api_start_time) * 1000
+            # --- 결과 처리 및 출력 ---
+            if transcript_text:
+                log_to_console("====== " + get_msg("recognition_result") + " ======")
+                # 현재 사용 중인 대화 모드 표시
+                mode_names = {"general": "일반 대화", "address": "주소", "poi": "장소", "address_poi": "주소+장소"}
+                mode_display_name = mode_names.get(active_mode, active_mode)
+                log_to_console(f"대화 모드: {mode_display_name}")
+                log_to_console("[원본] " + get_msg("recognized_text", transcript_text))
 
-                    original_text = transcript_text
+                # 텍스트 정리 (줄바꿈, 공백, 마침표)
+                text = transcript_text
+                text = re.sub(r'\s*(개행|엔터)\s*', '\\n', text)
+                text = text.strip().lstrip('.').strip()
+                lines = text.split('\\n')
+                text = "\\n".join([line.strip().lstrip('.').strip() for line in lines])
 
-                    # 원본 텍스트 로그 추가
-                    log_to_console("====== " + get_msg("recognition_result") + " ======")
-                    # 현재 사용 중인 대화 모드 표시
-                    mode_names = {
-                        "general": "일반 대화",
-                        "address": "주소",
-                        "poi": "장소",
-                        "address_poi": "주소+장소"
-                    }
-                    mode_display_name = mode_names.get(active_mode, active_mode)
-                    log_to_console(f"대화 모드: {mode_display_name}")
-                    log_to_console(get_msg("api_response_time", api_latency))
-                    log_to_console("[원본] " + get_msg("recognized_text", original_text))
-                    log_to_console(get_msg("text_length", len(original_text)))
+                log_to_console("=========================")
+                logging.info(f"[최종인식결과] {text}")
 
-                    # 텍스트 후처리 - 주소 형식 변환 (주소+POI 모드에서만 실행)
-                    if active_mode == "address_poi":
-                        text = original_text
-                        # text = process_address_format(original_text)
-                    else:
-                        text = original_text
+                # 클립보드 복사
+                if pyperclip:
+                    try:
+                        pyperclip.copy(text)
+                        log_to_console(get_msg("text_copied"))
+                    except Exception as clip_e:
+                        logging.error(f"Clipboard error: {clip_e}")
 
-                    # 변환된 텍스트가 원본과 다르면 변환 결과 표시
-                    if text != original_text:
-                        log_to_console("[변환] " + get_msg("recognized_text", text))
-                        log_to_console(get_msg("text_length", len(text)))
-
-                    log_to_console("=========================")
-                    logging.info(f"[인식결과] 원본 텍스트: {original_text}")
-                    logging.info(f"[인식결과] 변환 텍스트: {text}")
-
-                    # 텍스트 처리
-                    if text:
-
-                        # 1. "개행" 또는 "엔터" 및 주변 공백을 줄바꿈 문자로 변환 (정규식 사용)
-                        original_text_before_newline = text
-                        text = re.sub(r'\s*(개행|엔터)\s*', '\\n', text) # Regex replace
-
-                        # 변환 로그 (이전과 유사)
-                        if text != original_text_before_newline:
-                            log_to_console("특정 단어('개행', '엔터') 및 주변 공백을 줄바꿈 문자로 변환했습니다.")
-                            logging.info(f"[텍스트 변환] 완료. 변환된 텍스트: {text}")
-                        else:
-                            logging.info("[텍스트 변환] 변환할 단어('개행', '엔터') 없음")
-
-                        # 2. 전체 텍스트 앞뒤 공백/개행 제거 및 시작/끝 마침표 제거
-                        cleaned_text = text.strip()
-                        initial_cleaned_text = cleaned_text # 비교용
-                        if cleaned_text.startswith('.'):
-                            cleaned_text = cleaned_text[1:]
-                        if cleaned_text.endswith('.'):
-                            cleaned_text = cleaned_text[:-1]
-                        cleaned_text = cleaned_text.strip() # 마침표 제거 후 남을 수 있는 공백 재제거
-
-                        # 3. 줄 단위 추가 정리: 각 줄 시작의 '.' 및 공백 제거
-                        lines = cleaned_text.split('\\n')
-                        cleaned_lines = []
-                        text_changed_in_loop = False # 줄 단위 변경 추적
-
-                        for line in lines:
-                            processed_line = line.strip() # 각 줄의 앞뒤 공백 제거
-                            original_processed_line = processed_line
-                            if processed_line.startswith('.'):
-                                # 맨 앞 '.' 제거 및 뒤따르는 공백 제거
-                                processed_line = processed_line[1:].lstrip()
-
-                            cleaned_lines.append(processed_line)
-                            if processed_line != original_processed_line:
-                                text_changed_in_loop = True
-
-                        # 4. 최종 텍스트 재구성
-                        final_cleaned_text = "\\n".join(cleaned_lines)
-
-                        # 최종 변경 로그 및 결과 할당
-                        if final_cleaned_text != initial_cleaned_text or text_changed_in_loop:
-                             log_to_console("텍스트 앞/뒤 및 각 줄 시작의 불필요한 공백/마침표를 최종 정리했습니다.")
-                             log_to_console(f"최종 정리된 텍스트: {final_cleaned_text}")
-                             logging.info(f"[텍스트 최종 정리] 완료. 최종 텍스트: {final_cleaned_text}")
-                             text = final_cleaned_text # 최종 결과 사용
-                        elif cleaned_text != text.strip(): # Regex 변환 후 첫 strip에서만 변경된 경우
-                             log_to_console("텍스트 앞/뒤 공백/개행을 제거했습니다.")
-                             log_to_console(f"정리된 텍스트: {cleaned_text}")
-                             logging.info(f"[텍스트 정리] 앞/뒤 공백 제거 완료. 텍스트: {cleaned_text}")
-                             text = cleaned_text # 중간 결과 사용
-                        # else: 로그 불필요
-
-                        # 클립보드/붙여넣기 (최종 text 사용)
-                        clipboard_success = False
-                        if pyperclip:
-                            try:
-                                pyperclip.copy(text) # 최종 정리된 text 사용
-                                clipboard_success = True
-                                log_to_console(get_msg("text_copied"))
-                            except Exception as clip_e:
-                                logging.error(f"클립보드 복사 오류: {str(clip_e)}")
-                                log_to_console(get_msg("copy_error", str(clip_e)))
-
-                        # 붙여넣기 방법 1: 컨트롤러로 붙여넣기
-                        paste_success = False
-                        if Controller:
-                            try:
-                                time.sleep(0.2)
-                                keyboard = Controller()
-                                log_to_console(get_msg("attempting_paste"))
-
-                                keyboard.press(Key.ctrl)
-                                keyboard.press('v')
-                                keyboard.release('v')
-                                keyboard.release(Key.ctrl)
-                                paste_success = True
-                                log_to_console(get_msg("paste_complete"))
-
-                            except Exception as paste_e:
-                                logging.error(f"붙여넣기 오류: {str(paste_e)}")
-                                log_to_console(get_msg("paste_error", str(paste_e)))
-
-                                # 붙여넣기 실패 시 대체 방법으로 직접 텍스트 입력 시도
-                                try:
-                                    log_to_console(get_msg("attempting_direct_input"))
-                                    time.sleep(0.2)
-
-                                    # 각 문자를 하나씩 입력 시도
-                                    for char in text: # 최종 정리된 text 사용
-                                        try:
-                                            keyboard.type(char)
-                                            time.sleep(0.01)  # 약간의 지연
-                                        except:
-                                            pass
-
-                                    log_to_console(get_msg("direct_input_complete"))
-                                except Exception as direct_e:
-                                    logging.error(f"직접 텍스트 입력 오류: {str(direct_e)}")
-                                    log_to_console(get_msg("direct_input_error", str(direct_e)))
-
-                        # 최종 상태 보고
-                        if clipboard_success:
-                            log_to_console(get_msg("clipboard_success"))
-
-                        if not paste_success and not clipboard_success:
-                            log_to_console(get_msg("all_input_failed"))
-                            log_to_console(get_msg("manual_copy"))
-                            log_to_console(text)
-                    else:
-                        log_to_console(get_msg("no_text_recognized"))
-
-                except Exception as e:
-                    logging.error(f"Google STT API 오류: {str(e)}")
-                    log_to_console(get_msg("recognition_error", str(e)))
-
-                    # API 키 오류인지 확인
-                    error_msg = str(e).lower()
-                    if "api key" in error_msg or "apikey" in error_msg or "authentication" in error_msg or "인증" in error_msg:
-                        error_message = get_msg("api_key_invalid_long")
-                        log_to_console(error_message)
-
-                        # 바로 API 키 설정 창 표시 (메인 스레드에서 실행)
-                        if root:
-                            def show_error_and_settings():
-                                messagebox.showerror(get_msg("api_key_error"), error_message)
-                                show_api_key_dialog(required=True)
-
-                            root.after(100, show_error_and_settings)
-
+                # 자동 붙여넣기
+                if Controller:
+                    try:
+                        time.sleep(0.1)
+                        keyboard = Controller()
+                        log_to_console(get_msg("attempting_paste"))
+                        keyboard.press(Key.ctrl)
+                        keyboard.press('v')
+                        keyboard.release('v')
+                        keyboard.release(Key.ctrl)
+                        log_to_console(get_msg("paste_complete"))
+                    except Exception as paste_e:
+                        logging.error(f"Paste error: {paste_e}")
             else:
-                log_to_console(get_msg("openai_api_not_set"))
-                # Google Cloud 인증이 설정되지 않은 경우 설정 창 표시
-                if not google_stt_client and root:
+                # 결과가 없고 인증도 안 된 경우 설정창 표시
+                if not ensure_google_client() and root:
                     root.after(100, lambda: show_api_key_dialog(required=True))
+                else:
+                    log_to_console(get_msg("no_text_recognized"))
 
         except Exception as e:
             logging.error(f"오디오 처리 오류: {str(e)}")

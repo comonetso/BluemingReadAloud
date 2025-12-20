@@ -76,3 +76,12 @@ Google Cloud Speech-to-Text V2 API를 사용하여 실시간으로 음성을 텍
 ## 라이선스
 
 이 프로젝트는 MIT 라이선스로 제공됩니다.
+
+
+
+
+py whisperer.py
+
+py -m PyInstaller Yeogiaen_WhisperTyper.spec --clean -y
+
+py -m PyInstaller --onefile --windowed --icon=favicon.ico --add-data "favicon.ico;." --add-data "messages.py;." --add-data "README.md;." --add-data "README.KR.md;." --hidden-import "google.cloud.speech_v2" --hidden-import "grpc" --hidden-import "google.api_core" --name "Yeogiaen_STT_Typer" whisperer.py --clean -y
