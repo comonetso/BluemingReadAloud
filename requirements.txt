@@ -1,9 +1,11 @@
 sounddevice
 numpy
-openai
 google-cloud-speech
+google-cloud-texttospeech
 pynput
 soundfile
 pyperclip
-dotenv
+pystray
+Pillow
+requests
 pyinstaller

@@ -102,6 +102,13 @@ streaming_transcript = "" # 실시간 인식 최종 확정 결과 저장용
 latest_interim_transcript = "" # 실시간 인식 최신 중간 결과 저장용 (is_final 이전)
 streaming_thread = None   # 실시간 STT 스레드 저장용
 
+# Google Cloud TTS 관련 변수
+google_tts = None
+google_tts_client = None
+tts_hotkey_modifiers = {"ctrl": True, "shift": True, "alt": False} # 기본 TTS 단축키: Ctrl+Shift+S
+tts_hotkey_key = "S"
+is_speaking = False       # TTS 재생 중 플래그
+
 # 단축키 전역 변수 추가 (파일 상단 전역 변수 섹션에 추가)
 hotkey_modifiers = {"ctrl": True, "shift": True, "alt": True}  # 기본 단축키: Ctrl+Shift+Alt
 hotkey_key = None  # 추가 키 없음
@@ -251,6 +258,18 @@ def load_modules_async():
                 google_stt_client = google_speech.SpeechClient.from_service_account_file(
                     google_credentials_path
                 )
+
+                # Google Cloud TTS 모듈 및 클라이언트 초기화
+                try:
+                    from google.cloud import texttospeech
+                    global google_tts, google_tts_client
+                    google_tts = texttospeech
+                    google_tts_client = google_tts.TextToSpeechClient.from_service_account_file(
+                        google_credentials_path
+                    )
+                    logging.info("Google Cloud TTS 클라이언트 초기화 완료")
+                except Exception as tts_e:
+                    logging.error(f"Google Cloud TTS 초기화 실패: {tts_e}")
 
                 # 클래스 참조 로드
                 global StreamingRecognizeRequest, StreamingRecognitionConfig, RecognitionConfig
@@ -574,6 +593,15 @@ def main():
                         google_project_id = creds_data.get('project_id')
                     google_stt_client = google_speech.SpeechClient.from_service_account_file(google_credentials_path)
                     log_to_console(f"Google Cloud STT 클라이언트 초기화 완료 (프로젝트: {google_project_id})")
+
+                    # TTS 클라이언트도 초기화
+                    try:
+                        from google.cloud import texttospeech
+                        global google_tts, google_tts_client
+                        google_tts = texttospeech
+                        google_tts_client = google_tts.TextToSpeechClient.from_service_account_file(google_credentials_path)
+                    except:
+                        pass
                 elif google_stt_client:
                     log_to_console("Google Cloud 인증 로드 완료")
             except Exception as e:
@@ -757,6 +785,34 @@ def setup_keyboard_listener():
                     else:
                         start_recording()
                     recording_started_with_combo = True
+                    return True
+
+            # TTS 단축키 확인 (녹음 중이 아닐 때만)
+            if not recording and not is_speaking:
+                tts_modifier_match = (
+                    (not tts_hotkey_modifiers.get("ctrl", False) or ctrl_pressed) and
+                    (not tts_hotkey_modifiers.get("shift", False) or shift_pressed) and
+                    (not tts_hotkey_modifiers.get("alt", False) or alt_pressed)
+                )
+
+                tts_key_match = False
+                if tts_hotkey_key:
+                    if isinstance(key, KeyCode) and key.char:
+                        # Ctrl이 눌린 상태에서 문자 키 처리
+                        key_char = key.char
+                        if ctrl_pressed and len(key_char) == 1 and ord(key_char) < 32:
+                            key_char = chr(ord(key_char) + 64)
+                        tts_key_match = key_char.upper() == tts_hotkey_key.upper()
+                    elif key:
+                        key_str = str(key).replace('Key.', '')
+                        tts_key_match = key_str.upper() == tts_hotkey_key.upper()
+
+                if tts_modifier_match and tts_key_match:
+                    logging.info("TTS 읽기 단축키 감지됨")
+                    if root:
+                        root.after(10, read_selected_text)
+                    else:
+                        read_selected_text()
                     return True
 
         except Exception as e:
@@ -2242,10 +2298,14 @@ def stop_recording():
 
                 # 텍스트 정리 (줄바꿈, 공백, 마침표)
                 text = transcript_text
+                # '엔터' 또는 '개행'을 실제 줄바꿈으로 변경
                 text = re.sub(r'\s*(개행|엔터)\s*', '\\n', text)
-                text = text.strip().lstrip('.').strip()
+
+                # 각 줄에 대해 앞뒤 공백 및 마침표(.) 제거
+                # 구글 STT가 문장 끝에 자동으로 찍는 마침표가 줄바꿈과 겹칠 때 지저분해지는 문제 해결
+                text = text.strip().strip('.').strip()
                 lines = text.split('\\n')
-                text = "\\n".join([line.strip().lstrip('.').strip() for line in lines])
+                text = "\\n".join([line.strip().strip('.').strip() for line in lines])
 
                 log_to_console("=========================")
                 logging.info(f"[최종인식결과] {text}")
@@ -2360,57 +2420,124 @@ def process_address_format(text):
         if total_value > 0 and len(full_match) > 0:
             text = text.replace(full_match, str(total_value), 1)
 
-    # 개별 한글 숫자 변환은 제거함 - '사랑해요'가 '4랑해요'로 변환되는 문제를 방지
-    # 연속된 숫자 발음만 처리하도록 수정
-    # for word, number in number_words.items():
-    #    text = re.sub(r'\b' + word + r'\b', number, text)
-
-    # 3. 연속된 한글 숫자 발음 패턴 처리
-    # 예: 사사오이에사사 -> 445244
-    # 최소 두 개 이상의 숫자 발음이 연속될 때만 변환하도록 수정 (예: '사랑해요'의 '사'는 변환하지 않음)
+    # 3. 연속된 한글 숫자 발음 패턴 처리 (예: 사사오이에사사 -> 445244)
     han_num_pattern = r'(일|이|삼|사|오|육|륙|칠|팔|구|영|하나|둘|셋|넷|다섯|여섯|일곱|여덟|아홉)(일|이|삼|사|오|육|륙|칠|팔|구|영|하나|둘|셋|넷|다섯|여섯|일곱|여덟|아홉)+'
 
-    # 한글 숫자 발음의 연속된 패턴을 찾아서 처리
     han_num_matches = re.finditer(han_num_pattern, text)
     for match in han_num_matches:
         han_nums = match.group(0)
-        # 각 발음을 숫자로 변환
         nums = ''
-        for i in range(0, len(han_nums), 1):
-            if i < len(han_nums):
-                char = han_nums[i]
-                if char in number_words:
-                    nums += number_words[char]
-
-        # 원본 한글 숫자 발음을 변환된 숫자로 교체
+        for char in han_nums:
+            if char in number_words:
+                nums += number_words[char]
         if nums:
             text = text.replace(han_nums, nums, 1)
 
     # 주소 구분자를 하이픈(-)으로 변환
     address_separators = ['의', '에', '다시', '데시', '데쉬', '대시', '대쉬']
 
-    # 각 구분자에 대해 정규표현식 생성 및 적용
     for separator in address_separators:
-        # 구분자 앞에 공백이 없는 경우
         text = re.sub(r'(\d+)' + separator + r'\s*(\d+)', r'\1-\2', text)
-        # 구분자 앞에 공백이 있는 경우
         text = re.sub(r'(\d+)\s+' + separator + r'\s*(\d+)', r'\1-\2', text)
-        # 구분자 앞에 공백이 있고 뒤에도 공백이 있는 경우
         text = re.sub(r'(\d+)\s+' + separator + r'\s+(\d+)', r'\1-\2', text)
 
     # 연속된 숫자 사이의 공백 제거 (예: 1 9 5 4 -> 1954)
     text = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
 
-    # 숫자 사이의 콤마 제거 (예: 4, 4, 5, 2, 4, 4 -> 445244)
+    # 숫자 사이의 콤마 제거
     text = re.sub(r'(\d),\s*(\d)', r'\1\2', text)
 
-    # 추가 정리: 주소 형식에서 자주 사용되는 패턴 처리
-    text = re.sub(r'(\d+)\s*번\s*지', r'\1번지', text)  # 예: 123 번 지 -> 123번지
+    # 주소 형식에서 자주 사용되는 패턴 처리
+    text = re.sub(r'(\d+)\s*번\s*지', r'\1번지', text)
 
-    # 로그 추가
     logging.info(f"주소 형식 변환 결과: {text}")
-
     return text
+
+def speak_text(text):
+    """텍스트를 음성으로 변환하여 재생합니다."""
+    global google_tts, google_tts_client, is_speaking
+
+    if not text or not google_tts_client:
+        return
+
+    def _speak():
+        global is_speaking
+        try:
+            is_speaking = True
+            log_to_console(f"읽어주는 중: {text[:30]}...")
+
+            # 입력 텍스트 설정
+            synthesis_input = google_tts.SynthesisInput(text=text)
+
+            # 보이스 설정 (한국어 고품질 WaveNet)
+            voice = google_tts.VoiceSelectionParams(
+                language_code="ko-KR",
+                name="ko-KR-Wavenet-A"
+            )
+
+            audio_config = google_tts.AudioConfig(
+                audio_encoding=google_tts.AudioEncoding.LINEAR16,
+                sample_rate_hertz=24000
+            )
+
+            response = google_tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+
+            import numpy as np
+            import sounddevice as sd
+            # WAV 헤더(44바이트)를 제외하고 numpy 배열로 변환
+            audio_data = np.frombuffer(response.audio_content[44:], dtype=np.int16)
+
+            sd.play(audio_data, 24000)
+            sd.wait()
+
+        except Exception as e:
+            logging.error(f"TTS 재생 오류: {e}")
+            log_to_console(f"TTS 재생 오류: {str(e)}")
+        finally:
+            is_speaking = False
+
+    threading.Thread(target=_speak, daemon=True).start()
+
+def read_selected_text():
+    """선택된 텍스트를 읽어옵니다. (Ctrl+C 트릭 사용)"""
+    global Controller, Key, pyperclip
+
+    if not Controller:
+        try:
+            from pynput.keyboard import Controller, Key
+        except:
+            return
+
+    try:
+        # 현재 클립보드 백업
+        old_clipboard = ""
+        try:
+            old_clipboard = pyperclip.paste()
+        except:
+            pass
+
+        # Ctrl+C 실행
+        keyboard = Controller()
+        keyboard.press(Key.ctrl)
+        keyboard.press('c')
+        keyboard.release('c')
+        keyboard.release(Key.ctrl)
+
+        # 클립보드 업데이트 대기
+        time.sleep(0.3)
+
+        # 새로운 클립보드 내용 확인
+        new_text = pyperclip.paste()
+
+        if new_text and (new_text != old_clipboard or len(new_text) > 0):
+            speak_text(new_text)
+        else:
+            log_to_console("읽을 텍스트가 선택되지 않았거나 복사에 실패했습니다.")
+
+    except Exception as e:
+        logging.error(f"선택 영역 읽기 오류: {e}")
 
 def extract_readme_files():
     """README 파일을 실행 파일이 있는 디렉토리에 추출합니다."""
