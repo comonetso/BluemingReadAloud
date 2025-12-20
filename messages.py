@@ -357,6 +357,30 @@ messages = {
     "google_credential_updated": {
         "ko": "Google Cloud 인증 정보가 업데이트되었습니다.",
         "en": "Google Cloud credentials updated."
+    },
+    "set_hotkey": {
+        "ko": "녹음 단축키 설정",
+        "en": "STT Hotkey Settings"
+    },
+    "set_tts_hotkey": {
+        "ko": "읽어주기 단축키 설정",
+        "en": "TTS Hotkey Settings"
+    },
+    "hotkey_updated": {
+        "ko": "녹음 단축키가 업데이트되었습니다.",
+        "en": "STT hotkey updated."
+    },
+    "tts_hotkey_updated": {
+        "ko": "읽어주기 단축키가 업데이트되었습니다.",
+        "en": "TTS hotkey updated."
+    },
+    "set_hotkey_title": {
+        "ko": "녹음 단축키 설정",
+        "en": "STT Hotkey Configuration"
+    },
+    "set_tts_hotkey_title": {
+        "ko": "읽어주기 단축키 설정",
+        "en": "TTS Hotkey Configuration"
     }
 }
 

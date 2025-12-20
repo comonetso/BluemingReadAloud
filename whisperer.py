@@ -105,9 +105,27 @@ streaming_thread = None   # 실시간 STT 스레드 저장용
 # Google Cloud TTS 관련 변수
 google_tts = None
 google_tts_client = None
-tts_hotkey_modifiers = {"ctrl": True, "shift": True, "alt": False} # 기본 TTS 단축키: Ctrl+Shift+S
-tts_hotkey_key = "S"
+tts_hotkey_modifiers = {"ctrl": True, "shift": False, "alt": True} # 기본 TTS 단축키: Ctrl+Alt+D
+tts_hotkey_key = "D"
 is_speaking = False       # TTS 재생 중 플래그
+tts_voice_name = "ko-KR-Wavenet-A"  # 기본 음성 모델
+tts_speaking_rate = 1.0   # 재생 속도 (0.25 ~ 4.0, 기본 1.0)
+current_audio_stream = None  # 현재 재생 중인 오디오 스트림
+
+# 사용 가능한 한국어 TTS 음성 목록 (이름, 성별, 유형, 설명)
+KOREAN_VOICES = [
+    ("ko-KR-Wavenet-A", "여성", "WaveNet", "밝고 친근한 여성 목소리"),
+    ("ko-KR-Wavenet-B", "여성", "WaveNet", "부드럽고 차분한 여성 목소리"),
+    ("ko-KR-Wavenet-C", "남성", "WaveNet", "신뢰감 있는 남성 목소리"),
+    ("ko-KR-Wavenet-D", "남성", "WaveNet", "젊고 활기찬 남성 목소리"),
+    ("ko-KR-Neural2-A", "여성", "Neural2", "자연스러운 여성 목소리"),
+    ("ko-KR-Neural2-B", "여성", "Neural2", "편안한 여성 목소리"),
+    ("ko-KR-Neural2-C", "남성", "Neural2", "전문적인 남성 목소리"),
+    ("ko-KR-Standard-A", "여성", "Standard", "기본 여성 목소리 (저비용)"),
+    ("ko-KR-Standard-B", "여성", "Standard", "표준 여성 목소리 (저비용)"),
+    ("ko-KR-Standard-C", "남성", "Standard", "기본 남성 목소리 (저비용)"),
+    ("ko-KR-Standard-D", "남성", "Standard", "표준 남성 목소리 (저비용)"),
+]
 
 # 단축키 전역 변수 추가 (파일 상단 전역 변수 섹션에 추가)
 hotkey_modifiers = {"ctrl": True, "shift": True, "alt": True}  # 기본 단축키: Ctrl+Shift+Alt
@@ -260,16 +278,18 @@ def load_modules_async():
                 )
 
                 # Google Cloud TTS 모듈 및 클라이언트 초기화
+                global google_tts, google_tts_client
                 try:
                     from google.cloud import texttospeech
-                    global google_tts, google_tts_client
                     google_tts = texttospeech
                     google_tts_client = google_tts.TextToSpeechClient.from_service_account_file(
                         google_credentials_path
                     )
                     logging.info("Google Cloud TTS 클라이언트 초기화 완료")
+                    print("[TTS] Google Cloud TTS 클라이언트 초기화 성공!")
                 except Exception as tts_e:
                     logging.error(f"Google Cloud TTS 초기화 실패: {tts_e}")
+                    print(f"[TTS] Google Cloud TTS 초기화 실패: {tts_e}")
 
                 # 클래스 참조 로드
                 global StreamingRecognizeRequest, StreamingRecognitionConfig, RecognitionConfig
@@ -477,7 +497,7 @@ def setup_logging():
 
     # 기본 로거 설정
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG, # DEBUG로 변경하여 모든 로그 확인
         format=log_format,
         handlers=[
             logging.FileHandler(log_file, encoding='utf-8'),
@@ -583,7 +603,7 @@ def main():
         log_to_console("Google Cloud 인증 확인 중...")
 
         # 설정에서 경로를 이미 로드했으므로, 클라이언트 초기화 시도
-        global google_stt_client, google_project_id
+        global google_stt_client, google_project_id, google_tts, google_tts_client
         if google_credentials_path and os.path.exists(google_credentials_path):
             try:
                 # 클라이언트가 아직 초기화 안 됐으면 초기화
@@ -595,15 +615,30 @@ def main():
                     log_to_console(f"Google Cloud STT 클라이언트 초기화 완료 (프로젝트: {google_project_id})")
 
                     # TTS 클라이언트도 초기화
+                    log_to_console("[TTS] TTS 클라이언트 초기화 시도 중...")
                     try:
                         from google.cloud import texttospeech
-                        global google_tts, google_tts_client
                         google_tts = texttospeech
                         google_tts_client = google_tts.TextToSpeechClient.from_service_account_file(google_credentials_path)
-                    except:
-                        pass
+                        log_to_console("[TTS] Google Cloud TTS 클라이언트 초기화 성공!")
+                        logging.info("Google Cloud TTS 클라이언트 초기화 완료")
+                    except Exception as tts_err:
+                        log_to_console(f"[TTS] TTS 클라이언트 초기화 실패: {tts_err}")
+                        logging.error(f"TTS 클라이언트 초기화 실패: {tts_err}")
                 elif google_stt_client:
                     log_to_console("Google Cloud 인증 로드 완료")
+                    # STT는 있는데 TTS가 없으면 TTS만 초기화
+                    if not google_tts_client:
+                        log_to_console("[TTS] TTS 클라이언트 초기화 시도 중...")
+                        try:
+                            from google.cloud import texttospeech
+                            google_tts = texttospeech
+                            google_tts_client = google_tts.TextToSpeechClient.from_service_account_file(google_credentials_path)
+                            log_to_console("[TTS] Google Cloud TTS 클라이언트 초기화 성공!")
+                            logging.info("Google Cloud TTS 클라이언트 초기화 완료")
+                        except Exception as tts_err:
+                            log_to_console(f"[TTS] TTS 클라이언트 초기화 실패: {tts_err}")
+                            logging.error(f"TTS 클라이언트 초기화 실패: {tts_err}")
             except Exception as e:
                 logging.error(f"Google Cloud 인증 오류: {str(e)}")
                 log_to_console(f"Google Cloud 인증 오류: {str(e)}")
@@ -705,6 +740,32 @@ def load_modules():
         has_pyaudio = False
         print("PyAudio 모듈 없음, 기본 오디오 시스템 사용")
 
+    # Google Cloud STT V2 모듈 로딩
+    global google_speech, google_stt_client, google_credentials_path, google_project_id
+    global google_tts, google_tts_client
+    global StreamingRecognizeRequest, StreamingRecognitionConfig, RecognitionConfig
+    global RecognitionFeatures, StreamingRecognitionFeatures, AutoDetectDecodingConfig, RecognizeRequest
+    try:
+        from google.cloud import speech_v2 as google_speech_module
+        google_speech = google_speech_module
+
+        # 클래스 참조들도 로드
+        if google_speech:
+            StreamingRecognizeRequest = google_speech.StreamingRecognizeRequest
+            StreamingRecognitionConfig = google_speech.StreamingRecognitionConfig
+            RecognitionConfig = google_speech.RecognitionConfig
+            RecognitionFeatures = google_speech.RecognitionFeatures
+            StreamingRecognitionFeatures = google_speech.StreamingRecognitionFeatures
+            AutoDetectDecodingConfig = google_speech.AutoDetectDecodingConfig
+            RecognizeRequest = google_speech.RecognizeRequest
+            print("Google Cloud Speech 클래스 참조 로드 완료")
+
+        print("Google Cloud Speech V2 모듈 로딩 완료")
+        logging.info("Google Cloud Speech V2 모듈 로딩 완료")
+    except ImportError as e:
+        print(f"Google Cloud Speech 모듈 로딩 실패: {str(e)}")
+        logging.warning(f"Google Cloud Speech 모듈 없음: {str(e)}")
+
 # 키보드 리스너 설정
 def setup_keyboard_listener():
     """키보드 리스너 설정"""
@@ -739,8 +800,13 @@ def setup_keyboard_listener():
                 alt_pressed = True
                 logging.debug("Alt 키 눌림")
 
+            # 특정 키 조합 로그 (콘솔에도 출력하여 확인 유도)
+            if ctrl_pressed or alt_pressed:
+                logging.info(f"조합 키 입력 감지: {key} (Ctrl={ctrl_pressed}, Alt={alt_pressed}, Shift={shift_pressed})")
+
             logging.debug(f"현재 키 상태: Ctrl={ctrl_pressed}, Shift={shift_pressed}, Alt={alt_pressed}")
-            logging.debug(f"설정된 단축키: 수정자={hotkey_modifiers}, 키={hotkey_key}")
+            logging.debug(f"설정된 STT 단축키: 수정자={hotkey_modifiers}, 키={hotkey_key}")
+            logging.debug(f"설정된 TTS 단축키: 수정자={tts_hotkey_modifiers}, 키={tts_hotkey_key}")
 
             if not recording:
                 # If no 사용자 정의 단축키가 설정되어 있으면 기본 단축키 (Ctrl+Shift+Alt) 사용
@@ -763,17 +829,25 @@ def setup_keyboard_listener():
 
                 key_match = False
                 if hotkey_key:
-                    if isinstance(key, KeyCode) and key.char:
+                    if isinstance(key, KeyCode):
+                        # pynput KeyCode handling (char might be control char)
                         key_char = key.char
-                        # If ctrl is pressed and key_char is a control character, convert it to its corresponding letter
-                        if ctrl_pressed and len(key_char) == 1 and ord(key_char) < 32:
-                            key_char = chr(ord(key_char) + 64)
-                        key_match = key_char.upper() == hotkey_key.upper()
-                        logging.debug("키 비교: {} vs {} = {}".format(key_char.upper(), hotkey_key.upper(), key_match))
+                        if key_char:
+                            # Ctrl+Key 처리
+                            if ctrl_pressed and len(key_char) == 1 and ord(key_char) < 32:
+                                key_char = chr(ord(key_char) + 64)
+                            key_match = key_char.upper() == hotkey_key.upper()
+                        elif key.vk is not None:
+                            # VK 코드로 문자 키 확인 (D=68, S=83 등)
+                            try:
+                                # A-Z는 VK 65-90
+                                if 65 <= key.vk <= 90:
+                                    key_match = chr(key.vk).upper() == hotkey_key.upper()
+                            except:
+                                pass
                     elif key:
                         key_str = str(key).replace('Key.', '')
                         key_match = key_str.upper() == hotkey_key.upper()
-                        logging.debug("특수키 비교: {} vs {} = {}".format(key_str.upper(), hotkey_key.upper(), key_match))
                 else:
                     key_match = True
 
@@ -797,12 +871,18 @@ def setup_keyboard_listener():
 
                 tts_key_match = False
                 if tts_hotkey_key:
-                    if isinstance(key, KeyCode) and key.char:
-                        # Ctrl이 눌린 상태에서 문자 키 처리
+                    if isinstance(key, KeyCode):
                         key_char = key.char
-                        if ctrl_pressed and len(key_char) == 1 and ord(key_char) < 32:
-                            key_char = chr(ord(key_char) + 64)
-                        tts_key_match = key_char.upper() == tts_hotkey_key.upper()
+                        if key_char:
+                            if ctrl_pressed and len(key_char) == 1 and ord(key_char) < 32:
+                                key_char = chr(ord(key_char) + 64)
+                            tts_key_match = key_char.upper() == tts_hotkey_key.upper()
+                        elif key.vk is not None:
+                            try:
+                                if 65 <= key.vk <= 90:
+                                    tts_key_match = chr(key.vk).upper() == tts_hotkey_key.upper()
+                            except:
+                                pass
                     elif key:
                         key_str = str(key).replace('Key.', '')
                         tts_key_match = key_str.upper() == tts_hotkey_key.upper()
@@ -898,6 +978,10 @@ def save_settings():
             "hotkey": {
                 "modifiers": hotkey_modifiers,
                 "key": hotkey_key
+            },
+            "tts_hotkey": {
+                "modifiers": tts_hotkey_modifiers,
+                "key": tts_hotkey_key
             }
         }
         print(f"저장할 설정: {settings}")
@@ -932,6 +1016,13 @@ def load_settings():
                         hotkey_modifiers = settings["hotkey"]["modifiers"]
                     if "key" in settings["hotkey"]:
                         hotkey_key = settings["hotkey"]["key"]
+
+                # TTS 단축키 로드
+                if "tts_hotkey" in settings:
+                    if "modifiers" in settings["tts_hotkey"]:
+                        tts_hotkey_modifiers = settings["tts_hotkey"]["modifiers"]
+                    if "key" in settings["tts_hotkey"]:
+                        tts_hotkey_key = settings["tts_hotkey"]["key"]
 
                 # Google Cloud 인증 파일 경로 로드
                 if "google_credentials_path" in settings:
@@ -1326,8 +1417,12 @@ def setup_tray_icon():
 
         # 단축키 설정 함수 추가 (언어 변경 함수 아래에 추가)
         def set_hotkey(icon, item):
-            show_hotkey_dialog()
+            show_hotkey_dialog(mode="stt")
             log_to_console(get_msg("hotkey_updated", "단축키가 업데이트되었습니다."))
+
+        def set_tts_hotkey(icon, item):
+            show_hotkey_dialog(mode="tts")
+            log_to_console(get_msg("tts_hotkey_updated", "읽어주기 단축키가 업데이트되었습니다."))
 
         def update_tray_menu():
             # 트레이 아이콘 메뉴 업데이트
@@ -1336,7 +1431,8 @@ def setup_tray_icon():
                 pystray.MenuItem(get_msg("open_readme"), open_readme_file),
                 pystray.MenuItem(get_msg("open_console"), open_console),
                 pystray.MenuItem(get_msg("google_credential_setting"), set_google_credentials),
-                pystray.MenuItem(get_msg("set_hotkey"), set_hotkey),
+                pystray.MenuItem(get_msg("set_hotkey", "녹음 단축키 설정"), set_hotkey),
+                pystray.MenuItem(get_msg("set_tts_hotkey", "읽어주기 단축키 설정"), set_tts_hotkey),
                 # 언어 설정 하위 메뉴 추가
                 pystray.MenuItem(
                     get_msg("language_menu"),
@@ -1637,26 +1733,36 @@ def show_api_key_error_dialog(error_message):
     dialog.wait_window()
 
 # 단축키 설정 대화상자 함수 추가 (API 키 대화 상자 다음에 추가)
-def show_hotkey_dialog():
+def show_hotkey_dialog(mode="stt"):
     """단축키 변경 대화 상자를 표시합니다."""
-    global hotkey_modifiers, hotkey_key, Listener, Key, KeyCode
+    global hotkey_modifiers, hotkey_key, tts_hotkey_modifiers, tts_hotkey_key, Listener, Key, KeyCode
+
+    # 현재 설정할 변수 참조 설정
+    if mode == "stt":
+        current_modifiers = hotkey_modifiers
+        current_key = hotkey_key
+        title = get_msg("set_hotkey_title", "녹음 단축키 설정")
+    else:
+        current_modifiers = tts_hotkey_modifiers
+        current_key = tts_hotkey_key
+        title = get_msg("set_tts_hotkey_title", "읽어주기 단축키 설정")
 
     # 현재 단축키 문자열 생성
-    def get_hotkey_string():
+    def get_hotkey_string_local(modifiers, key_val):
         parts = []
-        if hotkey_modifiers.get("ctrl", False):
+        if modifiers.get("ctrl", False):
             parts.append("Ctrl")
-        if hotkey_modifiers.get("shift", False):
+        if modifiers.get("shift", False):
             parts.append("Shift")
-        if hotkey_modifiers.get("alt", False):
+        if modifiers.get("alt", False):
             parts.append("Alt")
-        if hotkey_key:
-            parts.append(str(hotkey_key).upper())
+        if key_val:
+            parts.append(str(key_val).upper())
         return "+".join(parts)
 
     # 완전히 독립적인 모달 대화 상자 생성
     dialog = tk.Toplevel()
-    dialog.title(get_msg("set_hotkey_title", "단축키 설정"))
+    dialog.title(title)
     dialog.geometry("450x300")
     dialog.resizable(False, False)
 
@@ -1681,17 +1787,17 @@ def show_hotkey_dialog():
     modifiers_frame.pack(fill=tk.X, pady=5)
 
     # Ctrl 체크박스
-    ctrl_var = tk.BooleanVar(value=hotkey_modifiers.get("ctrl", True))
+    ctrl_var = tk.BooleanVar(value=current_modifiers.get("ctrl", True))
     ctrl_cb = tk.Checkbutton(modifiers_frame, text="Ctrl", variable=ctrl_var, font=("Segoe UI", 10))
     ctrl_cb.pack(side=tk.LEFT, padx=10)
 
     # Shift 체크박스
-    shift_var = tk.BooleanVar(value=hotkey_modifiers.get("shift", True))
+    shift_var = tk.BooleanVar(value=current_modifiers.get("shift", True))
     shift_cb = tk.Checkbutton(modifiers_frame, text="Shift", variable=shift_var, font=("Segoe UI", 10))
     shift_cb.pack(side=tk.LEFT, padx=10)
 
     # Alt 체크박스
-    alt_var = tk.BooleanVar(value=hotkey_modifiers.get("alt", True))
+    alt_var = tk.BooleanVar(value=current_modifiers.get("alt", True))
     alt_cb = tk.Checkbutton(modifiers_frame, text="Alt", variable=alt_var, font=("Segoe UI", 10))
     alt_cb.pack(side=tk.LEFT, padx=10)
 
@@ -1704,7 +1810,7 @@ def show_hotkey_dialog():
              font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 10))
 
     # 추가 키 입력 필드 (읽기 전용)
-    key_var = tk.StringVar(value=str(hotkey_key) if hotkey_key else "")
+    key_var = tk.StringVar(value=str(current_key) if current_key else "")
     key_entry = tk.Entry(key_frame, textvariable=key_var, width=10, font=("Segoe UI", 10),
                          state="readonly", bg="white")
     key_entry.pack(side=tk.LEFT)
@@ -1799,7 +1905,7 @@ def show_hotkey_dialog():
     tk.Label(current_hotkey_frame, text=get_msg("current_hotkey", "현재 단축키:"),
              font=("Segoe UI", 10)).pack(side=tk.LEFT)
 
-    current_hotkey_label = tk.Label(current_hotkey_frame, text=get_hotkey_string(),
+    current_hotkey_label = tk.Label(current_hotkey_frame, text=get_hotkey_string_local(current_modifiers, current_key),
                                    font=("Segoe UI", 10, "bold"))
     current_hotkey_label.pack(side=tk.LEFT, padx=10)
 
@@ -1813,7 +1919,7 @@ def show_hotkey_dialog():
 
     # 저장 함수
     def save_hotkey():
-        global hotkey_modifiers, hotkey_key
+        global hotkey_modifiers, hotkey_key, tts_hotkey_modifiers, tts_hotkey_key
 
         # 최소한 하나의 수정자 키 필요
         if not (ctrl_var.get() or shift_var.get() or alt_var.get()):
@@ -1821,19 +1927,25 @@ def show_hotkey_dialog():
                                fg="red")
             return
 
-        # 수정자 키 저장
-        hotkey_modifiers = {
+        # 설정값 준비
+        new_modifiers = {
             "ctrl": ctrl_var.get(),
             "shift": shift_var.get(),
             "alt": alt_var.get()
         }
-
-        # 추가 키 저장
         key_text = key_var.get().strip()
-        hotkey_key = key_text if key_text else None
+        new_key = key_text if key_text else None
+
+        # 모드에 따라 전역 변수 업데이트
+        if mode == "stt":
+            hotkey_modifiers = new_modifiers
+            hotkey_key = new_key
+        else:
+            tts_hotkey_modifiers = new_modifiers
+            tts_hotkey_key = new_key
 
         # 저장된 값 로깅
-        logging.info(f"저장되는 단축키 값: 수정자={hotkey_modifiers}, 키={hotkey_key}")
+        logging.info(f"저장되는 {mode} 단축키 값: 수정자={new_modifiers}, 키={new_key}")
         print(f"=== 단축키 저장 시작 ===")
         print(f"저장할 단축키: 수정자={hotkey_modifiers}, 키={hotkey_key}")
 
@@ -1853,11 +1965,11 @@ def show_hotkey_dialog():
         result_label.config(text=get_msg("hotkey_saved", "단축키가 저장되었습니다."), fg="green")
 
         # 현재 단축키 표시 업데이트
-        current_hotkey_label.config(text=get_hotkey_string())
+        current_hotkey_label.config(text=get_hotkey_string_local(new_modifiers, new_key))
 
         # 단축키 변경 로그 출력
-        hotkey_str = get_hotkey_string()
-        log_msg = f"단축키가 변경되었습니다: {hotkey_str}"
+        hotkey_str = get_hotkey_string_local(new_modifiers, new_key)
+        log_msg = f"{'녹음' if mode == 'stt' else '읽어주기'} 단축키가 변경되었습니다: {hotkey_str}"
         logging.info(log_msg)
         log_to_console(log_msg)
         print(log_msg)
@@ -2457,60 +2569,112 @@ def speak_text(text):
     """텍스트를 음성으로 변환하여 재생합니다."""
     global google_tts, google_tts_client, is_speaking
 
-    if not text or not google_tts_client:
+    log_to_console(f"[TTS] speak_text 호출됨 (텍스트 길이: {len(text) if text else 0})")
+
+    if not text:
+        log_to_console("[TTS] 오류: 텍스트가 비어있습니다.")
+        return
+
+    if not google_tts_client:
+        log_to_console("[TTS] 오류: TTS 클라이언트가 초기화되지 않았습니다.")
+        logging.error("TTS 클라이언트가 초기화되지 않음")
+        return
+
+    if not google_tts:
+        log_to_console("[TTS] 오류: TTS 모듈이 로드되지 않았습니다.")
+        logging.error("TTS 모듈이 로드되지 않음")
         return
 
     def _speak():
         global is_speaking
         try:
             is_speaking = True
-            log_to_console(f"읽어주는 중: {text[:30]}...")
+
+            # 비프음으로 TTS 시작 알림
+            try:
+                import winsound
+                winsound.Beep(800, 150)  # 800Hz, 150ms
+                log_to_console("[TTS] 비프음 재생 완료")
+            except Exception as beep_err:
+                logging.warning(f"비프음 재생 실패: {beep_err}")
+
+            log_to_console(f"[TTS] 음성 합성 시작: '{text[:50]}...'")
 
             # 입력 텍스트 설정
+            log_to_console("[TTS] SynthesisInput 생성 중...")
             synthesis_input = google_tts.SynthesisInput(text=text)
 
             # 보이스 설정 (한국어 고품질 WaveNet)
+            log_to_console("[TTS] VoiceSelectionParams 설정 중...")
             voice = google_tts.VoiceSelectionParams(
                 language_code="ko-KR",
                 name="ko-KR-Wavenet-A"
             )
 
+            log_to_console("[TTS] AudioConfig 설정 중...")
             audio_config = google_tts.AudioConfig(
                 audio_encoding=google_tts.AudioEncoding.LINEAR16,
                 sample_rate_hertz=24000
             )
 
+            log_to_console("[TTS] Google TTS API 호출 중...")
             response = google_tts_client.synthesize_speech(
                 input=synthesis_input, voice=voice, audio_config=audio_config
             )
 
+            audio_content = response.audio_content
+            log_to_console(f"[TTS] 오디오 데이터 수신 완료 ({len(audio_content)} bytes)")
+
+            if len(audio_content) <= 44:
+                log_to_console("[TTS] 오류: 오디오 데이터가 너무 작습니다.")
+                return
+
             import numpy as np
             import sounddevice as sd
+
             # WAV 헤더(44바이트)를 제외하고 numpy 배열로 변환
-            audio_data = np.frombuffer(response.audio_content[44:], dtype=np.int16)
+            audio_data = np.frombuffer(audio_content[44:], dtype=np.int16)
+            log_to_console(f"[TTS] 오디오 재생 시작 (샘플 수: {len(audio_data)})")
 
             sd.play(audio_data, 24000)
             sd.wait()
 
+            log_to_console("[TTS] 음성 재생 완료")
+
         except Exception as e:
-            logging.error(f"TTS 재생 오류: {e}")
-            log_to_console(f"TTS 재생 오류: {str(e)}")
+            import traceback
+            error_msg = f"TTS 재생 오류: {e}"
+            logging.error(error_msg)
+            logging.error(traceback.format_exc())
+            log_to_console(f"[TTS] {error_msg}")
         finally:
             is_speaking = False
+            log_to_console("[TTS] speak_text 종료")
 
     threading.Thread(target=_speak, daemon=True).start()
 
 def read_selected_text():
     """선택된 텍스트를 읽어옵니다. (Ctrl+C 트릭 사용)"""
-    global Controller, Key, pyperclip
+    global Controller, Key, pyperclip, ctrl_pressed, alt_pressed, shift_pressed
 
     if not Controller:
         try:
             from pynput.keyboard import Controller, Key
         except:
+            log_to_console("pynput 모듈을 로드할 수 없습니다.")
             return
 
     try:
+        keyboard = Controller()
+
+        # 먼저 현재 눌린 수정자 키들을 해제 (Ctrl+Alt+D 상태에서 호출되므로)
+        keyboard.release(Key.ctrl)
+        keyboard.release(Key.alt)
+        keyboard.release(Key.shift)
+
+        # 키 해제 후 잠시 대기
+        time.sleep(0.1)
+
         # 현재 클립보드 백업
         old_clipboard = ""
         try:
@@ -2518,26 +2682,49 @@ def read_selected_text():
         except:
             pass
 
-        # Ctrl+C 실행
-        keyboard = Controller()
+        logging.info(f"이전 클립보드: '{old_clipboard[:50]}...' (길이: {len(old_clipboard)})")
+
+        # Ctrl+C 실행 (깨끗한 상태에서)
         keyboard.press(Key.ctrl)
+        time.sleep(0.05)
         keyboard.press('c')
+        time.sleep(0.05)
         keyboard.release('c')
+        time.sleep(0.05)
         keyboard.release(Key.ctrl)
 
-        # 클립보드 업데이트 대기
-        time.sleep(0.3)
+        # 클립보드 업데이트 대기 (충분히)
+        time.sleep(0.5)
 
         # 새로운 클립보드 내용 확인
-        new_text = pyperclip.paste()
+        new_text = ""
+        try:
+            new_text = pyperclip.paste()
+        except Exception as e:
+            logging.error(f"클립보드 읽기 오류: {e}")
+            log_to_console(f"클립보드 읽기 오류: {str(e)}")
+            return
 
-        if new_text and (new_text != old_clipboard or len(new_text) > 0):
-            speak_text(new_text)
+        logging.info(f"새 클립보드: '{new_text[:50] if new_text else ''}...' (길이: {len(new_text) if new_text else 0})")
+
+        # 새로운 텍스트가 있고, 이전과 다르면 읽기
+        if new_text and len(new_text.strip()) > 0:
+            if new_text != old_clipboard:
+                log_to_console(f"선택된 텍스트 감지: {new_text[:30]}...")
+                speak_text(new_text)
+            else:
+                # 같은 텍스트라도 선택된 것이 있으면 읽기
+                if len(new_text.strip()) > 0:
+                    log_to_console(f"동일 텍스트 다시 읽기: {new_text[:30]}...")
+                    speak_text(new_text)
+                else:
+                    log_to_console("읽을 텍스트가 선택되지 않았습니다.")
         else:
             log_to_console("읽을 텍스트가 선택되지 않았거나 복사에 실패했습니다.")
 
     except Exception as e:
         logging.error(f"선택 영역 읽기 오류: {e}")
+        log_to_console(f"선택 영역 읽기 오류: {str(e)}")
 
 def extract_readme_files():
     """README 파일을 실행 파일이 있는 디렉토리에 추출합니다."""
