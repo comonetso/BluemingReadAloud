@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Audio and Logs
+recordings/
+logs/
+*.flac
+*.wav
+
+# Sensitive Information (Credentials & Settings)
+google_credentials.json
+google_service_acount_key.json
+openai_api_key.txt
+whisperer_settings.json
+stt_settings.json
+
+# Build and IDE
+build/
+dist/
+*.spec
+.vscode/
+.cursor/
+.windsurfrules
+whisperer_console.log
