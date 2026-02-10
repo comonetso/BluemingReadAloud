@@ -68,6 +68,9 @@ console_log_file = None # 콘솔 로그 파일
 api_key = None          # OpenAI API 키
 keyboard_listener = None # 키보드 리스너
 pynput_initialized = False # Pynput 초기화 여부
+floating_controller = None   # 플로팅 컨트롤러 창
+controller_canvas = None     # 컨트롤러 캔버스
+controller_position = None   # 컨트롤러 위치 {"x": int, "y": int}
 
 # 성능 최적화 관련 변수
 use_performance_mode = True   # 성능 최적화 모드 사용 여부
@@ -663,6 +666,11 @@ def main():
         log_to_console("시스템 트레이 아이콘 설정 중...")
         setup_tray_icon()
 
+        # 플로팅 미니 컨트롤러 설정
+        print("플로팅 컨트롤러 설정 중...")
+        log_to_console("플로팅 컨트롤러 설정 중...")
+        setup_floating_controller()
+
         # 초기화 완료
         logging.info("초기화 완료")
         print("\n프로그램이 시스템 트레이에서 실행 중입니다.")
@@ -991,7 +999,8 @@ def save_settings():
             "tts_settings": {
                 "voice_name": tts_voice_name,
                 "speaking_rate": tts_speaking_rate
-            }
+            },
+            "controller_position": controller_position
         }
         print(f"저장할 설정: {settings}")
         with open('whisperer_settings.json', 'w', encoding='utf-8') as f:
@@ -1012,6 +1021,7 @@ active_mode = "general"  # 기본값은 일반 대화 모드
 def load_settings():
     global current_language, hotkey_modifiers, hotkey_key, auto_language_detection, whisper_prompt, active_mode, google_credentials_path, google_stt_model
     global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate
+    global controller_position
     try:
         if os.path.exists('whisperer_settings.json'):
             with open('whisperer_settings.json', 'r', encoding='utf-8') as f:
@@ -1051,6 +1061,10 @@ def load_settings():
                     if os.path.exists(default_path):
                         google_credentials_path = default_path
                         logging.info(f"기본 위치에서 인증 파일 발견: {google_credentials_path}")
+
+                # 컨트롤러 위치 로드
+                if "controller_position" in settings:
+                    controller_position = settings["controller_position"]
 
                 # Google STT 설정 로드
                 if "google_settings" in settings:
@@ -1598,6 +1612,145 @@ def setup_tray_icon():
     except Exception as e:
         logging.error(f"트레이 아이콘 설정 중 오류 발생: {str(e)}")
         return None
+
+# 플로팅 미니 녹음 컨트롤러
+def setup_floating_controller():
+    """항상 위에 떠있는 미니 녹음 컨트롤러를 생성합니다."""
+    import tkinter as tk
+    global floating_controller, controller_canvas, controller_position
+
+    if not root:
+        return
+
+    SIZE = 44  # 트레이 아이콘 크기 정도
+    TRANSPARENT_COLOR = '#010101'  # 투명 처리용 색상
+
+    # Toplevel 창 생성
+    ctrl_win = tk.Toplevel(root)
+    ctrl_win.overrideredirect(True)      # 타이틀바 제거
+    ctrl_win.attributes('-topmost', True) # 항상 위
+    ctrl_win.attributes('-alpha', 0.9)    # 약간 투명
+    ctrl_win.configure(bg=TRANSPARENT_COLOR)
+    ctrl_win.attributes('-transparentcolor', TRANSPARENT_COLOR)  # 배경 투명
+
+    # 저장된 위치 복원 또는 기본 위치 (화면 우하단)
+    if controller_position and isinstance(controller_position, dict):
+        x = controller_position.get('x', 200)
+        y = controller_position.get('y', 200)
+    else:
+        screen_w = ctrl_win.winfo_screenwidth()
+        screen_h = ctrl_win.winfo_screenheight()
+        x = screen_w - 120
+        y = screen_h - 120
+
+    ctrl_win.geometry(f"{SIZE}x{SIZE}+{x}+{y}")
+
+    # 캔버스 생성
+    canvas = tk.Canvas(ctrl_win, width=SIZE, height=SIZE,
+                       highlightthickness=0, bd=0, bg=TRANSPARENT_COLOR)
+    canvas.pack(fill='both', expand=True)
+
+    # 둥근 버튼 그리기
+    PAD = 2
+    # 외곽 원 (테두리)
+    canvas.create_oval(PAD, PAD, SIZE - PAD, SIZE - PAD,
+                       fill='#4CAF50', outline='#388E3C', width=2,
+                       tags='btn_circle')
+    # 내부 아이콘 (대기: 작은 흰색 원 = 마이크 심볼)
+    icon_pad = SIZE // 3
+    canvas.create_oval(icon_pad, icon_pad, SIZE - icon_pad, SIZE - icon_pad,
+                       fill='white', outline='white', width=0,
+                       tags='btn_icon')
+
+    floating_controller = ctrl_win
+    controller_canvas = canvas
+
+    # ── 드래그 & 클릭 판정 로직 ──
+    drag_data = {'start_x': 0, 'start_y': 0, 'dragging': False}
+
+    def on_press(event):
+        drag_data['start_x'] = event.x_root
+        drag_data['start_y'] = event.y_root
+        drag_data['dragging'] = False
+
+    def on_drag(event):
+        dx = event.x_root - drag_data['start_x']
+        dy = event.y_root - drag_data['start_y']
+        if abs(dx) > 5 or abs(dy) > 5:
+            drag_data['dragging'] = True
+        if drag_data['dragging']:
+            new_x = ctrl_win.winfo_x() + (event.x_root - drag_data['start_x'])
+            new_y = ctrl_win.winfo_y() + (event.y_root - drag_data['start_y'])
+            ctrl_win.geometry(f"+{new_x}+{new_y}")
+            drag_data['start_x'] = event.x_root
+            drag_data['start_y'] = event.y_root
+
+    def on_release(event):
+        if drag_data['dragging']:
+            # 드래그 종료 → 위치 저장
+            _save_controller_position()
+        else:
+            # 클릭 → 녹음 토글
+            _toggle_recording()
+
+    def _save_controller_position():
+        global controller_position
+        controller_position = {
+            'x': ctrl_win.winfo_x(),
+            'y': ctrl_win.winfo_y()
+        }
+        save_settings()
+        logging.debug(f"컨트롤러 위치 저장: {controller_position}")
+
+    def _toggle_recording():
+        if recording:
+            log_to_console(get_msg("controller_recording_stop") if "controller_recording_stop" in messages.get(current_language, {}) else "녹음 중지 (컨트롤러)")
+            root.after(10, stop_recording)
+        else:
+            log_to_console(get_msg("controller_recording_start") if "controller_recording_start" in messages.get(current_language, {}) else "녹음 시작 (컨트롤러)")
+            root.after(10, start_recording)
+
+    canvas.bind('<ButtonPress-1>', on_press)
+    canvas.bind('<B1-Motion>', on_drag)
+    canvas.bind('<ButtonRelease-1>', on_release)
+
+    # ── 상태 업데이트 루프 (500ms 주기) ──
+    blink_state = [False]
+
+    def update_state():
+        if not ctrl_win.winfo_exists():
+            return
+        try:
+            if recording:
+                # 녹음 중: 빨간색 깜빡임
+                blink_state[0] = not blink_state[0]
+                color = '#F44336' if blink_state[0] else '#D32F2F'
+                outline = '#B71C1C'
+                canvas.itemconfig('btn_circle', fill=color, outline=outline)
+                # 내부 아이콘: 흰색 사각형 (정지 심볼)
+                canvas.delete('btn_icon')
+                sq_pad = SIZE // 3 + 2
+                canvas.create_rectangle(sq_pad, sq_pad, SIZE - sq_pad, SIZE - sq_pad,
+                                        fill='white', outline='white', width=0,
+                                        tags='btn_icon')
+            else:
+                # 대기 중: 초록색
+                blink_state[0] = False
+                canvas.itemconfig('btn_circle', fill='#4CAF50', outline='#388E3C')
+                # 내부 아이콘: 흰색 원 (마이크 심볼)
+                canvas.delete('btn_icon')
+                icon_p = SIZE // 3
+                canvas.create_oval(icon_p, icon_p, SIZE - icon_p, SIZE - icon_p,
+                                   fill='white', outline='white', width=0,
+                                   tags='btn_icon')
+        except Exception:
+            pass
+        ctrl_win.after(500, update_state)
+
+    update_state()
+
+    logging.info("플로팅 컨트롤러 생성 완료")
+    log_to_console(get_msg("controller_created"))
 
 # API 키 설정 대화 상자 표시 함수
 def show_api_key_dialog(required=False):
