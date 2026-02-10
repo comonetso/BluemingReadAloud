@@ -22,5 +22,6 @@ dist/
 *.spec
 .vscode/
 .cursor/
+.gemini/
 .windsurfrules
 whisperer_console.log

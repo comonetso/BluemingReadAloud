@@ -15,11 +15,14 @@ import datetime
 import json
 import tkinter as tk
 from tkinter import messagebox
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
 import logging
 import socket
 import winsound  # winsound import 추가 확인
 import re # 정규식 모듈 임포트
 import queue # 스트리밍용 큐 임포트
+gui_queue = queue.Queue()
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -140,7 +143,7 @@ def prevent_multiple_instances():
         single_instance_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         # 테스트를 위해 다른 포트 사용 (원래 포트: 51888)
-        test_port = 51889 # 테스트용 다른 포트 사용
+        test_port = 51890 # 테스트용 다른 포트 사용
         single_instance_socket.bind(('localhost', test_port))
         logging.info("프로그램 실행: 테스트 인스턴스 (포트 변경)")
         return True  # 첫 번째 인스턴스
@@ -555,9 +558,11 @@ def main():
         logging.info("애플리케이션 시작")
         log_to_console("로깅 시스템 초기화 완료")
 
+
         # Tkinter 루트 창 생성 (숨김)
         global root
-        root = tk.Tk()
+        # 모던한 테마 적용 (cosmo 테마 사용)
+        root = ttk.Window(themename="cosmo")
         root.withdraw()  # 창 숨기기
         root.title("Yeogiaen STT Typer")
 
@@ -982,6 +987,10 @@ def save_settings():
             "tts_hotkey": {
                 "modifiers": tts_hotkey_modifiers,
                 "key": tts_hotkey_key
+            },
+            "tts_settings": {
+                "voice_name": tts_voice_name,
+                "speaking_rate": tts_speaking_rate
             }
         }
         print(f"저장할 설정: {settings}")
@@ -1002,6 +1011,7 @@ active_mode = "general"  # 기본값은 일반 대화 모드
 
 def load_settings():
     global current_language, hotkey_modifiers, hotkey_key, auto_language_detection, whisper_prompt, active_mode, google_credentials_path, google_stt_model
+    global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate
     try:
         if os.path.exists('whisperer_settings.json'):
             with open('whisperer_settings.json', 'r', encoding='utf-8') as f:
@@ -1023,6 +1033,13 @@ def load_settings():
                         tts_hotkey_modifiers = settings["tts_hotkey"]["modifiers"]
                     if "key" in settings["tts_hotkey"]:
                         tts_hotkey_key = settings["tts_hotkey"]["key"]
+
+                # TTS 설정 로드
+                if "tts_settings" in settings:
+                    if "voice_name" in settings["tts_settings"]:
+                        tts_voice_name = settings["tts_settings"]["voice_name"]
+                    if "speaking_rate" in settings["tts_settings"]:
+                        tts_speaking_rate = settings["tts_settings"]["speaking_rate"]
 
                 # Google Cloud 인증 파일 경로 로드
                 if "google_credentials_path" in settings:
@@ -1154,7 +1171,7 @@ def create_image():
 
 def setup_tray_icon():
     """시스템 트레이 아이콘 설정"""
-    global tray_icon, pystray, Image, ImageDraw
+    global tray_icon, pystray, Image, ImageDraw, update_tray_menu
 
     try:
         # 필요한 모듈이 로드되었는지 확인
@@ -1221,10 +1238,7 @@ def setup_tray_icon():
 
         # Google Cloud 인증 설정 함수
         def set_google_credentials(icon, item):
-            show_api_key_dialog(required=False)
-            log_to_console(get_msg("google_credential_updated"))
-            if openai is not None:
-                openai_client = openai.OpenAI(api_key=api_key)
+            gui_queue.put("show_api_key_dialog")
 
         # 마이크 정보 표시 및 재설정 함수
         def check_microphone(icon, item):
@@ -1415,90 +1429,163 @@ def setup_tray_icon():
             # 트레이 아이콘 메뉴 업데이트
             update_tray_menu()
 
-        # 단축키 설정 함수 추가 (언어 변경 함수 아래에 추가)
-        def set_hotkey(icon, item):
-            show_hotkey_dialog(mode="stt")
-            log_to_console(get_msg("hotkey_updated", "단축키가 업데이트되었습니다."))
+        # 설정 함수들
+        def open_stt_settings(icon, item):
+            # 큐를 통해 메인 스레드로 전달
+            gui_queue.put("show_stt_settings")
 
-        def set_tts_hotkey(icon, item):
-            show_hotkey_dialog(mode="tts")
-            log_to_console(get_msg("tts_hotkey_updated", "읽어주기 단축키가 업데이트되었습니다."))
+        def open_tts_settings(icon, item):
+            # 큐를 통해 메인 스레드로 전달
+            gui_queue.put("show_tts_settings")
+
+        def toggle_tts_playback(icon, item):
+            if is_speaking:
+                stop_tts()
+            else:
+                log_to_console("[TTS] 재생 중이 아닙니다.")
+                # 읽을 텍스트가 있다면 읽기 시도 가능 (선택 사항)
+
+        def exit_program(icon, item):
+            """프로그램 종료 함수"""
+            try:
+                tray_icon.stop()
+                root.quit()
+                sys.exit(0)
+            except:
+                os._exit(0)
+
+        # 마지막 TTS 오디오 변수
+        global last_tts_audio
+        last_tts_audio = None
+
+        def replay_last_tts():
+            """마지막 TTS 다시 듣기"""
+            global last_tts_audio, is_speaking, current_audio_stream
+
+            if is_speaking:
+                stop_tts()
+                # 중지 후 잠시 대기
+                time.sleep(0.2)
+
+            if last_tts_audio is not None:
+                def _replay():
+                    global is_speaking, current_audio_stream
+                    try:
+                        is_speaking = True
+                        log_to_console("[TTS] 다시 듣기 시작")
+                        import sounddevice as sd
+                        current_audio_stream = sd.play(last_tts_audio, 24000)
+                        sd.wait()
+                        current_audio_stream = None
+                        is_speaking = False
+                        log_to_console("[TTS] 다시 듣기 완료")
+                    except Exception as e:
+                        log_to_console(f"[TTS] 다시 듣기 오류: {e}")
+                        is_speaking = False
+
+                threading.Thread(target=_replay, daemon=True).start()
+            else:
+                log_to_console("[TTS] 다시 들을 내용이 없습니다.")
+
+        def on_tray_activate(icon):
+            """트레이 아이콘 좌클릭 동작: 일시정지/재생 토글"""
+            global tts_paused, tts_playing, tts_audio_data
+
+            log_to_console(f"[DEBUG] 좌클릭 감지. Playing={tts_playing}, Paused={tts_paused}")
+
+            if tts_playing:
+                tts_paused = not tts_paused
+                status = "일시 정지" if tts_paused else "다시 시작"
+                log_to_console(f"[TTS] 명령: {status}")
+                # 상태 변경 후 메뉴 즉시 갱신
+                update_tray_menu()
+            elif tts_audio_data is not None:
+                log_to_console("[TTS] 명령: 다시 듣기")
+                threading.Thread(target=play_tts_chunked, args=(tts_audio_data,), daemon=True).start()
+            else:
+                log_to_console("[DEBUG] 기본 동작: STT 설정창")
+                gui_queue.put("show_stt_settings")
 
         def update_tray_menu():
-            # 트레이 아이콘 메뉴 업데이트
-            tray_icon.menu = pystray.Menu(
-                pystray.MenuItem(get_msg("open_recordings_folder"), open_recordings_folder),
-                pystray.MenuItem(get_msg("open_readme"), open_readme_file),
-                pystray.MenuItem(get_msg("open_console"), open_console),
-                pystray.MenuItem(get_msg("google_credential_setting"), set_google_credentials),
-                pystray.MenuItem(get_msg("set_hotkey", "녹음 단축키 설정"), set_hotkey),
-                pystray.MenuItem(get_msg("set_tts_hotkey", "읽어주기 단축키 설정"), set_tts_hotkey),
-                # 언어 설정 하위 메뉴 추가
-                pystray.MenuItem(
-                    get_msg("language_menu"),
-                    pystray.Menu(
-                        pystray.MenuItem(
-                            get_msg("korean_language"),
-                            set_korean_language,
-                            checked=lambda item: current_language == "ko" and not auto_language_detection
-                        ),
-                        pystray.MenuItem(
-                            get_msg("english_language"),
-                            set_english_language,
-                            checked=lambda item: current_language == "en" and not auto_language_detection
-                        ),
-                        pystray.MenuItem(
-                            get_msg("auto_detection"),
-                            toggle_auto_detection,
-                            checked=lambda item: auto_language_detection
-                        ),
-                    )
-                ),
-                # 대화 모드 설정 하위 메뉴 추가
-                pystray.MenuItem(
-                    get_msg("conversation_mode"),
-                    pystray.Menu(
-                        pystray.MenuItem(
-                            get_msg("general_mode"),
-                            set_conversation_mode("general"),
-                            checked=lambda item: active_mode == "general"
-                        ),
-                        pystray.MenuItem(
-                            get_msg("address_poi_mode"),
-                            set_conversation_mode("address_poi"),
-                            checked=lambda item: active_mode == "address_poi"
-                        )
-                    )
-                ),
-                # 인식 모델 설정 하위 메뉴
-                pystray.MenuItem(
-                    get_msg("recognition_model_setting"),
-                    pystray.Menu(
-                        pystray.MenuItem(
-                            get_msg("model_long"),
-                            set_stt_model("long"),
-                            checked=lambda item: google_stt_model == "long"
-                        ),
-                        pystray.MenuItem(
-                            get_msg("model_short"),
-                            set_stt_model("short"),
-                            checked=lambda item: google_stt_model == "short"
-                        ),
-                        pystray.MenuItem(
-                            get_msg("model_telephony"),
-                            set_stt_model("telephony"),
-                            checked=lambda item: google_stt_model == "telephony"
-                        )
-                    )
-                ),
-                pystray.MenuItem(get_msg("exit"), exit_action)
-            )
+            global tray_icon, tts_playing, tts_paused, tts_current_file, current_language
 
-        # 초기 메뉴 설정 (update_tray_menu를 호출하여 중복 제거)
+            if not tray_icon: return
+
+            def toggle_tts():
+                """TTS 토글: 중지/처음부터 재생"""
+                global tts_paused, tts_playing, tts_current_file
+
+                if tts_playing:
+                    # 재생 중이면 중지
+                    stop_current_playback()
+                    log_to_console("[TTS] 재생 중지")
+                elif tts_current_file and os.path.exists(tts_current_file):
+                    # 재생 중이 아니고 마지막 파일이 있으면 처음부터 재생
+                    log_to_console("[TTS] 마지막 파일 다시 재생")
+                    threading.Thread(target=play_tts_file, args=(tts_current_file,), daemon=True).start()
+                else:
+                    log_to_console("[TTS] 재생할 파일이 없습니다.")
+
+                # 상태 변경 후 메뉴 갱신
+                update_tray_menu()
+
+            # 토글 메뉴 라벨 결정
+            if tts_playing:
+                tts_toggle_label = "⏹ TTS 중지"
+            else:
+                tts_toggle_label = "▶ TTS 재생"
+
+            # 토글 메뉴 활성화 여부 (파일이 없으면 비활성화)
+            tts_enabled = tts_playing or (tts_current_file is not None and os.path.exists(tts_current_file) if tts_current_file else False)
+
+            # 현재 언어 표시를 위한 라벨
+            lang_label = get_msg("current_language_ko") if current_language == "ko" else get_msg("current_language_en")
+
+            base_items = [
+                pystray.MenuItem(get_msg("open_recordings_folder"), open_recordings_folder),
+                pystray.MenuItem(get_msg("open_console"), open_console),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(get_msg("menu_stt_settings"), open_stt_settings),
+                pystray.MenuItem(get_msg("menu_tts_settings"), open_tts_settings),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(get_msg("google_credential_setting"), set_google_credentials),
+                pystray.MenuItem(f"{get_msg('menu_language')} ({lang_label})", change_language),
+                pystray.MenuItem(get_msg("open_readme"), open_readme_file),
+                pystray.Menu.SEPARATOR,
+                # TTS 토글 메뉴 (종료 바로 위)
+                pystray.MenuItem(tts_toggle_label, lambda icon, item: toggle_tts(), enabled=tts_enabled),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(get_msg("exit"), exit_program)
+            ]
+
+            tray_icon.menu = pystray.Menu(*base_items)
+
+        # 아이콘 객체 생성
         tray_icon = pystray.Icon("whisperer")
         tray_icon.icon = icon_image
         tray_icon.title = "Yeogiaen STT Typer"
+        # 좌클릭 시 메뉴가 나오도록 activate 콜백 제거
+
         update_tray_menu()
+
+        def check_gui_queue():
+            try:
+                while True:
+                    msg = gui_queue.get_nowait()
+                    if msg == "show_stt_settings":
+                        show_stt_settings_dialog()
+                    elif msg == "show_tts_settings":
+                        show_tts_settings_dialog()
+                    elif msg == "show_api_key_dialog":
+                        show_api_key_dialog(required=False)
+            except queue.Empty:
+                pass
+            if root:
+                root.after(100, check_gui_queue)
+
+        # GUI 큐 확인 시작
+        if root:
+            root.after(100, check_gui_queue)
 
         # 백그라운드 스레드에서 트레이 아이콘 실행
         logging.info("트레이 아이콘 실행 준비 완료")
@@ -1521,9 +1608,9 @@ def show_api_key_dialog(required=False):
     import shutil
 
     # 완전히 독립적인 모달 대화 상자 생성
-    dialog = tk.Toplevel()
+    dialog = ttk.Toplevel()
     dialog.title("Google Cloud 인증 설정")
-    dialog.geometry("550x280")
+    dialog.geometry("550x350")
     dialog.resizable(False, False)
 
     # 모달 설정
@@ -1533,7 +1620,7 @@ def show_api_key_dialog(required=False):
     dialog.attributes("-topmost", True)
 
     # 메인 프레임
-    frame = tk.Frame(dialog, padx=25, pady=20)
+    frame = ttk.Frame(dialog, padding=20)
     frame.pack(fill=tk.BOTH, expand=True)
 
     # 설명 라벨
@@ -1542,17 +1629,17 @@ def show_api_key_dialog(required=False):
     else:
         label_text = "Select your Google Cloud Service Account JSON file\n\nYou can download the file from Google Cloud Console:\nhttps://console.cloud.google.com/iam-admin/serviceaccounts"
 
-    tk.Label(frame, text=label_text, font=("Segoe UI", 11), justify=tk.LEFT).pack(anchor="w", pady=(0, 15))
+    ttk.Label(frame, text=label_text, justify=tk.LEFT).pack(anchor="w", pady=(0, 15))
 
     # 파일 경로 표시 프레임
-    path_frame = tk.Frame(frame)
+    path_frame = ttk.Frame(frame)
     path_frame.pack(fill=tk.X, pady=8)
 
     # 현재 설정된 경로 표시
     current_path = google_credentials_path if google_credentials_path else ""
     path_var = tk.StringVar(value=current_path)
 
-    path_entry = tk.Entry(path_frame, textvariable=path_var, font=("Courier New", 10), width=50, state="readonly")
+    path_entry = ttk.Entry(path_frame, textvariable=path_var, width=50, state="readonly")
     path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     # 파일 선택 함수
@@ -1564,18 +1651,19 @@ def show_api_key_dialog(required=False):
         )
         if filename:
             path_var.set(filename)
-            result_label.config(text="", fg="black")
+            # 초기화 (기본 스타일로)
+            result_label.config(text="", bootstyle="default")
 
     # 찾아보기 버튼
-    browse_btn = tk.Button(path_frame, text="...", command=browse_file, width=3, font=("Segoe UI", 10))
+    browse_btn = ttk.Button(path_frame, text="...", command=browse_file, width=3, bootstyle="info-outline")
     browse_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
-    # 결과 메시지 라벨
-    result_label = tk.Label(frame, text="", font=("Segoe UI", 10))
+    # 결과 메시지 라벨 (bootstyle 활용)
+    result_label = ttk.Label(frame, text="")
     result_label.pack(pady=10)
 
     # 버튼 프레임
-    btn_frame = tk.Frame(frame)
+    btn_frame = ttk.Frame(frame)
     btn_frame.pack(pady=10)
 
     # 결과 변수
@@ -1588,11 +1676,11 @@ def show_api_key_dialog(required=False):
         selected_path = path_var.get().strip()
 
         if required and not selected_path:
-            result_label.config(text="인증 파일을 선택해 주세요.", fg="red")
+            result_label.config(text="인증 파일을 선택해 주세요.", bootstyle="danger")
             return
 
         if not os.path.exists(selected_path):
-            result_label.config(text="파일이 존재하지 않습니다.", fg="red")
+            result_label.config(text="파일이 존재하지 않습니다.", bootstyle="danger")
             return
 
         try:
@@ -1622,7 +1710,7 @@ def show_api_key_dialog(required=False):
             save_settings()
 
             # 성공 메시지
-            result_label.config(text="✓ Google Cloud 인증 설정이 완료되었습니다.", fg="green")
+            result_label.config(text="✓ Google Cloud 인증 설정이 완료되었습니다.", bootstyle="success")
             logging.info(f"Google Cloud 인증 파일 설정됨: {dest_path}")
             log_to_console(f"Google Cloud 인증 파일 설정됨: {dest_path}")
 
@@ -1632,24 +1720,22 @@ def show_api_key_dialog(required=False):
             dialog.after(1500, dialog.destroy)
 
         except Exception as e:
-            result_label.config(text=f"오류: {str(e)}", fg="red")
+            result_label.config(text=f"오류: {str(e)}", bootstyle="danger")
             logging.error(f"인증 파일 설정 오류: {str(e)}")
 
     # 취소 함수
     def cancel():
         if required and not google_stt_client:
-            result_label.config(text="인증 파일을 선택해 주세요.", fg="red")
+            result_label.config(text="인증 파일을 선택해 주세요.", bootstyle="danger")
             return
         dialog.destroy()
 
     # 저장 버튼
-    save_btn = tk.Button(btn_frame, text="설정" if current_language == "ko" else "Save", command=save_credentials,
-                         width=12, height=1, bg="#4CAF50", fg="white", font=("Segoe UI", 10, "bold"))
+    save_btn = ttk.Button(btn_frame, text="설정" if current_language == "ko" else "Save", command=save_credentials, width=12, bootstyle="success")
     save_btn.pack(side=tk.LEFT, padx=10)
 
     # 취소 버튼
-    cancel_btn = tk.Button(btn_frame, text="취소" if current_language == "ko" else "Cancel", command=cancel,
-                          width=12, height=1, bg="#f44336", fg="white", font=("Segoe UI", 10, "bold"))
+    cancel_btn = ttk.Button(btn_frame, text="취소" if current_language == "ko" else "Cancel", command=cancel, width=12, bootstyle="secondary")
     cancel_btn.pack(side=tk.LEFT, padx=10)
 
     # 이벤트 바인딩
@@ -1729,286 +1815,310 @@ def show_api_key_error_dialog(error_message):
     y = (dialog.winfo_screenheight() // 2) - (height // 2)
     dialog.geometry(f"+{x}+{y}")
 
-    # 대화 상자 표시
-    dialog.wait_window()
+# STT 설정 대화상자 (기존 단축키 설정 대체)
+def show_stt_settings_dialog():
+    """STT 설정 대화상자를 표시합니다."""
+    global root, hotkey_modifiers, hotkey_key
 
-# 단축키 설정 대화상자 함수 추가 (API 키 대화 상자 다음에 추가)
-def show_hotkey_dialog(mode="stt"):
-    """단축키 변경 대화 상자를 표시합니다."""
-    global hotkey_modifiers, hotkey_key, tts_hotkey_modifiers, tts_hotkey_key, Listener, Key, KeyCode
+    if hasattr(show_stt_settings_dialog, 'dialog') and show_stt_settings_dialog.dialog and show_stt_settings_dialog.dialog.winfo_exists():
+        show_stt_settings_dialog.dialog.lift()
+        return
 
-    # 현재 설정할 변수 참조 설정
-    if mode == "stt":
-        current_modifiers = hotkey_modifiers
-        current_key = hotkey_key
-        title = get_msg("set_hotkey_title", "녹음 단축키 설정")
-    else:
-        current_modifiers = tts_hotkey_modifiers
-        current_key = tts_hotkey_key
-        title = get_msg("set_tts_hotkey_title", "읽어주기 단축키 설정")
-
-    # 현재 단축키 문자열 생성
-    def get_hotkey_string_local(modifiers, key_val):
-        parts = []
-        if modifiers.get("ctrl", False):
-            parts.append("Ctrl")
-        if modifiers.get("shift", False):
-            parts.append("Shift")
-        if modifiers.get("alt", False):
-            parts.append("Alt")
-        if key_val:
-            parts.append(str(key_val).upper())
-        return "+".join(parts)
-
-    # 완전히 독립적인 모달 대화 상자 생성
-    dialog = tk.Toplevel()
-    dialog.title(title)
-    dialog.geometry("450x300")
+    dialog = ttk.Toplevel(root)
+    dialog.title(get_msg("dialog_stt_title"))
+    dialog.geometry("450x550")
     dialog.resizable(False, False)
+    show_stt_settings_dialog.dialog = dialog
 
-    # 모달 설정 (부모 창 비활성화)
-    dialog.transient()
-    dialog.grab_set()
-    dialog.focus_set()
+    try:
+        if os.path.exists("favicon.ico"):
+            dialog.iconbitmap("favicon.ico")
+    except:
+        pass
 
-    # 항상 위에 표시
-    dialog.attributes("-topmost", True)
+    padding = {'padx': 20, 'pady': 10}
 
-    # 메인 프레임
-    frame = tk.Frame(dialog, padx=25, pady=20)
-    frame.pack(fill=tk.BOTH, expand=True)
+    # 단축키 설정 그룹
+    hotkey_frame = ttk.Labelframe(dialog, text=get_msg("group_hotkey"), padding=15)
+    hotkey_frame.pack(fill="x", **padding)
 
-    # 설명 라벨
-    tk.Label(frame, text=get_msg("hotkey_instruction", "단축키를 설정하세요. 체크박스로 수정자 키를 선택하세요."),
-             font=("Segoe UI", 11), justify=tk.LEFT).pack(anchor="w", pady=(0, 15))
+    current_modifiers = hotkey_modifiers.copy()
+    current_key = hotkey_key
 
-    # 수정자 키 체크박스
-    modifiers_frame = tk.Frame(frame)
-    modifiers_frame.pack(fill=tk.X, pady=5)
+    ctrl_var = tk.BooleanVar(value=current_modifiers.get("ctrl", False))
+    shift_var = tk.BooleanVar(value=current_modifiers.get("shift", False))
+    alt_var = tk.BooleanVar(value=current_modifiers.get("alt", False))
+    key_var = tk.StringVar(value=current_key if current_key else "")
 
-    # Ctrl 체크박스
-    ctrl_var = tk.BooleanVar(value=current_modifiers.get("ctrl", True))
-    ctrl_cb = tk.Checkbutton(modifiers_frame, text="Ctrl", variable=ctrl_var, font=("Segoe UI", 10))
-    ctrl_cb.pack(side=tk.LEFT, padx=10)
+    check_frame = ttk.Frame(hotkey_frame)
+    check_frame.pack(fill="x", pady=5)
 
-    # Shift 체크박스
-    shift_var = tk.BooleanVar(value=current_modifiers.get("shift", True))
-    shift_cb = tk.Checkbutton(modifiers_frame, text="Shift", variable=shift_var, font=("Segoe UI", 10))
-    shift_cb.pack(side=tk.LEFT, padx=10)
+    ttk.Checkbutton(check_frame, text="Ctrl", variable=ctrl_var).pack(side="left", padx=5)
+    ttk.Checkbutton(check_frame, text="Shift", variable=shift_var).pack(side="left", padx=5)
+    ttk.Checkbutton(check_frame, text="Alt", variable=alt_var).pack(side="left", padx=5)
 
-    # Alt 체크박스
-    alt_var = tk.BooleanVar(value=current_modifiers.get("alt", True))
-    alt_cb = tk.Checkbutton(modifiers_frame, text="Alt", variable=alt_var, font=("Segoe UI", 10))
-    alt_cb.pack(side=tk.LEFT, padx=10)
+    key_frame = ttk.Frame(hotkey_frame)
+    key_frame.pack(fill="x", pady=5)
 
-    # 키 추가 프레임
-    key_frame = tk.Frame(frame)
-    key_frame.pack(fill=tk.X, pady=10)
+    ttk.Label(key_frame, text="Key:").pack(side="left", padx=5)
+    key_entry = ttk.Entry(key_frame, textvariable=key_var, width=10)
+    key_entry.pack(side="left", padx=5)
 
-    # 추가 키 라벨
-    tk.Label(key_frame, text=get_msg("additional_key", "추가 키(선택사항):"),
-             font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(0, 10))
+    def get_hotkey_string_local(mods, k):
+        parts = []
+        if mods.get("ctrl"): parts.append("Ctrl")
+        if mods.get("shift"): parts.append("Shift")
+        if mods.get("alt"): parts.append("Alt")
+        if k: parts.append(k)
+        return " + ".join(parts) if parts else "없음"
 
-    # 추가 키 입력 필드 (읽기 전용)
-    key_var = tk.StringVar(value=str(current_key) if current_key else "")
-    key_entry = tk.Entry(key_frame, textvariable=key_var, width=10, font=("Segoe UI", 10),
-                         state="readonly", bg="white")
-    key_entry.pack(side=tk.LEFT)
+    current_hotkey_label = ttk.Label(hotkey_frame, text=f"현재: {get_hotkey_string_local(current_modifiers, current_key)}", bootstyle="info")
+    current_hotkey_label.pack(pady=5)
 
-    # 키 리스닝 상태
-    listening = [False]
+    def update_label(*args):
+        temp_mods = {"ctrl": ctrl_var.get(), "shift": shift_var.get(), "alt": alt_var.get()}
+        temp_key = key_var.get().upper()
+        current_hotkey_label.config(text=f"현재: {get_hotkey_string_local(temp_mods, temp_key)}")
 
-    # 리스닝 시작 버튼
-    def start_listening():
-        if listening[0]:
-            return
+    ctrl_var.trace("w", update_label)
+    shift_var.trace("w", update_label)
+    alt_var.trace("w", update_label)
+    key_var.trace("w", update_label)
 
-        listening[0] = True
-        listen_btn.config(text=get_msg("press_key", "키를 누르세요..."), bg="red")
-        key_var.set("")
+    # --- STT 모델 설정 추가 ---
+    model_frame = ttk.Labelframe(dialog, text=get_msg("menu_stt_model"), padding=15)
+    model_frame.pack(fill="x", **padding)
 
-        # 입력된 키 값을 저장할 변수
-        key_value = None
+    model_var = tk.StringVar(value=google_stt_model)
+    model_combo = ttk.Combobox(model_frame, textvariable=model_var, values=["long", "short"], state="readonly")
+    model_combo.pack(fill="x")
 
-        # 키 눌림 이벤트 핸들러
-        def on_key_press(key):
-            if not listening[0]:
-                return True
+    # --- 대화 모드 설정 추가 ---
+    mode_frame = ttk.Labelframe(dialog, text=get_msg("conversation_mode"), padding=15)
+    mode_frame.pack(fill="x", **padding)
 
-            try:
-                nonlocal key_value
-                # 수정자 키는 무시
-                if key == Key.ctrl_l or key == Key.ctrl_r or \
-                    key == Key.shift_l or key == Key.shift_r or \
-                    key == Key.alt_l or key == Key.alt_r:
-                    return True
+    mode_map = {get_msg("general_mode"): "general", get_msg("address_poi_mode"): "address_poi"}
+    mode_reverse_map = {v: k for k, v in mode_map.items()}
 
-                # 다른 키는 저장
-                if isinstance(key, KeyCode):
-                    key_name = key.char
-                    if key_name:
-                        key_var.set(key_name.upper())
-                        key_value = key_name.upper()
-                else:
-                    # 특수 키는 이름 사용
-                    key_name = str(key).replace('Key.', '')
-                    key_var.set(key_name.upper())
-                    key_value = key_name.upper()
+    current_mode_display = mode_reverse_map.get(active_mode, get_msg("general_mode"))
+    mode_var = tk.StringVar(value=current_mode_display)
 
-                # 리스닝 종료
-                listening[0] = False
-                listen_btn.config(text=get_msg("set_key", "키 설정"), bg="#4CAF50")
+    mode_combo = ttk.Combobox(mode_frame, textvariable=mode_var, values=list(mode_map.keys()), state="readonly")
+    mode_combo.pack(fill="x")
 
-                # 키 입력이 끝나면 리스너 중지
-                return False
-            except Exception as e:
-                logging.error(f"키 리스닝 오류: {str(e)}")
-                return False
+    button_frame = ttk.Frame(dialog)
+    button_frame.pack(side="bottom", fill="x", pady=20)
 
-        # 임시 리스너 설정
-        temp_listener = Listener(on_press=on_key_press)
-        temp_listener.start()
+    def save_stt_settings():
+        global hotkey_modifiers, hotkey_key, google_stt_model, active_mode
 
-        # 5초 후 자동 타임아웃
-        def timeout():
-            nonlocal key_value
-            if listening[0]:
-                listening[0] = False
-                listen_btn.config(text=get_msg("set_key", "키 설정"), bg="#4CAF50")
-                temp_listener.stop()
+        # 단축키 저장
+        hotkey_modifiers["ctrl"] = ctrl_var.get()
+        hotkey_modifiers["shift"] = shift_var.get()
+        hotkey_modifiers["alt"] = alt_var.get()
+        k = key_var.get().strip().upper()
+        hotkey_key = k if k else None
 
-            # 키 값이 입력되었다면 저장
-            if key_value:
-                key_var.set(key_value)
+        # 모델 및 모드 저장
+        google_stt_model = model_var.get()
 
-        dialog.after(5000, timeout)
+        selected_mode_disp = mode_var.get()
+        active_mode = mode_map.get(selected_mode_disp, "general")
 
-    # 리스닝 버튼
-    listen_btn = tk.Button(key_frame, text=get_msg("set_key", "키 설정"),
-                         command=start_listening, bg="#4CAF50", fg="white",
-                         font=("Segoe UI", 9))
-    listen_btn.pack(side=tk.LEFT, padx=10)
-
-    # 키 지우기 버튼
-    def clear_key():
-        key_var.set("")
-
-    clear_btn = tk.Button(key_frame, text=get_msg("clear_key", "지우기"),
-                         command=clear_key, bg="#f44336", fg="white",
-                         font=("Segoe UI", 9))
-    clear_btn.pack(side=tk.LEFT)
-
-    # 현재 단축키 표시
-    current_hotkey_frame = tk.Frame(frame)
-    current_hotkey_frame.pack(fill=tk.X, pady=15)
-
-    tk.Label(current_hotkey_frame, text=get_msg("current_hotkey", "현재 단축키:"),
-             font=("Segoe UI", 10)).pack(side=tk.LEFT)
-
-    current_hotkey_label = tk.Label(current_hotkey_frame, text=get_hotkey_string_local(current_modifiers, current_key),
-                                   font=("Segoe UI", 10, "bold"))
-    current_hotkey_label.pack(side=tk.LEFT, padx=10)
-
-    # 결과 메시지 라벨
-    result_label = tk.Label(frame, text="", font=("Segoe UI", 10))
-    result_label.pack(pady=10)
-
-    # 버튼 프레임
-    btn_frame = tk.Frame(frame)
-    btn_frame.pack(pady=10)
-
-    # 저장 함수
-    def save_hotkey():
-        global hotkey_modifiers, hotkey_key, tts_hotkey_modifiers, tts_hotkey_key
-
-        # 최소한 하나의 수정자 키 필요
-        if not (ctrl_var.get() or shift_var.get() or alt_var.get()):
-            result_label.config(text=get_msg("need_modifier", "최소 하나의 수정자 키(Ctrl, Shift, Alt)가 필요합니다."),
-                               fg="red")
-            return
-
-        # 설정값 준비
-        new_modifiers = {
-            "ctrl": ctrl_var.get(),
-            "shift": shift_var.get(),
-            "alt": alt_var.get()
-        }
-        key_text = key_var.get().strip()
-        new_key = key_text if key_text else None
-
-        # 모드에 따라 전역 변수 업데이트
-        if mode == "stt":
-            hotkey_modifiers = new_modifiers
-            hotkey_key = new_key
-        else:
-            tts_hotkey_modifiers = new_modifiers
-            tts_hotkey_key = new_key
-
-        # 저장된 값 로깅
-        logging.info(f"저장되는 {mode} 단축키 값: 수정자={new_modifiers}, 키={new_key}")
-        print(f"=== 단축키 저장 시작 ===")
-        print(f"저장할 단축키: 수정자={hotkey_modifiers}, 키={hotkey_key}")
-
-        # 설정 파일에 저장
-        try:
-            save_settings()
-            print("설정 파일에 단축키 저장 완료")
-            logging.info("단축키 설정 저장 완료")
-        except Exception as e:
-            err_msg = f"설정 파일 저장 오류: {str(e)}"
-            print(err_msg)
-            logging.error(err_msg)
-            result_label.config(text=err_msg, fg="red")
-            return
-
-        # 성공 메시지
-        result_label.config(text=get_msg("hotkey_saved", "단축키가 저장되었습니다."), fg="green")
-
-        # 현재 단축키 표시 업데이트
-        current_hotkey_label.config(text=get_hotkey_string_local(new_modifiers, new_key))
-
-        # 단축키 변경 로그 출력
-        hotkey_str = get_hotkey_string_local(new_modifiers, new_key)
-        log_msg = f"{'녹음' if mode == 'stt' else '읽어주기'} 단축키가 변경되었습니다: {hotkey_str}"
-        logging.info(log_msg)
-        log_to_console(log_msg)
-        print(log_msg)
-
-        # 키보드 리스너 재설정 - 새로운 단축키 적용을 위해
-        print("키보드 리스너 재설정 중...")
+        save_settings()
         setup_keyboard_listener()
-        print("키보드 리스너 재설정 완료")
 
-        # 1초 후 창 닫기
-        dialog.after(1000, dialog.destroy)
-
-    # 취소 함수
-    def cancel():
+        log_to_console(get_msg("settings_saved"))
+        # 토스트 알림 (messagebox 대신)
+        try:
+            from ttkbootstrap.toast import ToastNotification
+            ToastNotification(title="설정 저장", message=get_msg("settings_saved"), duration=2000, bootstyle="success").show_toast()
+        except: pass
         dialog.destroy()
 
-    # 저장 버튼
-    save_btn = tk.Button(btn_frame, text=get_msg("save", "저장"), command=save_hotkey,
-                         width=12, height=1, bg="#4CAF50", fg="white", font=("Segoe UI", 10, "bold"))
-    save_btn.pack(side=tk.LEFT, padx=10)
+    ttk.Button(button_frame, text=get_msg("save"), command=save_stt_settings, width=10, bootstyle="success").pack(side="right", padx=20)
+    ttk.Button(button_frame, text=get_msg("cancel"), command=dialog.destroy, width=10, bootstyle="secondary").pack(side="right", padx=10)
 
-    # 취소 버튼
-    cancel_btn = tk.Button(btn_frame, text=get_msg("cancel", "취소"), command=cancel,
-                          width=12, height=1, bg="#f44336", fg="white", font=("Segoe UI", 10, "bold"))
-    cancel_btn.pack(side=tk.LEFT, padx=10)
+    # 창 크기 자동 조절 및 강제 업데이트 (렌더링 문제 해결)
+    dialog.update()
+    # 최소 높이 설정
+    dialog.minsize(400, 500)
 
-    # 이벤트 바인딩
-    dialog.bind("<Escape>", lambda event: cancel())
 
-    # 창 위치 설정 (화면 중앙)
-    dialog.update_idletasks()
-    width = dialog.winfo_width()
-    height = dialog.winfo_height()
-    x = (dialog.winfo_screenwidth() // 2) - (width // 2)
-    y = (dialog.winfo_screenheight() // 2) - (height // 2)
-    dialog.geometry(f"+{x}+{y}")
+# TTS 설정 대화상자
+def show_tts_settings_dialog():
+    """TTS 설정 대화상자를 표시합니다."""
+    global root, tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate
 
-    # 대화 상자 표시
-    dialog.wait_window()
+    if hasattr(show_tts_settings_dialog, 'dialog') and show_tts_settings_dialog.dialog and show_tts_settings_dialog.dialog.winfo_exists():
+        show_tts_settings_dialog.dialog.lift()
+        return
+
+    dialog = ttk.Toplevel(root)
+    dialog.title(get_msg("dialog_tts_title"))
+    dialog.geometry("650x550")
+    dialog.resizable(False, False)
+    show_tts_settings_dialog.dialog = dialog
+
+    try:
+        if os.path.exists("favicon.ico"):
+            dialog.iconbitmap("favicon.ico")
+    except:
+        pass
+
+    padding = {'padx': 20, 'pady': 10}
+
+    # 1. 음성 모델 설정 (+ 미리듣기 버튼을 여기로 이동)
+    voice_frame = ttk.Labelframe(dialog, text=get_msg("label_voice_model"), padding=15)
+    voice_frame.pack(fill="x", **padding)
+
+    voice_options = []
+    voice_map = {}
+
+    current_voice_display = ""
+
+    for v_id, v_gender, v_type, v_desc in KOREAN_VOICES:
+        display_str = f"{v_id} ({v_gender}, {v_type}) - {v_desc}"
+        voice_options.append(display_str)
+        voice_map[display_str] = v_id
+        if v_id == tts_voice_name:
+            current_voice_display = display_str
+
+    if not current_voice_display and voice_options:
+        current_voice_display = voice_options[0]
+
+    voice_var = tk.StringVar(value=current_voice_display)
+
+    # 상단: 콤보박스와 미리듣기 버튼을 가로로 배치
+    voice_selection_row = ttk.Frame(voice_frame)
+    voice_selection_row.pack(fill="x", pady=5)
+
+    voice_combo = ttk.Combobox(voice_selection_row, textvariable=voice_var, values=voice_options, state="readonly")
+    voice_combo.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+    # 미리듣기 기능 (클로저)
+    def preview_tts():
+        selected_disp = voice_var.get()
+        sel_voice_id = voice_map.get(selected_disp, "ko-KR-Wavenet-A")
+        # 현재 화면의 속도값 가져오기 (rate_var가 아직 정의 전이거나 아래에 있으므로 주의. 함수 호출 시점엔 정의됨)
+        sel_rate = rate_var.get()
+
+        text = "안녕하세요. TTS 목소리 미리듣기입니다."
+
+        def _preview():
+            try:
+                if not google_tts_client:
+                    log_to_console("TTS 클라이언트 미초기화")
+                    return
+
+                synthesis_input = google_tts.SynthesisInput(text=text)
+                voice = google_tts.VoiceSelectionParams(language_code="ko-KR", name=sel_voice_id)
+                audio_config = google_tts.AudioConfig(audio_encoding=google_tts.AudioEncoding.LINEAR16, sample_rate_hertz=24000, speaking_rate=sel_rate)
+
+                response = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+
+                import numpy as np
+                import sounddevice as sd
+                audio_data = np.frombuffer(response.audio_content[44:], dtype=np.int16)
+                sd.play(audio_data, 24000)
+                sd.wait()
+            except Exception as e:
+                log_to_console(f"미리듣기 실패: {e}")
+
+        threading.Thread(target=_preview, daemon=True).start()
+
+    # 미리듣기 버튼을 콤보박스 옆에 배치
+    ttk.Button(voice_selection_row, text=get_msg("btn_preview"), command=preview_tts, bootstyle="info-outline").pack(side="right")
+
+
+    # 2. 재생 속도 설정
+    rate_frame = ttk.Labelframe(dialog, text=get_msg("label_speaking_rate"), padding=15)
+    rate_frame.pack(fill="x", **padding)
+
+    rate_var = tk.DoubleVar(value=tts_speaking_rate)
+
+    rate_container = ttk.Frame(rate_frame)
+    rate_container.pack(fill="x", pady=5)
+
+    rate_label = ttk.Label(rate_container, text=f"{tts_speaking_rate:.1f}x", bootstyle="primary")
+    rate_label.pack(side="right", padx=10)
+
+    def update_rate_label(val):
+        rate_label.config(text=f"{float(val):.1f}x")
+
+    # ttk.Scale은 command 인자 지원이 tk와 다를 수 있음. 보통 command=func 인데, 값 변경시 호출됨.
+    rate_scale = ttk.Scale(rate_container, from_=0.25, to=4.0, variable=rate_var, command=update_rate_label, bootstyle="success")
+    rate_scale.pack(side="left", fill="x", expand=True, padx=10)
+
+    # 3. 단축키 설정
+    hotkey_frame = ttk.Labelframe(dialog, text=get_msg("group_hotkey"), padding=15)
+    hotkey_frame.pack(fill="x", **padding)
+
+    current_modifiers = tts_hotkey_modifiers.copy()
+    current_key = tts_hotkey_key
+
+    ctrl_var = tk.BooleanVar(value=current_modifiers.get("ctrl", False))
+    shift_var = tk.BooleanVar(value=current_modifiers.get("shift", False))
+    alt_var = tk.BooleanVar(value=current_modifiers.get("alt", False))
+    key_var = tk.StringVar(value=current_key if current_key else "")
+
+    check_frame = ttk.Frame(hotkey_frame)
+    check_frame.pack(fill="x", pady=5)
+
+    ttk.Checkbutton(check_frame, text="Ctrl", variable=ctrl_var).pack(side="left", padx=5)
+    ttk.Checkbutton(check_frame, text="Shift", variable=shift_var).pack(side="left", padx=5)
+    ttk.Checkbutton(check_frame, text="Alt", variable=alt_var).pack(side="left", padx=5)
+
+    key_frame = ttk.Frame(hotkey_frame)
+    key_frame.pack(fill="x", pady=5)
+
+    ttk.Label(key_frame, text="Key:").pack(side="left", padx=5)
+    key_entry = ttk.Entry(key_frame, textvariable=key_var, width=10)
+    key_entry.pack(side="left", padx=5)
+
+    # 4. 저장 버튼 (미리듣기는 위로 이동함)
+    button_frame = ttk.Frame(dialog)
+    button_frame.pack(side="bottom", fill="x", pady=20)
+
+    # (미리듣기 버튼 제거됨)
+
+    def save_tts_settings_action():
+        global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate
+
+        tts_hotkey_modifiers["ctrl"] = ctrl_var.get()
+        tts_hotkey_modifiers["shift"] = shift_var.get()
+        tts_hotkey_modifiers["alt"] = alt_var.get()
+        k = key_var.get().strip().upper()
+        tts_hotkey_key = k if k else None
+
+        selected_disp = voice_var.get()
+        tts_voice_name = voice_map.get(selected_disp, "ko-KR-Wavenet-A")
+        tts_speaking_rate = rate_var.get()
+
+        save_settings()
+
+        log_to_console(get_msg("tts_hotkey_updated"))
+        # 토스트 알림 (messagebox 대신)
+        try:
+            from ttkbootstrap.toast import ToastNotification
+            ToastNotification(title="설정 저장", message="TTS 설정이 저장되었습니다.", duration=2000, bootstyle="success").show_toast()
+        except: pass
+        dialog.destroy()
+
+    ttk.Button(button_frame, text=get_msg("save"), command=save_tts_settings_action, width=10, bootstyle="success").pack(side="right", padx=20)
+    ttk.Button(button_frame, text=get_msg("cancel"), command=dialog.destroy, width=10, bootstyle="secondary").pack(side="right", padx=10)
+
+    # 창 크기 자동 조절 및 강제 업데이트 (렌더링 문제 해결)
+    dialog.update()
+
+def show_hotkey_dialog(mode="stt"):
+    """하위 호환성을 위한 래퍼 함수"""
+    if mode == "stt":
+        show_stt_settings_dialog()
+    else:
+        show_tts_settings_dialog()
+
+
 
 # 녹음 관련 함수
 def start_recording():
@@ -2565,93 +2675,169 @@ def process_address_format(text):
     logging.info(f"주소 형식 변환 결과: {text}")
     return text
 
+# TTS 재생 관련 상태 변수
+tts_audio_data = None
+tts_data_index = 0
+tts_playing = False
+tts_paused = False
+tts_stop_event = threading.Event()
+tts_current_file = None  # 현재 재생 파일 경로
+
+def stop_current_playback():
+    """현재 재생 중인 오디오를 강제 중지합니다."""
+    global tts_playing, tts_paused, tts_stop_event
+
+    tts_stop_event.set()
+    try:
+        import winsound
+        winsound.PlaySound(None, winsound.SND_PURGE)
+    except: pass
+
+    tts_playing = False
+    tts_paused = False
+
+def play_tts_file(filepath):
+    """저장된 WAV 파일을 재생합니다."""
+    global tts_playing, tts_paused, tts_stop_event, tts_current_file
+
+    # 기존 재생 중지
+    stop_current_playback()
+    import time
+    time.sleep(0.1)
+
+    tts_playing = True
+    tts_paused = False
+    tts_stop_event.clear()
+    tts_current_file = filepath
+
+    try:
+        update_tray_menu()
+    except: pass
+
+    log_to_console(f"[TTS] 파일 재생 시작: {os.path.basename(filepath)}")
+
+    try:
+        import winsound
+        # 비동기 재생
+        winsound.PlaySound(filepath, winsound.SND_FILENAME | winsound.SND_ASYNC)
+
+        # 파일 길이 계산하여 대기
+        try:
+            import soundfile as sf
+            data, samplerate = sf.read(filepath)
+            duration = len(data) / samplerate
+        except:
+            duration = 10  # 기본 10초
+
+        # 재생 시간 동안 대기하면서 중지 이벤트 체크
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            if tts_stop_event.is_set():
+                winsound.PlaySound(None, winsound.SND_PURGE)
+                log_to_console("[TTS] 재생 중지됨")
+                break
+            time.sleep(0.1)
+
+    except Exception as e:
+        log_to_console(f"[TTS] 재생 오류: {e}")
+    finally:
+        tts_playing = False
+        tts_paused = False
+        tts_stop_event.clear()
+        log_to_console("[TTS] 재생 종료")
+        try:
+            update_tray_menu()
+        except: pass
+
 def speak_text(text):
     """텍스트를 음성으로 변환하여 재생합니다."""
-    global google_tts, google_tts_client, is_speaking
+    global google_tts, google_tts_client, tts_audio_data, tts_data_index
 
-    log_to_console(f"[TTS] speak_text 호출됨 (텍스트 길이: {len(text) if text else 0})")
+    log_to_console(f"[TTS] speak_text 호출됨 (길이: {len(text) if text else 0})")
 
     if not text:
-        log_to_console("[TTS] 오류: 텍스트가 비어있습니다.")
+        log_to_console("[TTS] 텍스트 없음")
         return
 
-    if not google_tts_client:
-        log_to_console("[TTS] 오류: TTS 클라이언트가 초기화되지 않았습니다.")
-        logging.error("TTS 클라이언트가 초기화되지 않음")
-        return
-
-    if not google_tts:
-        log_to_console("[TTS] 오류: TTS 모듈이 로드되지 않았습니다.")
-        logging.error("TTS 모듈이 로드되지 않음")
+    if not google_tts_client or not google_tts:
+        log_to_console("[TTS] 초기화 안됨")
         return
 
     def _speak():
-        global is_speaking
+        global tts_audio_data, tts_data_index
         try:
-            is_speaking = True
-
-            # 비프음으로 TTS 시작 알림
+            # 비프음
             try:
                 import winsound
-                winsound.Beep(800, 150)  # 800Hz, 150ms
-                log_to_console("[TTS] 비프음 재생 완료")
-            except Exception as beep_err:
-                logging.warning(f"비프음 재생 실패: {beep_err}")
+                winsound.Beep(800, 150)
+            except: pass
 
-            log_to_console(f"[TTS] 음성 합성 시작: '{text[:50]}...'")
+            log_to_console(f"[TTS] 합성 시작: {text[:30]}...")
 
-            # 입력 텍스트 설정
-            log_to_console("[TTS] SynthesisInput 생성 중...")
             synthesis_input = google_tts.SynthesisInput(text=text)
+            voice = google_tts.VoiceSelectionParams(language_code="ko-KR", name=tts_voice_name)
+            audio_config = google_tts.AudioConfig(audio_encoding=google_tts.AudioEncoding.LINEAR16, sample_rate_hertz=24000, speaking_rate=tts_speaking_rate)
 
-            # 보이스 설정 (한국어 고품질 WaveNet)
-            log_to_console("[TTS] VoiceSelectionParams 설정 중...")
-            voice = google_tts.VoiceSelectionParams(
-                language_code="ko-KR",
-                name="ko-KR-Wavenet-A"
-            )
-
-            log_to_console("[TTS] AudioConfig 설정 중...")
-            audio_config = google_tts.AudioConfig(
-                audio_encoding=google_tts.AudioEncoding.LINEAR16,
-                sample_rate_hertz=24000
-            )
-
-            log_to_console("[TTS] Google TTS API 호출 중...")
-            response = google_tts_client.synthesize_speech(
-                input=synthesis_input, voice=voice, audio_config=audio_config
-            )
+            response = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
 
             audio_content = response.audio_content
-            log_to_console(f"[TTS] 오디오 데이터 수신 완료 ({len(audio_content)} bytes)")
-
             if len(audio_content) <= 44:
-                log_to_console("[TTS] 오류: 오디오 데이터가 너무 작습니다.")
+                log_to_console("[TTS] 데이터 없음")
                 return
 
+            # 파일 저장
+            try:
+                import os
+                import sys
+                import datetime
+
+                # 실행 경로 확인 (exe 여부 고려)
+                if getattr(sys, 'frozen', False):
+                    base_path = os.path.dirname(sys.executable)
+                else:
+                    base_path = os.path.dirname(os.path.abspath(__file__))
+
+                sound_dir = os.path.join(base_path, "tts_audio")
+
+                if not os.path.exists(sound_dir):
+                    os.makedirs(sound_dir)
+
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"tts_{timestamp}.wav"
+                filepath = os.path.join(sound_dir, filename)
+
+                with open(filepath, "wb") as f:
+                    f.write(audio_content)
+                log_to_console(f"[TTS] 파일 저장: {filename}")
+            except Exception as e:
+                log_to_console(f"[TTS] 파일 저장 실패: {e}")
+                filepath = None
+
             import numpy as np
-            import sounddevice as sd
-
-            # WAV 헤더(44바이트)를 제외하고 numpy 배열로 변환
+            # WAV 헤더 44바이트 건너뛰기
             audio_data = np.frombuffer(audio_content[44:], dtype=np.int16)
-            log_to_console(f"[TTS] 오디오 재생 시작 (샘플 수: {len(audio_data)})")
 
-            sd.play(audio_data, 24000)
-            sd.wait()
+            # 데이터 저장 (재생용)
+            tts_audio_data = audio_data
+            tts_data_index = 0
 
-            log_to_console("[TTS] 음성 재생 완료")
+            # 파일 재생 (winsound 사용)
+            if filepath and os.path.exists(filepath):
+                play_tts_file(filepath)
+            else:
+                log_to_console("[TTS] 재생할 파일이 없습니다.")
 
         except Exception as e:
             import traceback
-            error_msg = f"TTS 재생 오류: {e}"
-            logging.error(error_msg)
             logging.error(traceback.format_exc())
-            log_to_console(f"[TTS] {error_msg}")
-        finally:
-            is_speaking = False
-            log_to_console("[TTS] speak_text 종료")
+            log_to_console(f"[TTS] 오류: {e}")
 
     threading.Thread(target=_speak, daemon=True).start()
+
+def stop_tts():
+    """TTS 완전 중지"""
+    stop_current_playback()
+    log_to_console("[TTS] 중지 요청")
 
 def read_selected_text():
     """선택된 텍스트를 읽어옵니다. (Ctrl+C 트릭 사용)"""

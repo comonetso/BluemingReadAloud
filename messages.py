@@ -127,7 +127,9 @@ messages = {
         "recognition_error": "음성 인식 오류: {}",
         "openai_api_not_set": "OpenAI API 또는 API 키가 설정되지 않았습니다.",
         "audio_processing_error": "오디오 처리 오류: {}",
-        "recording_stop_error": "녹음 종료 오류: {}"
+        "recording_stop_error": "녹음 종료 오류: {}",
+        "controller_created": "미니 녹음 컨트롤러가 화면에 표시되었습니다.",
+        "controller_position_saved": "컨트롤러 위치가 저장되었습니다."
     },
     "en": {
         "start": "=== Whisperer Voice-to-Text Started ===",
@@ -254,7 +256,9 @@ messages = {
         "recognition_error": "Speech recognition error: {}",
         "openai_api_not_set": "OpenAI API or API key is not configured.",
         "audio_processing_error": "Audio processing error: {}",
-        "recording_stop_error": "Recording stop error: {}"
+        "recording_stop_error": "Recording stop error: {}",
+        "controller_created": "Mini recording controller is displayed on screen.",
+        "controller_position_saved": "Controller position saved."
     },
     # 메뉴 항목
     "open_recordings_folder": {
@@ -381,6 +385,74 @@ messages = {
     "set_tts_hotkey_title": {
         "ko": "읽어주기 단축키 설정",
         "en": "TTS Hotkey Configuration"
+    },
+    "menu_stt_settings": {
+        "ko": "STT 설정",
+        "en": "STT Settings"
+    },
+    "menu_tts_settings": {
+        "ko": "TTS 설정",
+        "en": "TTS Settings"
+    },
+    "menu_stop_tts": {
+        "ko": "읽기 중지",
+        "en": "Stop Reading"
+    },
+    "dialog_stt_title": {
+        "ko": "STT 설정",
+        "en": "STT Settings"
+    },
+    "settings_saved": {
+        "ko": "설정이 저장되었습니다.",
+        "en": "Settings saved."
+    },
+    "dialog_tts_title": {
+        "ko": "TTS 설정",
+        "en": "TTS Settings"
+    },
+    "label_voice_model": {
+        "ko": "음성 모델:",
+        "en": "Voice Model:"
+    },
+    "label_speaking_rate": {
+        "ko": "재생 속도:",
+        "en": "Speaking Rate:"
+    },
+    "btn_preview": {
+        "ko": "미리듣기",
+        "en": "Preview"
+    },
+    "group_hotkey": {
+        "ko": "단축키 설정",
+        "en": "Hotkey Settings"
+    },
+    "label_voice_female": {
+        "ko": "여성",
+        "en": "Female"
+    },
+    "label_voice_male": {
+        "ko": "남성",
+        "en": "Male"
+    },
+    "menu_stt_model": {
+        "ko": "STT 모델",
+        "en": "STT Model"
+    },
+    "menu_language": {
+        "ko": "언어 변경 (한/영)",
+        "en": "Change Language (KR/EN)"
+    },
+    "language_changed": {
+        "ko": "언어가 변경되었습니다: {0}",
+        "en": "Language changed: {0}"
+    },
+    "current_language_ko": {
+        "ko": "현재: 한국어",
+        "en": "Current: Korean"
+    },
+    "current_language_en": {
+        "ko": "현재: English",
+        "en": "Current: English"
     }
 }
 
