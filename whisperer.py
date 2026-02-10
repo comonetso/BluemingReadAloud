@@ -1617,21 +1617,25 @@ def setup_tray_icon():
 def setup_floating_controller():
     """항상 위에 떠있는 미니 녹음 컨트롤러를 생성합니다."""
     import tkinter as tk
+    import ctypes
     global floating_controller, controller_canvas, controller_position
 
     if not root:
         return
 
-    SIZE = 44  # 트레이 아이콘 크기 정도
-    TRANSPARENT_COLOR = '#010101'  # 투명 처리용 색상
+    SIZE = 48  # 클릭하기 편한 크기
+    IDLE_COLOR = '#43A047'       # 대기: 초록
+    IDLE_OUTLINE = '#66BB6A'
+    REC_COLOR_1 = '#E53935'      # 녹음: 빨간 깜빡임 1
+    REC_COLOR_2 = '#C62828'      # 녹음: 빨간 깜빡임 2
+    REC_OUTLINE = '#EF5350'
+    ICON_COLOR = 'white'
 
     # Toplevel 창 생성
     ctrl_win = tk.Toplevel(root)
     ctrl_win.overrideredirect(True)      # 타이틀바 제거
     ctrl_win.attributes('-topmost', True) # 항상 위
-    ctrl_win.attributes('-alpha', 0.9)    # 약간 투명
-    ctrl_win.configure(bg=TRANSPARENT_COLOR)
-    ctrl_win.attributes('-transparentcolor', TRANSPARENT_COLOR)  # 배경 투명
+    ctrl_win.configure(bg=IDLE_COLOR)     # 배경 = 버튼색 (사각 모서리 최소화)
 
     # 저장된 위치 복원 또는 기본 위치 (화면 우하단)
     if controller_position and isinstance(controller_position, dict):
@@ -1645,21 +1649,38 @@ def setup_floating_controller():
 
     ctrl_win.geometry(f"{SIZE}x{SIZE}+{x}+{y}")
 
-    # 캔버스 생성
+    # ── 포커스 탈취 방지 (WS_EX_NOACTIVATE) ──
+    # 클릭해도 원래 활성 창의 포커스를 빼앗지 않음 → 커서 위치 유지
+    ctrl_win.update_idletasks()
+    try:
+        hwnd = ctypes.windll.user32.GetParent(ctrl_win.winfo_id())
+        GWL_EXSTYLE = -20
+        WS_EX_NOACTIVATE = 0x08000000
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_APPWINDOW = 0x00040000
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        style = style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+        style = style & ~WS_EX_APPWINDOW
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        logging.info("컨트롤러 WS_EX_NOACTIVATE 설정 완료 (포커스 탈취 방지)")
+    except Exception as e:
+        logging.warning(f"컨트롤러 포커스 설정 실패 (기능에 영향 없음): {e}")
+
+    # 캔버스 생성 (배경 = 버튼색)
     canvas = tk.Canvas(ctrl_win, width=SIZE, height=SIZE,
-                       highlightthickness=0, bd=0, bg=TRANSPARENT_COLOR)
+                       highlightthickness=0, bd=0, bg=IDLE_COLOR)
     canvas.pack(fill='both', expand=True)
 
     # 둥근 버튼 그리기
     PAD = 2
-    # 외곽 원 (테두리)
     canvas.create_oval(PAD, PAD, SIZE - PAD, SIZE - PAD,
-                       fill='#4CAF50', outline='#388E3C', width=2,
+                       fill=IDLE_COLOR, outline=IDLE_OUTLINE, width=2,
                        tags='btn_circle')
-    # 내부 아이콘 (대기: 작은 흰색 원 = 마이크 심볼)
-    icon_pad = SIZE // 3
-    canvas.create_oval(icon_pad, icon_pad, SIZE - icon_pad, SIZE - icon_pad,
-                       fill='white', outline='white', width=0,
+    # 내부 아이콘: 흰색 원 (마이크 심볼)
+    icon_r = SIZE // 5
+    cx, cy = SIZE // 2, SIZE // 2
+    canvas.create_oval(cx - icon_r, cy - icon_r, cx + icon_r, cy + icon_r,
+                       fill=ICON_COLOR, outline='', width=0,
                        tags='btn_icon')
 
     floating_controller = ctrl_win
@@ -1704,45 +1725,55 @@ def setup_floating_controller():
 
     def _toggle_recording():
         if recording:
-            log_to_console(get_msg("controller_recording_stop") if "controller_recording_stop" in messages.get(current_language, {}) else "녹음 중지 (컨트롤러)")
+            log_to_console("녹음 중지 (컨트롤러)")
             root.after(10, stop_recording)
         else:
-            log_to_console(get_msg("controller_recording_start") if "controller_recording_start" in messages.get(current_language, {}) else "녹음 시작 (컨트롤러)")
+            log_to_console("녹음 시작 (컨트롤러)")
             root.after(10, start_recording)
 
     canvas.bind('<ButtonPress-1>', on_press)
     canvas.bind('<B1-Motion>', on_drag)
     canvas.bind('<ButtonRelease-1>', on_release)
 
-    # ── 상태 업데이트 루프 (500ms 주기) ──
+    # ── 상태 업데이트 + 사라짐 방지 루프 (500ms 주기) ──
     blink_state = [False]
+    keep_alive_counter = [0]
 
     def update_state():
         if not ctrl_win.winfo_exists():
             return
         try:
             if recording:
-                # 녹음 중: 빨간색 깜빡임
+                # 녹음 중: 빨간색 깜빡임 + 정지 아이콘
                 blink_state[0] = not blink_state[0]
-                color = '#F44336' if blink_state[0] else '#D32F2F'
-                outline = '#B71C1C'
-                canvas.itemconfig('btn_circle', fill=color, outline=outline)
+                color = REC_COLOR_1 if blink_state[0] else REC_COLOR_2
+                canvas.itemconfig('btn_circle', fill=color, outline=REC_OUTLINE)
+                canvas.configure(bg=color)
+                ctrl_win.configure(bg=color)
                 # 내부 아이콘: 흰색 사각형 (정지 심볼)
                 canvas.delete('btn_icon')
-                sq_pad = SIZE // 3 + 2
-                canvas.create_rectangle(sq_pad, sq_pad, SIZE - sq_pad, SIZE - sq_pad,
-                                        fill='white', outline='white', width=0,
+                sq_r = SIZE // 6
+                canvas.create_rectangle(cx - sq_r, cy - sq_r, cx + sq_r, cy + sq_r,
+                                        fill=ICON_COLOR, outline='', width=0,
                                         tags='btn_icon')
             else:
-                # 대기 중: 초록색
+                # 대기 중: 초록색 + 마이크 아이콘
                 blink_state[0] = False
-                canvas.itemconfig('btn_circle', fill='#4CAF50', outline='#388E3C')
-                # 내부 아이콘: 흰색 원 (마이크 심볼)
+                canvas.itemconfig('btn_circle', fill=IDLE_COLOR, outline=IDLE_OUTLINE)
+                canvas.configure(bg=IDLE_COLOR)
+                ctrl_win.configure(bg=IDLE_COLOR)
                 canvas.delete('btn_icon')
-                icon_p = SIZE // 3
-                canvas.create_oval(icon_p, icon_p, SIZE - icon_p, SIZE - icon_p,
-                                   fill='white', outline='white', width=0,
+                canvas.create_oval(cx - icon_r, cy - icon_r, cx + icon_r, cy + icon_r,
+                                   fill=ICON_COLOR, outline='', width=0,
                                    tags='btn_icon')
+
+            # 3초마다 topmost 재적용 (사라짐 방지)
+            keep_alive_counter[0] += 1
+            if keep_alive_counter[0] >= 6:  # 500ms * 6 = 3초
+                keep_alive_counter[0] = 0
+                ctrl_win.attributes('-topmost', True)
+                ctrl_win.lift()
+
         except Exception:
             pass
         ctrl_win.after(500, update_state)
