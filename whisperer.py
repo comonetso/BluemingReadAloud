@@ -1623,7 +1623,7 @@ def setup_floating_controller():
     if not root:
         return
 
-    SIZE = 48  # 클릭하기 편한 크기
+    SIZE = 28  # 작고 깔끔한 크기
     IDLE_COLOR = '#43A047'       # 대기: 초록
     IDLE_OUTLINE = '#66BB6A'
     REC_COLOR_1 = '#E53935'      # 녹음: 빨간 깜빡임 1
@@ -1649,11 +1649,20 @@ def setup_floating_controller():
 
     ctrl_win.geometry(f"{SIZE}x{SIZE}+{x}+{y}")
 
-    # ── 포커스 탈취 방지 (WS_EX_NOACTIVATE) ──
-    # 클릭해도 원래 활성 창의 포커스를 빼앗지 않음 → 커서 위치 유지
+    # ── Win32: 소유자 분리 + 포커스 탈취 방지 + TOPMOST 확정 ──
+    # root.withdraw()와 독립시켜 사라짐을 근본 방지
     ctrl_win.update_idletasks()
     try:
         hwnd = ctypes.windll.user32.GetParent(ctrl_win.winfo_id())
+
+        # 1) 소유자 창(root) 연결 해제 → root 상태와 무관하게 독립 생존
+        GWLP_HWNDPARENT = -8
+        try:
+            ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0)
+        except AttributeError:
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWLP_HWNDPARENT, 0)
+
+        # 2) 포커스 탈취 방지 + 작업표시줄 제외
         GWL_EXSTYLE = -20
         WS_EX_NOACTIVATE = 0x08000000
         WS_EX_TOOLWINDOW = 0x00000080
@@ -1662,9 +1671,24 @@ def setup_floating_controller():
         style = style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
         style = style & ~WS_EX_APPWINDOW
         ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-        logging.info("컨트롤러 WS_EX_NOACTIVATE 설정 완료 (포커스 탈취 방지)")
+
+        # 3) SetWindowPos로 TOPMOST 확정 (스타일 변경 반영)
+        HWND_TOPMOST = -1
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_FRAMECHANGED = 0x0020
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED
+        )
+
+        # 4) 원형 모양으로 창 클리핑 (네모 모서리 제거)
+        region = ctypes.windll.gdi32.CreateEllipticRgn(0, 0, SIZE + 1, SIZE + 1)
+        ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
+
+        logging.info("컨트롤러 Win32 설정 완료 (소유자 분리 + 포커스 방지 + TOPMOST)")
     except Exception as e:
-        logging.warning(f"컨트롤러 포커스 설정 실패 (기능에 영향 없음): {e}")
+        logging.warning(f"컨트롤러 Win32 설정 실패 (기능에 영향 없음): {e}")
 
     # 캔버스 생성 (배경 = 버튼색)
     canvas = tk.Canvas(ctrl_win, width=SIZE, height=SIZE,
