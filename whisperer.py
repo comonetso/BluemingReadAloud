@@ -139,34 +139,47 @@ hotkey_key = None  # 추가 키 없음
 
 # 프로그램 다중 실행 방지
 def prevent_multiple_instances():
-    """프로그램의 다중 실행을 방지합니다"""
+    """프로그램의 다중 실행을 방지합니다 (소켓 + Windows Mutex 이중 방어)"""
+    # 1차: Windows Named Mutex 방식 (가장 확실)
+    global _instance_mutex
     try:
-        # 소켓을 생성하여 특정 포트에 바인딩 시도
+        import ctypes
+        _instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "YeogiaenSTTTyper_SingleInstance")
+        last_error = ctypes.windll.kernel32.GetLastError()
+        if last_error == 183:  # ERROR_ALREADY_EXISTS
+            logging.warning("Mutex: 프로그램이 이미 실행 중입니다.")
+            if hasattr(sys, 'frozen'):
+                try:
+                    import tkinter as tk
+                    from tkinter import messagebox
+                    root = tk.Tk()
+                    root.withdraw()
+                    messagebox.showwarning(
+                        "Yeogiaen WhisperTyper",
+                        "프로그램이 이미 실행 중입니다.\n시스템 트레이에서 프로그램 아이콘을 확인하세요."
+                    )
+                    root.destroy()
+                except:
+                    pass
+            else:
+                print("프로그램이 이미 실행 중입니다.")
+            return False
+    except Exception as e:
+        logging.warning(f"Mutex 생성 실패, 소켓 방식으로 대체: {e}")
+
+    # 2차: 소켓 포트 바인딩 방식 (백업)
+    try:
         global single_instance_socket
         single_instance_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-        # 테스트를 위해 다른 포트 사용 (원래 포트: 51888)
-        test_port = 51890 # 테스트용 다른 포트 사용
-        single_instance_socket.bind(('localhost', test_port))
-        logging.info("프로그램 실행: 테스트 인스턴스 (포트 변경)")
-        return True  # 첫 번째 인스턴스
+        single_instance_socket.bind(('localhost', 51888))
+        logging.info("프로그램 단일 인스턴스 확인 완료")
     except socket.error:
-        logging.warning("프로그램이 이미 실행 중입니다. 중복 실행을 방지합니다.")
-        # 이미 실행 중인 프로그램이 있으면 메시지 표시 후 종료
-        if not hasattr(sys, 'frozen'):  # 개발 모드에서는 경고만 표시
+        logging.warning("소켓: 프로그램이 이미 실행 중입니다.")
+        if not hasattr(sys, 'frozen'):
             print("프로그램이 이미 실행 중입니다.")
-        else:  # 배포 버전에서는 GUI 메시지 표시
-            try:
-                root = tk.Tk()
-                root.withdraw()
-                messagebox.showwarning(
-                    "Yeogiaen WhisperTyper",
-                    "프로그램이 이미 실행 중입니다.\n시스템 트레이에서 프로그램 아이콘을 확인하세요."
-                )
-                root.destroy()
-            except:
-                pass
-        return False  # 이미 다른 인스턴스가 실행 중
+        return False
+
+    return True  # 첫 번째 인스턴스
 
 # 나중에 필요할 때 모듈 로딩
 def load_modules_async():
@@ -502,13 +515,15 @@ def setup_logging():
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
 
     # 기본 로거 설정
+    # PyInstaller console=False에서는 sys.stdout이 None이므로 방어 처리
+    log_handlers = [logging.FileHandler(log_file, encoding='utf-8')]
+    if sys.stdout is not None:
+        log_handlers.append(logging.StreamHandler(sys.stdout))
+
     logging.basicConfig(
-        level=logging.DEBUG, # DEBUG로 변경하여 모든 로그 확인
+        level=logging.DEBUG,
         format=log_format,
-        handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=log_handlers
     )
 
     # 콘솔 로그 초기화
@@ -530,8 +545,12 @@ def log_to_console(message):
     """콘솔 로그 파일에 메시지 기록"""
     global console_log_file
 
-    # 콘솔에 출력
-    print(message)
+    # 콘솔에 출력 (sys.stdout이 None이 아닐 때만)
+    if sys.stdout is not None:
+        try:
+            print(message)
+        except Exception:
+            pass
 
     # 파일에 기록
     if console_log_file:
@@ -539,8 +558,8 @@ def log_to_console(message):
             timestamp = datetime.datetime.now().strftime("%H:%M:%S")
             with open(console_log_file, 'a', encoding='utf-8') as f:
                 f.write(f"[{timestamp}] {message}\n")
-        except Exception as e:
-            print(f"로그 기록 오류: {str(e)}")
+        except Exception:
+            pass
 
 def main():
     # README 파일 추출
@@ -796,35 +815,21 @@ def setup_keyboard_listener():
             return False
 
     def on_press(key):
-        """키 누름 이벤트 핸들러"""
+        """키 누름 이벤트 핸들러 — Windows 훅 타임아웃 방지를 위해 I/O 금지"""
         global ctrl_pressed, shift_pressed, alt_pressed, recording, recording_started_with_combo
 
         try:
-            logging.debug(f"키 누름: {key}")
-
-            # 키 상태 업데이트
+            # 키 상태 업데이트 (I/O 없이 빠르게 처리)
             if key == Key.ctrl_l or key == Key.ctrl_r:
                 ctrl_pressed = True
-                logging.debug("Ctrl 키 눌림")
             elif key == Key.shift_l or key == Key.shift_r:
                 shift_pressed = True
-                logging.debug("Shift 키 눌림")
             elif key == Key.alt_l or key == Key.alt_r:
                 alt_pressed = True
-                logging.debug("Alt 키 눌림")
-
-            # 특정 키 조합 로그 (콘솔에도 출력하여 확인 유도)
-            if ctrl_pressed or alt_pressed:
-                logging.info(f"조합 키 입력 감지: {key} (Ctrl={ctrl_pressed}, Alt={alt_pressed}, Shift={shift_pressed})")
-
-            logging.debug(f"현재 키 상태: Ctrl={ctrl_pressed}, Shift={shift_pressed}, Alt={alt_pressed}")
-            logging.debug(f"설정된 STT 단축키: 수정자={hotkey_modifiers}, 키={hotkey_key}")
-            logging.debug(f"설정된 TTS 단축키: 수정자={tts_hotkey_modifiers}, 키={tts_hotkey_key}")
 
             if not recording:
-                # If no 사용자 정의 단축키가 설정되어 있으면 기본 단축키 (Ctrl+Shift+Alt) 사용
+                # 기본 단축키 (Ctrl+Shift+Alt)
                 if hotkey_key is None and ctrl_pressed and shift_pressed and alt_pressed:
-                    logging.info("기본 녹음 단축키 감지됨 (Ctrl+Shift+Alt)")
                     log_to_console("녹음 시작 단축키 감지...")
                     if root:
                         root.after(10, start_recording)
@@ -843,17 +848,13 @@ def setup_keyboard_listener():
                 key_match = False
                 if hotkey_key:
                     if isinstance(key, KeyCode):
-                        # pynput KeyCode handling (char might be control char)
                         key_char = key.char
                         if key_char:
-                            # Ctrl+Key 처리
                             if ctrl_pressed and len(key_char) == 1 and ord(key_char) < 32:
                                 key_char = chr(ord(key_char) + 64)
                             key_match = key_char.upper() == hotkey_key.upper()
                         elif key.vk is not None:
-                            # VK 코드로 문자 키 확인 (D=68, S=83 등)
                             try:
-                                # A-Z는 VK 65-90
                                 if 65 <= key.vk <= 90:
                                     key_match = chr(key.vk).upper() == hotkey_key.upper()
                             except:
@@ -865,7 +866,6 @@ def setup_keyboard_listener():
                     key_match = True
 
                 if modifier_match and key_match:
-                    logging.info(f"사용자 정의 녹음 단축키 감지됨: 수정자={hotkey_modifiers}, 키={hotkey_key}")
                     log_to_console("사용자 정의 녹음 단축키 감지...")
                     if root:
                         root.after(10, start_recording)
@@ -901,47 +901,35 @@ def setup_keyboard_listener():
                         tts_key_match = key_str.upper() == tts_hotkey_key.upper()
 
                 if tts_modifier_match and tts_key_match:
-                    logging.info("TTS 읽기 단축키 감지됨")
                     if root:
                         root.after(10, read_selected_text)
                     else:
                         read_selected_text()
                     return True
 
-        except Exception as e:
-            logging.error(f"키 누름 처리 중 오류: {str(e)}")
-            return False
+        except Exception:
+            pass  # 훅 콜백에서 예외 로깅도 타임아웃 유발 가능
 
     def on_release(key):
-        """키 뗌 이벤트 핸들러"""
+        """키 뗌 이벤트 핸들러 — Windows 훅 타임아웃 방지를 위해 I/O 금지"""
         global ctrl_pressed, shift_pressed, alt_pressed, recording, recording_started_with_combo
 
         try:
-            # 현재 키 로깅
-            logging.debug(f"키 뗌: {key}")
-
-            # 키 상태 업데이트
+            # 키 상태 업데이트 (I/O 없이 빠르게 처리)
             if key == Key.ctrl_l or key == Key.ctrl_r:
                 ctrl_pressed = False
-                logging.debug("Ctrl 키 뗌")
             elif key == Key.shift_l or key == Key.shift_r:
                 shift_pressed = False
-                logging.debug("Shift 키 뗌")
             elif key == Key.alt_l or key == Key.alt_r:
                 alt_pressed = False
-                logging.debug("Alt 키 뗌")
 
             # 녹음 중이고 단축키로 시작했을 때만 처리
             if recording and recording_started_with_combo:
-                # 수정자 키(Ctrl, Shift, Alt)가 떼어졌는지 확인
                 if (key == Key.ctrl_l or key == Key.ctrl_r or
                     key == Key.shift_l or key == Key.shift_r or
                     key == Key.alt_l or key == Key.alt_r):
 
-                    logging.info("녹음 종료 단축키 감지 (수정자 키 뗌)")
                     log_to_console("녹음 종료 단축키 감지...")
-
-                    # 녹음 종료 (메인 스레드에서 실행)
                     if root:
                         root.after(10, stop_recording)
                     else:
@@ -949,34 +937,47 @@ def setup_keyboard_listener():
                     recording_started_with_combo = False
                     return True
 
-        except Exception as e:
-            logging.error(f"키 뗌 처리 중 오류: {str(e)}")
-            return False
+        except Exception:
+            pass  # 훅 콜백에서 예외 로깅도 타임아웃 유발 가능
 
-        # 기존에 리스너 재시작하는 코드 블록 제거
         return True
 
     # 리스너 시작
     try:
-        # 기존 리스너가 있으면 중지
         global keyboard_listener
         if 'keyboard_listener' in globals() and keyboard_listener is not None:
             try:
                 keyboard_listener.stop()
-                logging.info("기존 키보드 리스너 중지됨")
             except:
                 pass
 
-        # 새 리스너 생성 및 시작
         keyboard_listener = Listener(on_press=on_press, on_release=on_release)
-        keyboard_listener.daemon = True  # 데몬 스레드로 설정
+        keyboard_listener.daemon = True
         keyboard_listener.start()
-        logging.info("키보드 리스너 시작됨")
         log_to_console("키보드 리스너가 시작되었습니다. (단축키 설정: 녹음)")
+
+        # 키보드 리스너 watchdog 시작 (30초마다 리스너 생존 확인, 죽으면 재시작)
+        def keyboard_watchdog():
+            global keyboard_listener
+            while True:
+                try:
+                    import time as _time
+                    _time.sleep(30)
+                    if keyboard_listener and not keyboard_listener.is_alive():
+                        log_to_console("[Watchdog] 키보드 리스너 재시작 중...")
+                        keyboard_listener = Listener(on_press=on_press, on_release=on_release)
+                        keyboard_listener.daemon = True
+                        keyboard_listener.start()
+                        log_to_console("[Watchdog] 키보드 리스너 재시작 완료")
+                except Exception:
+                    pass
+
+        watchdog_thread = threading.Thread(target=keyboard_watchdog, daemon=True)
+        watchdog_thread.start()
+
         return True
 
     except Exception as e:
-        logging.error(f"키보드 리스너 시작 실패: {str(e)}")
         log_to_console(f"오류: 키보드 리스너 시작 실패: {str(e)}")
         return False
 
