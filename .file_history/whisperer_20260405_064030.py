@@ -2970,12 +2970,10 @@ def speak_text(text):
 
     # TTS 재생용 텍스트 필터링 (이모티콘, 괄호 내용, 특수문자 제거)
     try:
-        # 0. 하이픈(-), 언더스코어(_)는 공백으로 치환하여 발음 방지
-        text = text.replace('_', ' ').replace('-', ' ')
         # 1. 괄호와 그 안의 내용 제거
         text = re.sub(r'\([^)]*\)|\[[^\]]*\]|\{[^}]*\}|\<[^>]*\>', '', text)
-        # 2. 불필요 기호 제거 (한글, 영대소문자, 숫자, 기본 구두점, 콜론만 허용)
-        text = re.sub(r'[^가-힣A-Za-z0-9\s\.,\?\!~\'\":]', '', text)
+        # 2. 이모티콘 및 불필요 특수문자 제거 (한글, 영문, 숫자, 기본 구두점, 콜론 등만 남김)
+        text = re.sub(r'[^\w\s\.,\?\!~\-\'\":]', '', text)
         # 3. 양끝 공백 정리
         text = text.strip()
     except Exception as e:
@@ -3000,72 +2998,71 @@ def speak_text(text):
 
             log_to_console(f"[TTS] 합성 시작: {text[:30]}...")
 
-            # --- 한/영 스위칭 보이스 및 SSML 조립 적용 ---
-            import numpy as np
+            # --- SSML 적용 로직 ---
+            ssml_text = text
 
-            # 영어 알파벳 덩어리를 기준으로 쪼갬 (한글 덩어리 / 영어 덩어리 분리)
-            pieces = re.split(r'([A-Za-z]+(?:\s+[A-Za-z]+)*)', text)
-            
-            audio_chunks = []
+            # 태그 문자가 서로 꼬이지 않도록 콜론과 콤마를 임시 마커로 치환
+            ssml_text = ssml_text.replace(':', '__C_COLON__')
+            ssml_text = ssml_text.replace(',', '__C_COMMA__')
+
+            # 1. 영어 단어 찾아 원어민 발음 태그 씌우기
+            ssml_text = re.sub(r'([A-Za-z]+)', r'<lang xml:lang="en-US">\1</lang>', ssml_text)
+
+            # 2. 임시 마커를 실제 휴식(break) 태그로 변환
+            ssml_text = ssml_text.replace('__C_COLON__', '<break time="500ms"/>')
+            ssml_text = ssml_text.replace('__C_COMMA__', '<break time="300ms"/>')
+
+            # 3. 최종 SSML 마크업 완성
+            ssml_text = f"<speak>{ssml_text}</speak>"
+
+            synthesis_input = google_tts.SynthesisInput(ssml=ssml_text)
+            voice = google_tts.VoiceSelectionParams(language_code="ko-KR", name=tts_voice_name)
             audio_config = google_tts.AudioConfig(audio_encoding=google_tts.AudioEncoding.LINEAR16, sample_rate_hertz=24000, speaking_rate=tts_speaking_rate)
 
-            for piece in pieces:
-                if not piece.strip(): 
-                    continue
+            response = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
 
-                # 콤마, 콜론을 휴식 마커로 변경
-                piece_ssml = piece.replace(':', '<break time="500ms"/>').replace(',', '<break time="300ms"/>')
-                piece_ssml = f"<speak>{piece_ssml}</speak>"
-
-                # 덩어리의 언어 판별 (알파벳이 있고 한글이 없으면 영어 모드 작동)
-                is_english = bool(re.search(r'[A-Za-z]', piece)) and not bool(re.search(r'[가-힣]', piece))
-
-                voice_code = "en-US" if is_english else "ko-KR"
-                voice_name = "en-US-Neural2-F" if is_english else tts_voice_name
-
-                voice = google_tts.VoiceSelectionParams(language_code=voice_code, name=voice_name)
-                synthesis_input = google_tts.SynthesisInput(ssml=piece_ssml)
-
-                try:
-                    resp = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
-                    if len(resp.audio_content) > 44:
-                        chunk_data = np.frombuffer(resp.audio_content[44:], dtype=np.int16)
-                        audio_chunks.append(chunk_data)
-                except Exception as e:
-                    log_to_console(f"[TTS] 부분 합성 에러: {e}")
-
-            if not audio_chunks:
-                log_to_console("[TTS] 병합할 오디오 데이터가 없습니다.")
+            audio_content = response.audio_content
+            if len(audio_content) <= 44:
+                log_to_console("[TTS] 데이터 없음")
                 return
 
-            # 조각난 덩어리들을 하나로 매끄럽게 연결
-            audio_data = np.concatenate(audio_chunks)
-            tts_audio_data = audio_data
-            tts_data_index = 0
-
             # 파일 저장
-            filepath = None
             try:
-                import os, sys, datetime
-                import soundfile as sf
-                
+                import os
+                import sys
+                import datetime
+
+                # 실행 경로 확인 (exe 여부 고려)
                 if getattr(sys, 'frozen', False):
                     base_path = os.path.dirname(sys.executable)
                 else:
                     base_path = os.path.dirname(os.path.abspath(__file__))
 
                 sound_dir = os.path.join(base_path, "tts_audio")
+
                 if not os.path.exists(sound_dir):
                     os.makedirs(sound_dir)
 
-                filename = f"tts_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"tts_{timestamp}.wav"
                 filepath = os.path.join(sound_dir, filename)
 
-                sf.write(filepath, audio_data, 24000)
-                log_to_console(f"[TTS] 병합 파일 저장: {filename}")
+                with open(filepath, "wb") as f:
+                    f.write(audio_content)
+                log_to_console(f"[TTS] 파일 저장: {filename}")
             except Exception as e:
-                log_to_console(f"[TTS] 병합 파일 저장 실패: {e}")
+                log_to_console(f"[TTS] 파일 저장 실패: {e}")
+                filepath = None
 
+            import numpy as np
+            # WAV 헤더 44바이트 건너뛰기
+            audio_data = np.frombuffer(audio_content[44:], dtype=np.int16)
+
+            # 데이터 저장 (재생용)
+            tts_audio_data = audio_data
+            tts_data_index = 0
+
+            # 파일 재생 (winsound 사용)
             if filepath and os.path.exists(filepath):
                 play_tts_file(filepath)
             else:
