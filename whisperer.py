@@ -51,6 +51,7 @@ auto_language_detection = False  # 언어 자동 감지 사용 여부
 api_key_shortcut = False
 
 # 전역 변수
+stt_enabled = True        # STT 기능 활성화 여부 (외부 STT 사용 시 비활성화)
 recording = False
 audio_data = []
 stream = None
@@ -71,6 +72,7 @@ pynput_initialized = False # Pynput 초기화 여부
 floating_controller = None   # 플로팅 컨트롤러 창
 controller_canvas = None     # 컨트롤러 캔버스
 controller_position = None   # 컨트롤러 위치 {"x": int, "y": int}
+controller_mode = 'stt'      # 'stt' 또는 'tts' (STT 비활성화 시 TTS 전용 모드)
 
 # 성능 최적화 관련 변수
 use_performance_mode = True   # 성능 최적화 모드 사용 여부
@@ -114,12 +116,13 @@ google_tts_client = None
 tts_hotkey_modifiers = {"ctrl": True, "shift": False, "alt": True} # 기본 TTS 단축키: Ctrl+Alt+D
 tts_hotkey_key = "D"
 is_speaking = False       # TTS 재생 중 플래그
-tts_voice_name = "ko-KR-Wavenet-A"  # 기본 음성 모델
+tts_voice_name = "ko-KR-Chirp3-HD-Callirrhoe"  # 기본 음성 모델
 tts_speaking_rate = 1.0   # 재생 속도 (0.25 ~ 4.0, 기본 1.0)
 current_audio_stream = None  # 현재 재생 중인 오디오 스트림
 
 # 사용 가능한 한국어 TTS 음성 목록 (이름, 성별, 유형, 설명)
 KOREAN_VOICES = [
+    ("ko-KR-Chirp3-HD-Callirrhoe", "여성", "Chirp3-HD", "고품질 한/영 자연스러운 여성 목소리 (추천)"),
     ("ko-KR-Wavenet-A", "여성", "WaveNet", "밝고 친근한 여성 목소리"),
     ("ko-KR-Wavenet-B", "여성", "WaveNet", "부드럽고 차분한 여성 목소리"),
     ("ko-KR-Wavenet-C", "남성", "WaveNet", "신뢰감 있는 남성 목소리"),
@@ -827,7 +830,7 @@ def setup_keyboard_listener():
             elif key == Key.alt_l or key == Key.alt_r:
                 alt_pressed = True
 
-            if not recording:
+            if not recording and stt_enabled:
                 # 기본 단축키 (Ctrl+Shift+Alt)
                 if hotkey_key is None and ctrl_pressed and shift_pressed and alt_pressed:
                     log_to_console("녹음 시작 단축키 감지...")
@@ -988,6 +991,7 @@ def save_settings():
         settings = {
             "language": current_language,
             "auto_detection": auto_language_detection,
+            "stt_enabled": stt_enabled,
             "google_credentials_path": google_credentials_path,
             "hotkey": {
                 "modifiers": hotkey_modifiers,
@@ -1022,7 +1026,7 @@ active_mode = "general"  # 기본값은 일반 대화 모드
 def load_settings():
     global current_language, hotkey_modifiers, hotkey_key, auto_language_detection, whisper_prompt, active_mode, google_credentials_path, google_stt_model
     global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate
-    global controller_position
+    global controller_position, stt_enabled, controller_mode
     try:
         if os.path.exists('whisperer_settings.json'):
             with open('whisperer_settings.json', 'r', encoding='utf-8') as f:
@@ -1032,6 +1036,9 @@ def load_settings():
                     current_language = settings["language"]
                 if "auto_detection" in settings:
                     auto_language_detection = settings["auto_detection"]
+                if "stt_enabled" in settings:
+                    stt_enabled = settings["stt_enabled"]
+                    controller_mode = 'stt' if stt_enabled else 'tts'
                 if "hotkey" in settings:
                     if "modifiers" in settings["hotkey"]:
                         hotkey_modifiers = settings["hotkey"]["modifiers"]
@@ -1631,6 +1638,10 @@ def setup_floating_controller():
     REC_COLOR_2 = '#C62828'      # 녹음: 빨간 깜빡임 2
     REC_OUTLINE = '#EF5350'
     ICON_COLOR = 'white'
+    TTS_COLOR = '#1565C0'        # TTS 모드 대기: 파란색
+    TTS_OUTLINE = '#42A5F5'
+    TTS_PLAY_COLOR = '#E65100'   # TTS 재생 중: 주황색
+    TTS_PLAY_OUTLINE = '#FF8A65'
 
     # Toplevel 창 생성
     ctrl_win = tk.Toplevel(root)
@@ -1639,15 +1650,21 @@ def setup_floating_controller():
     ctrl_win.configure(bg=IDLE_COLOR)     # 배경 = 버튼색 (사각 모서리 최소화)
 
     # 저장된 위치 복원 또는 기본 위치 (화면 우하단)
+    screen_w = ctrl_win.winfo_screenwidth()
+    screen_h = ctrl_win.winfo_screenheight()
     if controller_position and isinstance(controller_position, dict):
-        x = controller_position.get('x', 200)
-        y = controller_position.get('y', 200)
+        x = controller_position.get('x', screen_w - 120)
+        y = controller_position.get('y', screen_h - 120)
+        # 저장된 위치가 현재 화면 범위 밖이면 기본 위치로 폴백
+        if y >= screen_h or y < -SIZE or x >= screen_w * 2 or x < -screen_w:
+            x = screen_w - 120
+            y = screen_h - 120
+            log_to_console(f"[컨트롤러] 저장 위치 화면 밖 → 기본 위치로 복원 ({x},{y})")
     else:
-        screen_w = ctrl_win.winfo_screenwidth()
-        screen_h = ctrl_win.winfo_screenheight()
         x = screen_w - 120
         y = screen_h - 120
 
+    log_to_console(f"[컨트롤러] 생성 위치: ({x}, {y}), 화면: {screen_w}x{screen_h}")
     ctrl_win.geometry(f"{SIZE}x{SIZE}+{x}+{y}")
 
     # ── Win32: 소유자 분리 + 포커스 탈취 방지 + TOPMOST 확정 ──
@@ -1736,8 +1753,16 @@ def setup_floating_controller():
             # 드래그 종료 → 위치 저장
             _save_controller_position()
         else:
-            # 클릭 → 녹음 토글
-            _toggle_recording()
+            if controller_mode == 'tts':
+                # TTS 모드: 재생 중이면 중지, 아니면 선택 텍스트 읽기 시작
+                log_to_console(f"[컨트롤러] TTS 버튼 클릭 — tts_playing={tts_playing}")
+                if tts_playing:
+                    root.after(10, stop_tts)
+                else:
+                    root.after(10, read_selected_text)
+            else:
+                # STT 모드: 클릭 → 녹음 토글
+                _toggle_recording()
 
     def _save_controller_position():
         global controller_position
@@ -1768,7 +1793,26 @@ def setup_floating_controller():
         if not ctrl_win.winfo_exists():
             return
         try:
-            if recording:
+            if controller_mode == 'tts':
+                # TTS 전용 모드: 파란색 (재생 중이면 주황색 + 정지 아이콘)
+                if tts_playing:
+                    color = TTS_PLAY_COLOR
+                    outline = TTS_PLAY_OUTLINE
+                else:
+                    color = TTS_COLOR
+                    outline = TTS_OUTLINE
+                canvas.itemconfig('btn_circle', fill=color, outline=outline)
+                canvas.configure(bg=color)
+                ctrl_win.configure(bg=color)
+                canvas.delete('btn_icon')
+                if tts_playing:
+                    sq_r = SIZE // 6
+                    canvas.create_rectangle(cx - sq_r, cy - sq_r, cx + sq_r, cy + sq_r,
+                                            fill=ICON_COLOR, outline='', width=0, tags='btn_icon')
+                else:
+                    canvas.create_oval(cx - icon_r, cy - icon_r, cx + icon_r, cy + icon_r,
+                                       fill=ICON_COLOR, outline='', width=0, tags='btn_icon')
+            elif recording:
                 # 녹음 중: 빨간색 깜빡임 + 정지 아이콘
                 blink_state[0] = not blink_state[0]
                 color = REC_COLOR_1 if blink_state[0] else REC_COLOR_2
@@ -2035,7 +2079,7 @@ def show_stt_settings_dialog():
 
     dialog = ttk.Toplevel(root)
     dialog.title(get_msg("dialog_stt_title"))
-    dialog.geometry("450x550")
+    dialog.geometry("450x650")
     dialog.resizable(False, False)
     show_stt_settings_dialog.dialog = dialog
 
@@ -2046,6 +2090,24 @@ def show_stt_settings_dialog():
         pass
 
     padding = {'padx': 20, 'pady': 10}
+
+    # STT 활성화 토글
+    stt_frame = ttk.Labelframe(dialog, text="STT 기능", padding=15)
+    stt_frame.pack(fill="x", **padding)
+
+    stt_enabled_var = tk.BooleanVar(value=stt_enabled)
+
+    def on_stt_toggle(*args):
+        global stt_enabled, controller_mode
+        stt_enabled = stt_enabled_var.get()
+        controller_mode = 'stt' if stt_enabled else 'tts'
+        save_settings()
+        state = "활성화" if stt_enabled else "비활성화"
+        log_to_console(f"[STT] STT 기능 {state}")
+
+    stt_enabled_var.trace("w", on_stt_toggle)
+    stt_toggle = ttk.Checkbutton(stt_frame, text="STT 활성화  (외부 STT 사용 시 비활성화)", variable=stt_enabled_var, bootstyle="success-round-toggle")
+    stt_toggle.pack(anchor="w")
 
     # 단축키 설정 그룹
     hotkey_frame = ttk.Labelframe(dialog, text=get_msg("group_hotkey"), padding=15)
@@ -2119,7 +2181,10 @@ def show_stt_settings_dialog():
     button_frame.pack(side="bottom", fill="x", pady=20)
 
     def save_stt_settings():
-        global hotkey_modifiers, hotkey_key, google_stt_model, active_mode
+        global hotkey_modifiers, hotkey_key, google_stt_model, active_mode, stt_enabled
+
+        # STT 활성화 여부 저장
+        stt_enabled = stt_enabled_var.get()
 
         # 단축키 저장
         hotkey_modifiers["ctrl"] = ctrl_var.get()
@@ -2427,12 +2492,19 @@ def start_recording():
             stream.start()
             logging.info("오디오 스트림 시작됨")
 
-            # 녹음 시작 비프음 추가 (Windows 환경)
-            if winsound:
-                try:
-                    winsound.Beep(600, 200) # 600Hz, 200ms 비프음
-                except Exception as beep_e:
-                    logging.warning(f"녹음 시작 비프음 재생 오류: {str(beep_e)}")
+            # 녹음 시작 비프음 (600Hz, in-memory WAV)
+            try:
+                import wave as _wave, io as _io, winsound as _ws2
+                _sr2 = 44100; _dur2 = 0.2
+                _t2 = np.linspace(0, _dur2, int(_sr2 * _dur2), False)
+                _d2 = (np.sin(2 * np.pi * 600 * _t2) * 32767 * 0.7).astype(np.int16)
+                _b2 = _io.BytesIO()
+                with _wave.open(_b2, 'wb') as _wf2:
+                    _wf2.setnchannels(1); _wf2.setsampwidth(2)
+                    _wf2.setframerate(_sr2); _wf2.writeframes(_d2.tobytes())
+                _ws2.PlaySound(_b2.getvalue(), _ws2.SND_MEMORY)
+            except Exception as beep_e:
+                logging.warning(f"녹음 시작 비프음 재생 오류: {str(beep_e)}")
 
         except Exception as stream_e:
             error_msg = f"오디오 스트림 시작 오류: {str(stream_e)}"
@@ -2622,12 +2694,19 @@ def stop_recording():
             stream.stop()
             stream.close()
 
-        # 소리로 녹음 종료 알림 (Windows 환경)
-        if winsound:
-            try:
-                winsound.Beep(800, 200)  # 800Hz, 200ms
-            except:
-                pass
+        # 녹음 종료 비프음 (800Hz, in-memory WAV)
+        try:
+            import wave as _wave3, io as _io3, winsound as _ws3
+            _sr3 = 44100; _dur3 = 0.2
+            _t3 = np.linspace(0, _dur3, int(_sr3 * _dur3), False)
+            _d3 = (np.sin(2 * np.pi * 800 * _t3) * 32767 * 0.7).astype(np.int16)
+            _b3 = _io3.BytesIO()
+            with _wave3.open(_b3, 'wb') as _wf3:
+                _wf3.setnchannels(1); _wf3.setsampwidth(2)
+                _wf3.setframerate(_sr3); _wf3.writeframes(_d3.tobytes())
+            _ws3.PlaySound(_b3.getvalue(), _ws3.SND_MEMORY)
+        except:
+            pass
 
         # 녹음된 데이터가 없으면 종료
         if not audio_data:
@@ -2898,6 +2977,9 @@ def stop_current_playback():
 
     tts_stop_event.set()
     try:
+        sd.stop()
+    except: pass
+    try:
         import winsound
         winsound.PlaySound(None, winsound.SND_PURGE)
     except: pass
@@ -2960,7 +3042,7 @@ def play_tts_file(filepath):
 
 def speak_text(text):
     """텍스트를 음성으로 변환하여 재생합니다."""
-    global google_tts, google_tts_client, tts_audio_data, tts_data_index
+    global google_tts, google_tts_client, tts_playing, tts_stop_event
 
     log_to_console(f"[TTS] speak_text 호출됨 (원본 길이: {len(text) if text else 0})")
 
@@ -2970,13 +3052,9 @@ def speak_text(text):
 
     # TTS 재생용 텍스트 필터링 (이모티콘, 괄호 내용, 특수문자 제거)
     try:
-        # 0. 하이픈(-), 언더스코어(_)는 공백으로 치환하여 발음 방지
         text = text.replace('_', ' ').replace('-', ' ')
-        # 1. 괄호와 그 안의 내용 제거
         text = re.sub(r'\([^)]*\)|\[[^\]]*\]|\{[^}]*\}|\<[^>]*\>', '', text)
-        # 2. 불필요 기호 제거 (한글, 영대소문자, 숫자, 기본 구두점, 콜론만 허용)
         text = re.sub(r'[^가-힣A-Za-z0-9\s\.,\?\!~\'\":]', '', text)
-        # 3. 양끝 공백 정리
         text = text.strip()
     except Exception as e:
         log_to_console(f"[TTS] 텍스트 정리 중 오류: {e}")
@@ -2989,92 +3067,113 @@ def speak_text(text):
         log_to_console("[TTS] 초기화 안됨")
         return
 
+    def _chunk_text(t):
+        """텍스트를 문장/단락 단위로 분리 (최소 5자 이상 청크)"""
+        chunks = re.split(r'(?<=[.?!])\s+|\n\n+|\n', t)
+        result = [c.strip() for c in chunks if c.strip() and len(c.strip()) >= 5]
+        return result if result else [t]
+
+    def _synthesize_chunk(chunk_text):
+        """단일 청크 합성 → numpy int16 array 반환"""
+        import numpy as np
+        lang_parts = tts_voice_name.split('-')
+        language_code = f"{lang_parts[0]}-{lang_parts[1]}" if len(lang_parts) >= 2 else "ko-KR"
+        voice = google_tts.VoiceSelectionParams(language_code=language_code, name=tts_voice_name)
+        synthesis_input = google_tts.SynthesisInput(text=chunk_text)
+        audio_config = google_tts.AudioConfig(
+            audio_encoding=google_tts.AudioEncoding.LINEAR16,
+            sample_rate_hertz=24000,
+            speaking_rate=tts_speaking_rate
+        )
+        resp = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+        if len(resp.audio_content) <= 44:
+            return None
+        return np.frombuffer(resp.audio_content[44:], dtype=np.int16)
+
     def _speak():
-        global tts_audio_data, tts_data_index
+        global tts_playing, tts_paused
+        audio_queue = queue.Queue()
+
+        def producer():
+            for chunk in _chunk_text(text):
+                if tts_stop_event.is_set():
+                    break
+                try:
+                    log_to_console(f"[TTS] 청크 합성: {chunk[:20]}...")
+                    audio_data = _synthesize_chunk(chunk)
+                    audio_queue.put(audio_data)
+                except Exception as e:
+                    log_to_console(f"[TTS] 청크 합성 오류: {e}")
+            audio_queue.put(None)  # 종료 신호
+
         try:
-            # 비프음
+            import numpy as np
+            log_to_console("[TTS] _speak 스레드 시작")
+
+            # 비프음: in-memory WAV → winsound (sd.stop() 영향 없음)
             try:
-                import winsound
-                winsound.Beep(800, 150)
+                import wave, io, winsound as _ws
+                _sr = 44100
+                _dur = 0.2
+                _samples = int(_sr * _dur)
+                _t = np.linspace(0, _dur, _samples, False)
+                _data = (np.sin(2 * np.pi * 880 * _t) * 32767 * 0.7).astype(np.int16)
+                _buf = io.BytesIO()
+                with wave.open(_buf, 'wb') as _wf:
+                    _wf.setnchannels(1)
+                    _wf.setsampwidth(2)
+                    _wf.setframerate(_sr)
+                    _wf.writeframes(_data.tobytes())
+                _ws.PlaySound(_buf.getvalue(), _ws.SND_MEMORY)
+                log_to_console("[TTS] 비프음 완료")
+            except Exception as beep_e:
+                log_to_console(f"[TTS] 비프음 오류: {beep_e}")
+
+            stop_current_playback()
+            tts_stop_event.clear()
+            tts_playing = True
+            tts_paused = False
+            log_to_console(f"[TTS] tts_playing=True 설정, producer 시작")
+            try:
+                update_tray_menu()
             except: pass
 
-            log_to_console(f"[TTS] 합성 시작: {text[:30]}...")
+            prod_thread = threading.Thread(target=producer, daemon=True)
+            prod_thread.start()
 
-            # --- 한/영 스위칭 보이스 및 SSML 조립 적용 ---
-            import numpy as np
-
-            # 영어 알파벳 덩어리를 기준으로 쪼갬 (한글 덩어리 / 영어 덩어리 분리)
-            pieces = re.split(r'([A-Za-z]+(?:\s+[A-Za-z]+)*)', text)
-            
-            audio_chunks = []
-            audio_config = google_tts.AudioConfig(audio_encoding=google_tts.AudioEncoding.LINEAR16, sample_rate_hertz=24000, speaking_rate=tts_speaking_rate)
-
-            for piece in pieces:
-                if not piece.strip(): 
-                    continue
-
-                # 콤마, 콜론을 휴식 마커로 변경
-                piece_ssml = piece.replace(':', '<break time="500ms"/>').replace(',', '<break time="300ms"/>')
-                piece_ssml = f"<speak>{piece_ssml}</speak>"
-
-                # 덩어리의 언어 판별 (알파벳이 있고 한글이 없으면 영어 모드 작동)
-                is_english = bool(re.search(r'[A-Za-z]', piece)) and not bool(re.search(r'[가-힣]', piece))
-
-                voice_code = "en-US" if is_english else "ko-KR"
-                voice_name = "en-US-Neural2-F" if is_english else tts_voice_name
-
-                voice = google_tts.VoiceSelectionParams(language_code=voice_code, name=voice_name)
-                synthesis_input = google_tts.SynthesisInput(ssml=piece_ssml)
-
+            while True:
+                audio_data = audio_queue.get()
+                if audio_data is None or tts_stop_event.is_set():
+                    log_to_console(f"[TTS] consumer 루프 탈출 — data=None:{audio_data is None}, stop={tts_stop_event.is_set()}")
+                    break
                 try:
-                    resp = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
-                    if len(resp.audio_content) > 44:
-                        chunk_data = np.frombuffer(resp.audio_content[44:], dtype=np.int16)
-                        audio_chunks.append(chunk_data)
+                    audio_float = audio_data.astype(np.float32) / 32768.0
+                    sd.play(audio_float, samplerate=24000)
+                    while True:
+                        try:
+                            if not sd.get_stream().active:
+                                break
+                        except Exception:
+                            break
+                        if tts_stop_event.is_set():
+                            sd.stop()
+                            break
+                        time.sleep(0.05)
                 except Exception as e:
-                    log_to_console(f"[TTS] 부분 합성 에러: {e}")
-
-            if not audio_chunks:
-                log_to_console("[TTS] 병합할 오디오 데이터가 없습니다.")
-                return
-
-            # 조각난 덩어리들을 하나로 매끄럽게 연결
-            audio_data = np.concatenate(audio_chunks)
-            tts_audio_data = audio_data
-            tts_data_index = 0
-
-            # 파일 저장
-            filepath = None
-            try:
-                import os, sys, datetime
-                import soundfile as sf
-                
-                if getattr(sys, 'frozen', False):
-                    base_path = os.path.dirname(sys.executable)
-                else:
-                    base_path = os.path.dirname(os.path.abspath(__file__))
-
-                sound_dir = os.path.join(base_path, "tts_audio")
-                if not os.path.exists(sound_dir):
-                    os.makedirs(sound_dir)
-
-                filename = f"tts_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-                filepath = os.path.join(sound_dir, filename)
-
-                sf.write(filepath, audio_data, 24000)
-                log_to_console(f"[TTS] 병합 파일 저장: {filename}")
-            except Exception as e:
-                log_to_console(f"[TTS] 병합 파일 저장 실패: {e}")
-
-            if filepath and os.path.exists(filepath):
-                play_tts_file(filepath)
-            else:
-                log_to_console("[TTS] 재생할 파일이 없습니다.")
+                    log_to_console(f"[TTS] 재생 오류: {e}")
 
         except Exception as e:
             import traceback
             logging.error(traceback.format_exc())
             log_to_console(f"[TTS] 오류: {e}")
+        finally:
+            tts_playing = False
+            tts_paused = False
+            tts_stop_event.clear()
+            log_to_console("[TTS] 재생 종료")
+            try:
+                update_tray_menu()
+            except: pass
 
     threading.Thread(target=_speak, daemon=True).start()
 
