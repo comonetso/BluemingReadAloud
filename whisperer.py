@@ -3050,12 +3050,16 @@ def speak_text(text):
         log_to_console("[TTS] 텍스트 없음")
         return
 
-    # TTS 재생용 텍스트 필터링 (이모티콘, 괄호 내용, 특수문자 제거)
+    # TTS 재생용 텍스트 필터링
     try:
-        text = text.replace('_', ' ').replace('-', ' ')
-        text = re.sub(r'\([^)]*\)|\[[^\]]*\]|\{[^}]*\}|\<[^>]*\>', '', text)
-        text = re.sub(r'[^가-힣A-Za-z0-9\s\.,\?\!~\'\":]', '', text)
-        text = text.strip()
+        text = re.sub(r'\([^)]*\)', '', text)          # 소괄호 + 내용 제거 (부연 설명)
+        text = re.sub(r'[\[\{]', ' ', text)        # 여는 대/중괄호 → 공백
+        text = re.sub(r'[\]\}]', '. ', text)       # 닫는 대/중괄호 → 마침표 (내용 후 구분)
+        text = re.sub(r'[^가-힣A-Za-z0-9\s\.,\?\!]', '. ', text)  # 나머지 모든 특수기호 → 마침표
+        text = re.sub(r'(\.\s*){2,}', '. ', text)  # 연속 마침표 정리
+        text = re.sub(r'^\s*\.\s*', '', text)       # 문장 시작 마침표 제거
+        text = re.sub(r'\s+', ' ', text)            # 다중 공백 정리
+        text = text.strip().rstrip('.').strip()     # 끝 마침표 제거
     except Exception as e:
         log_to_console(f"[TTS] 텍스트 정리 중 오류: {e}")
 
@@ -3068,9 +3072,9 @@ def speak_text(text):
         return
 
     def _chunk_text(t):
-        """텍스트를 문장/단락 단위로 분리 (최소 5자 이상 청크)"""
+        """텍스트를 문장/단락 단위로 분리"""
         chunks = re.split(r'(?<=[.?!])\s+|\n\n+|\n', t)
-        result = [c.strip() for c in chunks if c.strip() and len(c.strip()) >= 5]
+        result = [c.strip() for c in chunks if c.strip()]
         return result if result else [t]
 
     def _synthesize_chunk(chunk_text):
@@ -3148,17 +3152,11 @@ def speak_text(text):
                     break
                 try:
                     audio_float = audio_data.astype(np.float32) / 32768.0
-                    sd.play(audio_float, samplerate=24000)
-                    while True:
-                        try:
-                            if not sd.get_stream().active:
-                                break
-                        except Exception:
-                            break
-                        if tts_stop_event.is_set():
-                            sd.stop()
-                            break
-                        time.sleep(0.05)
+                    silence = np.zeros(int(24000 * 0.15), dtype=np.float32)
+                    sd.play(np.concatenate([audio_float, silence]), samplerate=24000)
+                    sd.wait()  # DAC 출력 완료까지 대기; sd.stop() 호출 시 즉시 반환
+                    if tts_stop_event.is_set():
+                        break
                 except Exception as e:
                     log_to_console(f"[TTS] 재생 오류: {e}")
 
