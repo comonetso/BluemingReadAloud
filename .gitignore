@@ -23,5 +23,7 @@ dist/
 .vscode/
 .cursor/
 .gemini/
+.claude/
 .windsurfrules
 whisperer_console.log
+build_log.txt

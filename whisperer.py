@@ -8,6 +8,7 @@ Copyright (c) 2024 Yeogiaen
 
 원래 OpenAI Whisper를 사용하였으나, Google Cloud STT V2로 변경됨
 """
+__version__ = "1.1.0"
 import sys, os
 import threading
 import time
@@ -535,7 +536,7 @@ def setup_logging():
             f.write(f"=== Whisperer 로그 시작: {timestamp} ===\n\n")
 
         # 시작 로그 기록
-        log_to_console("=== Yeogiaen WhisperTyper 콘솔 ===")
+        log_to_console(f"=== Yeogiaen WhisperTyper v{__version__} 콘솔 ===")
         log_to_console("이 창을 닫아도 프로그램은 계속 실행됩니다.")
         log_to_console("\n로그 출력을 시작합니다...\n")
 
@@ -3040,6 +3041,218 @@ def play_tts_file(filepath):
             update_tray_menu()
         except: pass
 
+# TTS 전처리에서 문장 끝으로 오인하지 않을 약자 (마침표 뒤에 와도 문장 분할 X)
+_TTS_ABBREVS = frozenset({
+    'inc', 'ltd', 'corp', 'co', 'mr', 'mrs', 'ms', 'dr', 'prof', 'st',
+    'jr', 'sr', 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sept', 'sep',
+    'oct', 'nov', 'dec', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+    'vs', 'etc', 'eg', 'ie', 'no', 'vol', 'fig', 'eq', 'cf', 'pp',
+    'am', 'pm', 'us', 'uk', 'eu', 'kr', 'jp', 'cn',
+})
+
+
+def _preprocess_for_tts(text):
+    """Claude 출력/마크다운 텍스트를 TTS 친화적으로 정규화.
+
+    정책:
+    - 정보 보존 우선. 괄호 내용은 유지하고 양쪽에 마침표로 청각 경계 표시.
+    - Chirp3-HD가 쉼표 포즈를 무시하므로 쉼표 → 마침표 변환 (숫자 사이 천단위 쉼표 보존).
+    - 마크다운/이모지/박스라인은 듣기에 무의미 → 제거 또는 평문화.
+    """
+    if not text:
+        return ""
+
+    # 0) 줄바꿈 정규화 — Windows 클립보드는 CRLF(\r\n), Mac old는 CR(\r).
+    #   `\r`이 남으면 22단계 `[^\s]\n` 패턴이 매치 안 돼서 줄 끝 마침표가 안 박힘.
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # 1) 보이지 않는 문자(ZWSP/ZWJ/BOM 등) 제거
+    text = re.sub(r'[​-‏ - ﻿]', '', text)
+    # 2) 이모지 제거 (기호·심볼·픽토그램 범위)
+    text = re.sub(
+        r'[\U0001F000-\U0001FFFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]',
+        '', text
+    )
+    # 3) ASCII/유니코드 박스·구분선 라인 제거 (─ ═ ━ │ ┌ ┐ 등)
+    text = re.sub(r'^[\s─-╿═━─│]+$', '', text, flags=re.MULTILINE)
+    # 4) 코드 펜스(```lang ... ```) 마커만 마침표로 치환, 내용은 보존
+    text = re.sub(r'^[ \t]*```[^\n]*$', '. ', text, flags=re.MULTILINE)
+    # 5) 인라인 코드 백틱 제거 (내용 유지)
+    text = re.sub(r'`([^`\n]+)`', r'\1', text)
+    # 6) 마크다운 링크/이미지 → 텍스트만
+    text = re.sub(r'!?\[([^\]\n]*)\]\([^)\n]*\)', r'\1', text)
+    # 7) 굵게/기울임/취소선 마커 제거
+    text = re.sub(r'\*\*([^*\n]+)\*\*', r'\1', text)
+    text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'\1', text)
+    text = re.sub(r'__([^_\n]+)__', r'\1', text)
+    text = re.sub(r'(?<!\w)_([^_\n]+)_(?!\w)', r'\1', text)
+    text = re.sub(r'~~([^~\n]+)~~', r'\1', text)
+    # 8) 헤더 마커 → 끝에 마침표
+    text = re.sub(r'^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$', r'\1. ', text, flags=re.MULTILINE)
+    # 9) 인용 마커 제거
+    text = re.sub(r'^[ \t]*>+[ \t]?', '', text, flags=re.MULTILINE)
+    # 10) 리스트 마커 제거 (계층 들여쓰기는 유지)
+    text = re.sub(r'^([ \t]*)[-*+][ \t]+', r'\1', text, flags=re.MULTILINE)
+    text = re.sub(r'^([ \t]*)\d+\.[ \t]+', r'\1', text, flags=re.MULTILINE)
+    # 11) 수평선 (---, ***, ___) → 마침표
+    text = re.sub(r'^[ \t]*[-*_]{3,}[ \t]*$', '. ', text, flags=re.MULTILINE)
+    # 12) URL → "링크" 한 단어
+    text = re.sub(r'https?://\S+', '링크', text)
+    # 13) 슬래시/백슬래시 (경로 등) → 공백 — 듣기에는 단어 구분만 필요
+    text = re.sub(r'[\\/]+', ' ', text)
+    # 14) 괄호: 내용 보존 + 양쪽 마침표 (사용자 정책)
+    #   마침표는 단어에 붙여야 자연스러운 문장 종결로 인식됨.
+    #   ` . ` (단독 마침표) 패턴은 Chirp3-HD가 "점"으로 발음하거나 어색한 톤을 만듦.
+    text = re.sub(r'\s*\(([^)\n]*?)\)\s*', r'. \1. ', text)
+    text = re.sub(r'\s*\[([^\]\n]*?)\]\s*', r'. \1. ', text)
+    text = re.sub(r'\s*\{([^}\n]*?)\}\s*', r'. \1. ', text)
+    # 15) 쉼표 처리: 숫자 사이(천단위)는 보존, 그 외는 마침표
+    text = re.sub(r'(?<![0-9]),\s*', '. ', text)
+    text = re.sub(r',\s*(?![0-9])', '. ', text)
+    # 16) 전각 마침표/물음표/느낌표 → 반각 + 공백 (청크 분할 단순화)
+    text = text.replace('。', '. ').replace('！', '! ').replace('？', '? ')
+    # 16b) 인용부호류 제거 — 발화에 영향 없음. 마침표 변환하면 끊김만 생김
+    #   ASCII: ' " `   유니코드: ‘ ’ “ ” ‚ „ ‹ › « »
+    text = re.sub(r"['\"`‘’“”‚„‹›«»]", '', text)
+    # 16c) 밑줄 → 공백. `\w`에 `_`가 포함되어 17단계에서 보존되므로 별도 처리.
+    #   `my_var` 같은 변수명이 "마이언더스코어바"로 어색하게 발음되는 것 방지.
+    text = text.replace('_', ' ')
+    # 17) 남은 모든 특수기호 → 마침표 (한글/영문/숫자/공백/.?!/천단위 쉼표 보존)
+    #   `\s*` 로 양옆 공백을 함께 흡수 — 그래야 `PRD → PR` 이 `PRD. PR` 로 깔끔.
+    #   공백 안 흡수하면 ` . ` 처럼 마침표가 떠서 Chirp3-HD가 "점"으로 발음할 수 있음.
+    text = re.sub(r'\s*[^\w\s\.\?\!가-힣,]+\s*', '. ', text)
+    # 18) 반복 문자 축약 (3개 이상 같은 비숫자 문자 → 2개): "......" → ".."
+    text = re.sub(r'([^\d\s\w])\1{2,}', r'\1\1', text)
+    text = re.sub(r'([가-힣A-Za-z])\1{3,}', r'\1\1', text)
+    # 19a) 빈 줄에 마침표만 남는 경우 정리 (코드 펜스 자리 등)
+    text = re.sub(r'\n[ \t]*\.[ \t]*(?=\n)', '', text)
+    # 19b) 연속 마침표 정리
+    text = re.sub(r'(\.\s*){2,}', '. ', text)
+    # 20) 라인 시작 마침표/공백 정리
+    text = re.sub(r'^[\s\.]+', '', text)
+    # 21) 다중 공백/탭 → 단일 공백, 줄바꿈 정규화
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'[ \t]*\n[ \t]*', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # 22) 단일 줄바꿈 = 줄 구분 → 마침표+공백 (앞이 종결부호면 마침표 중복 안 함)
+    #   단락 구분(\n\n)은 보존 — 청크 분할에서 단락 경계로 사용.
+    text = text.replace('\n\n', '\x00PARA\x00')
+    text = re.sub(
+        r'([^\s])\n',
+        lambda m: m.group(1) + ('' if m.group(1) in '.!?' else '.') + ' ',
+        text
+    )
+    text = text.replace('\n', '')  # 남은 \n (선두/말미 등)은 제거
+    text = text.replace('\x00PARA\x00', '\n\n')
+    # 23) 마지막 정리 — 중복 마침표/공백
+    text = re.sub(r'(\.\s*){2,}', '. ', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.strip()
+
+
+def _chunk_text_for_tts(t, char_limit=140, combine_threshold=60, min_chunk=4):
+    """계층적 청크 분할: 단락 → 문장 → 구절. 약자 예외, 짧은 청크 병합, 끝 마침표 보정.
+
+    char_limit: 단일 청크 최대 길이. 작게 잡으면 응답 시작이 빠르고 컨트롤(중지/다음) 정밀도↑.
+                Chirp3-HD는 짧은 청크도 자연스럽게 처리 → 220자 (≈ 2~3 문장) 기본.
+    combine_threshold: 단락 결합 임계값 (이 이하 짧은 단락은 다음 단락과 묶음).
+    min_chunk: 이보다 짧으면 이전/다음 청크와 강제 결합.
+    """
+    if not t:
+        return []
+
+    def is_abbrev_end(piece):
+        m = re.search(r'(\w+)\.\s*$', piece)
+        return bool(m and m.group(1).lower() in _TTS_ABBREVS)
+
+    def split_sentences(text_in):
+        parts = re.split(r'([.!?]+[\s​]+)', text_in)
+        out, buf = [], ''
+        for i in range(0, len(parts), 2):
+            piece = parts[i]
+            sep = parts[i + 1] if i + 1 < len(parts) else ''
+            buf += piece + sep
+            if sep and not is_abbrev_end(piece):
+                if buf.strip():
+                    out.append(buf.strip())
+                buf = ''
+        if buf.strip():
+            out.append(buf.strip())
+        return out
+
+    def split_phrases(sentence):
+        parts = re.split(r'(?<=[;:])\s+', sentence)
+        return [p.strip() for p in parts if p.strip()]
+
+    def merge_by_limit(parts, combine_thresh=None):
+        thresh = combine_thresh if combine_thresh is not None else char_limit
+        out, group = [], ''
+        for p in parts:
+            if len(p) > char_limit:
+                if group:
+                    out.append(group.strip())
+                    group = ''
+                out.append(p)
+            elif len(group) + len(p) + 1 > thresh:
+                if group:
+                    out.append(group.strip())
+                group = p
+            else:
+                group = (group + ' ' + p) if group else p
+        if group:
+            out.append(group.strip())
+        return out
+
+    # 1) 단락 분리 + 짧은 단락 병합
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n+', t) if p.strip()]
+    paragraphs = merge_by_limit(paragraphs, combine_threshold)
+
+    chunks = []
+    for para in paragraphs:
+        if len(para) <= char_limit:
+            chunks.append(para)
+            continue
+        # 2) 문장 분리
+        sentences = merge_by_limit(split_sentences(para))
+        for sent in sentences:
+            if len(sent) <= char_limit:
+                chunks.append(sent)
+                continue
+            # 3) 구절 분리
+            phrases = merge_by_limit(split_phrases(sent))
+            for ph in phrases:
+                if len(ph) <= char_limit:
+                    chunks.append(ph)
+                else:
+                    for i in range(0, len(ph), char_limit):
+                        chunks.append(ph[i:i + char_limit])
+
+    # 4) 너무 짧은 청크는 인접 청크와 결합
+    merged = []
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        if merged and len(c) < min_chunk:
+            merged[-1] = merged[-1] + ' ' + c
+        elif merged and len(merged[-1]) < min_chunk:
+            merged[-1] = merged[-1] + ' ' + c
+        else:
+            merged.append(c)
+
+    # 5) 청크 내부 공백/줄바꿈 정리 + 끝 자동 마침표 (종결감)
+    finalized = []
+    for c in merged:
+        c = re.sub(r'\s+', ' ', c).strip()
+        c = c.strip('.').strip()
+        if not c:
+            continue
+        if not re.search(r'[.!?]$', c):
+            c = c + '.'
+        finalized.append(c)
+
+    return finalized if finalized else [t]
+
+
 def speak_text(text):
     """텍스트를 음성으로 변환하여 재생합니다."""
     global google_tts, google_tts_client, tts_playing, tts_stop_event
@@ -3050,16 +3263,9 @@ def speak_text(text):
         log_to_console("[TTS] 텍스트 없음")
         return
 
-    # TTS 재생용 텍스트 필터링
+    # TTS 재생용 텍스트 전처리 (Claude 출력/마크다운 친화)
     try:
-        text = re.sub(r'\([^)]*\)', '', text)          # 소괄호 + 내용 제거 (부연 설명)
-        text = re.sub(r'[\[\{]', ' ', text)        # 여는 대/중괄호 → 공백
-        text = re.sub(r'[\]\}]', '. ', text)       # 닫는 대/중괄호 → 마침표 (내용 후 구분)
-        text = re.sub(r'[^가-힣A-Za-z0-9\s\.,\?\!]', '. ', text)  # 나머지 모든 특수기호 → 마침표
-        text = re.sub(r'(\.\s*){2,}', '. ', text)  # 연속 마침표 정리
-        text = re.sub(r'^\s*\.\s*', '', text)       # 문장 시작 마침표 제거
-        text = re.sub(r'\s+', ' ', text)            # 다중 공백 정리
-        text = text.strip().rstrip('.').strip()     # 끝 마침표 제거
+        text = _preprocess_for_tts(text)
     except Exception as e:
         log_to_console(f"[TTS] 텍스트 정리 중 오류: {e}")
 
@@ -3072,10 +3278,7 @@ def speak_text(text):
         return
 
     def _chunk_text(t):
-        """텍스트를 문장/단락 단위로 분리"""
-        chunks = re.split(r'(?<=[.?!])\s+|\n\n+|\n', t)
-        result = [c.strip() for c in chunks if c.strip()]
-        return result if result else [t]
+        return _chunk_text_for_tts(t)
 
     def _synthesize_chunk(chunk_text):
         """단일 청크 합성 → numpy int16 array 반환"""
@@ -3098,12 +3301,15 @@ def speak_text(text):
         global tts_playing, tts_paused
         audio_queue = queue.Queue()
 
+        chunks_list = _chunk_text(text)
+        log_to_console(f"[TTS] 전처리 후 길이: {len(text)}, 청크 {len(chunks_list)}개로 분할")
+
         def producer():
-            for chunk in _chunk_text(text):
+            for idx, chunk in enumerate(chunks_list):
                 if tts_stop_event.is_set():
                     break
                 try:
-                    log_to_console(f"[TTS] 청크 합성: {chunk[:20]}...")
+                    log_to_console(f"[TTS] 청크 {idx+1}/{len(chunks_list)} ({len(chunk)}자): {chunk[:80]}")
                     audio_data = _synthesize_chunk(chunk)
                     audio_queue.put(audio_data)
                 except Exception as e:
