@@ -2971,14 +2971,21 @@ tts_playing = False
 tts_paused = False
 tts_stop_event = threading.Event()
 tts_current_file = None  # 현재 재생 파일 경로
+tts_output_stream = None  # 현재 gapless 재생 중인 sd.OutputStream (중지 시 직접 abort용)
 
 def stop_current_playback():
     """현재 재생 중인 오디오를 강제 중지합니다."""
-    global tts_playing, tts_paused, tts_stop_event
+    global tts_playing, tts_paused, tts_stop_event, tts_output_stream
 
     tts_stop_event.set()
     try:
         sd.stop()
+    except: pass
+    # gapless OutputStream은 sd.stop()으로 안 멈춤(sd.stop은 sd.play/rec 전용) → 직접 abort.
+    #   consumer 스레드가 예외로 죽은 경우에도 여기서 확실히 멈춘다.
+    try:
+        if tts_output_stream is not None:
+            tts_output_stream.abort()
     except: pass
     try:
         import winsound
@@ -3099,15 +3106,12 @@ def _preprocess_for_tts(text):
     text = re.sub(r'https?://\S+', '링크', text)
     # 13) 슬래시/백슬래시 (경로 등) → 공백 — 듣기에는 단어 구분만 필요
     text = re.sub(r'[\\/]+', ' ', text)
-    # 14) 괄호: 내용 보존 + 양쪽 마침표 (사용자 정책)
-    #   마침표는 단어에 붙여야 자연스러운 문장 종결로 인식됨.
-    #   ` . ` (단독 마침표) 패턴은 Chirp3-HD가 "점"으로 발음하거나 어색한 톤을 만듦.
-    text = re.sub(r'\s*\(([^)\n]*?)\)\s*', r'. \1. ', text)
-    text = re.sub(r'\s*\[([^\]\n]*?)\]\s*', r'. \1. ', text)
-    text = re.sub(r'\s*\{([^}\n]*?)\}\s*', r'. \1. ', text)
-    # 15) 쉼표 처리: 숫자 사이(천단위)는 보존, 그 외는 마침표
-    text = re.sub(r'(?<![0-9]),\s*', '. ', text)
-    text = re.sub(r',\s*(?![0-9])', '. ', text)
+    # 14) 괄호: 여는 괄호는 공백(앞 단어와 분리), 닫는 괄호는 제거(뒤 조사가 앞 단어에 붙도록).
+    #   "정보)도" → "정보도" (공백 치환 시 "정보 도"로 조사가 떨어져 어색해지는 것 방지).
+    #   양쪽 마침표(과거 정책)는 한 문장을 토막내 어색 → 폐기. 안의 정보는 그대로 남음.
+    text = re.sub(r'[(\[{]', ' ', text)
+    text = re.sub(r'[)\]}]', '', text)
+    # 15) 쉼표 보존 — 익스텐션처럼 청크 분할 경계(짧은 호흡)로만 사용. 마침표 변환 안 함.
     # 16) 전각 마침표/물음표/느낌표 → 반각 + 공백 (청크 분할 단순화)
     text = text.replace('。', '. ').replace('！', '! ').replace('？', '? ')
     # 16b) 인용부호류 제거 — 발화에 영향 없음. 마침표 변환하면 끊김만 생김
@@ -3116,10 +3120,11 @@ def _preprocess_for_tts(text):
     # 16c) 밑줄 → 공백. `\w`에 `_`가 포함되어 17단계에서 보존되므로 별도 처리.
     #   `my_var` 같은 변수명이 "마이언더스코어바"로 어색하게 발음되는 것 방지.
     text = text.replace('_', ' ')
-    # 17) 남은 모든 특수기호 → 마침표 (한글/영문/숫자/공백/.?!/천단위 쉼표 보존)
-    #   `\s*` 로 양옆 공백을 함께 흡수 — 그래야 `PRD → PR` 이 `PRD. PR` 로 깔끔.
-    #   공백 안 흡수하면 ` . ` 처럼 마침표가 떠서 Chirp3-HD가 "점"으로 발음할 수 있음.
-    text = re.sub(r'\s*[^\w\s\.\?\!가-힣,]+\s*', '. ', text)
+    # 17) 발화 노이즈 기호만 공백화 — 화살표/도형/불릿 (Chirp3-HD가 "화살표"로 읽음).
+    #   문장부호(. , ? ! : ; - /)는 보존 → 익스텐션처럼 청크 경계(호흡)로 사용한다.
+    #   ★ 수학연산자 블록(U+2200~22FF)은 제외 — U+2212(−) 등 마이너스 부호가 포함돼
+    #     "−5도"가 "5도"로 부호 손실되는 것을 막는다. (≤≥≈ 등은 보존)
+    text = re.sub(r'[←-⇿■-◿☀-⛿►▶◀◆◇○●·•▪▸▹◦]', ' ', text)
     # 18) 반복 문자 축약 (3개 이상 같은 비숫자 문자 → 2개): "......" → ".."
     text = re.sub(r'([^\d\s\w])\1{2,}', r'\1\1', text)
     text = re.sub(r'([가-힣A-Za-z])\1{3,}', r'\1\1', text)
@@ -3149,108 +3154,75 @@ def _preprocess_for_tts(text):
     return text.strip()
 
 
-def _chunk_text_for_tts(t, char_limit=140, combine_threshold=60, min_chunk=4):
-    """계층적 청크 분할: 단락 → 문장 → 구절. 약자 예외, 짧은 청크 병합, 끝 마침표 보정.
+def _chunk_text_for_tts(t, char_limit=750, combine_threshold=200):
+    """청크 분할 — 크롬 익스텐션 read-aloud-hrg의 CharBreaker(750, EastAsianPunctuator, 200) 1:1 포팅.
 
-    char_limit: 단일 청크 최대 길이. 작게 잡으면 응답 시작이 빠르고 컨트롤(중지/다음) 정밀도↑.
-                Chirp3-HD는 짧은 청크도 자연스럽게 처리 → 220자 (≈ 2~3 문장) 기본.
-    combine_threshold: 단락 결합 임계값 (이 이하 짧은 단락은 다음 단락과 묶음).
-    min_chunk: 이보다 짧으면 이전/다음 청크와 강제 결합.
+    핵심: 단락→문장→구절→단어(글자) 계층을 따라가되, 어느 단위든 char_limit(750) 이하면
+    원문을 그대로 유지하고 구두점도 보존한다(join). 750자를 넘는 경우에만 더 잘게 쪼갠다.
+    한국어는 EastAsianPunctuator(글자 단위 토큰화)를 쓴다 (익스텐션 speech.js:48 isEA 분기와 동일).
+    combine_threshold(200): 짧은 단락들을 200자까지 묶어 너무 잘게 쪼개지지 않게 한다.
     """
     if not t:
         return []
 
-    def is_abbrev_end(piece):
-        m = re.search(r'(\w+)\.\s*$', piece)
-        return bool(m and m.group(1).lower() in _TTS_ABBREVS)
+    # ── EastAsianPunctuator (익스텐션 speech.js:427-448 포팅) ──
+    def recombine(tokens):
+        result = []
+        for i in range(0, len(tokens), 2):
+            if i + 1 < len(tokens):
+                result.append(tokens[i] + tokens[i + 1])
+            elif tokens[i]:
+                result.append(tokens[i])
+        return result
 
-    def split_sentences(text_in):
-        parts = re.split(r'([.!?]+[\s​]+)', text_in)
-        out, buf = [], ''
-        for i in range(0, len(parts), 2):
-            piece = parts[i]
-            sep = parts[i + 1] if i + 1 < len(parts) else ''
-            buf += piece + sep
-            if sep and not is_abbrev_end(piece):
-                if buf.strip():
-                    out.append(buf.strip())
-                buf = ''
-        if buf.strip():
-            out.append(buf.strip())
+    def get_paragraphs(text):
+        return recombine(re.split(r'((?:\r?\n\s*){2,})', text))
+
+    def get_sentences(text):
+        return recombine(re.split(r'([.!?]+[\s​]+|[。！]+)', text))
+
+    def get_phrases(sentence):
+        return recombine(re.split(r'([,;:]\s+|[‥…　、，；]+)', sentence))
+
+    def get_words(sentence):
+        return list(re.sub(r'\s+', '', sentence))
+
+    # ── CharBreaker (익스텐션 speech.js:343-390 포팅) ──
+    def break_word(word):
+        out = []
+        while word:
+            out.append(word[:char_limit])
+            word = word[char_limit:]
         return out
 
-    def split_phrases(sentence):
-        parts = re.split(r'(?<=[;:])\s+', sentence)
-        return [p.strip() for p in parts if p.strip()]
-
-    def merge_by_limit(parts, combine_thresh=None):
+    def merge(parts, break_part, combine_thresh=None):
         thresh = combine_thresh if combine_thresh is not None else char_limit
-        out, group = [], ''
-        for p in parts:
-            if len(p) > char_limit:
+        result, group, group_chars = [], [], 0
+        for part in parts:
+            cc = len(part)
+            if cc > char_limit:
                 if group:
-                    out.append(group.strip())
-                    group = ''
-                out.append(p)
-            elif len(group) + len(p) + 1 > thresh:
-                if group:
-                    out.append(group.strip())
-                group = p
+                    result.append(''.join(group)); group, group_chars = [], 0
+                result.extend(break_part(part))
             else:
-                group = (group + ' ' + p) if group else p
+                if group and group_chars + cc > thresh:
+                    result.append(''.join(group)); group, group_chars = [], 0
+                group.append(part); group_chars += cc
         if group:
-            out.append(group.strip())
-        return out
+            result.append(''.join(group))
+        return result
 
-    # 1) 단락 분리 + 짧은 단락 병합
-    paragraphs = [p.strip() for p in re.split(r'\n\s*\n+', t) if p.strip()]
-    paragraphs = merge_by_limit(paragraphs, combine_threshold)
+    def break_phrase(phrase):
+        return merge(get_words(phrase), break_word)
 
-    chunks = []
-    for para in paragraphs:
-        if len(para) <= char_limit:
-            chunks.append(para)
-            continue
-        # 2) 문장 분리
-        sentences = merge_by_limit(split_sentences(para))
-        for sent in sentences:
-            if len(sent) <= char_limit:
-                chunks.append(sent)
-                continue
-            # 3) 구절 분리
-            phrases = merge_by_limit(split_phrases(sent))
-            for ph in phrases:
-                if len(ph) <= char_limit:
-                    chunks.append(ph)
-                else:
-                    for i in range(0, len(ph), char_limit):
-                        chunks.append(ph[i:i + char_limit])
+    def break_sentence(sentence):
+        return merge(get_phrases(sentence), break_phrase)
 
-    # 4) 너무 짧은 청크는 인접 청크와 결합
-    merged = []
-    for c in chunks:
-        c = c.strip()
-        if not c:
-            continue
-        if merged and len(c) < min_chunk:
-            merged[-1] = merged[-1] + ' ' + c
-        elif merged and len(merged[-1]) < min_chunk:
-            merged[-1] = merged[-1] + ' ' + c
-        else:
-            merged.append(c)
+    def break_paragraph(para):
+        return merge(get_sentences(para), break_sentence)
 
-    # 5) 청크 내부 공백/줄바꿈 정리 + 끝 자동 마침표 (종결감)
-    finalized = []
-    for c in merged:
-        c = re.sub(r'\s+', ' ', c).strip()
-        c = c.strip('.').strip()
-        if not c:
-            continue
-        if not re.search(r'[.!?]$', c):
-            c = c + '.'
-        finalized.append(c)
-
-    return finalized if finalized else [t]
+    chunks = merge(get_paragraphs(t), break_paragraph, combine_threshold)
+    return [c.strip() for c in chunks if c.strip()]
 
 
 def speak_text(text):
@@ -3295,11 +3267,13 @@ def speak_text(text):
         resp = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
         if len(resp.audio_content) <= 44:
             return None
-        return np.frombuffer(resp.audio_content[44:], dtype=np.int16)
+        # .copy() — frombuffer 결과는 read-only라 OutputStream.write에서 문제될 수 있음
+        return np.frombuffer(resp.audio_content[44:], dtype=np.int16).copy()
 
     def _speak():
-        global tts_playing, tts_paused
-        audio_queue = queue.Queue()
+        global tts_playing, tts_paused, tts_output_stream
+        # prefetch backpressure: 최대 2청크만 선합성 (익스텐션 1청크 look-ahead와 동등 효과).
+        audio_queue = queue.Queue(maxsize=2)
 
         chunks_list = _chunk_text(text)
         log_to_console(f"[TTS] 전처리 후 길이: {len(text)}, 청크 {len(chunks_list)}개로 분할")
@@ -3311,11 +3285,29 @@ def speak_text(text):
                 try:
                     log_to_console(f"[TTS] 청크 {idx+1}/{len(chunks_list)} ({len(chunk)}자): {chunk[:80]}")
                     audio_data = _synthesize_chunk(chunk)
-                    audio_queue.put(audio_data)
                 except Exception as e:
                     log_to_console(f"[TTS] 청크 합성 오류: {e}")
-            audio_queue.put(None)  # 종료 신호
+                    audio_data = None
+                if audio_data is None:
+                    continue
+                # 큐가 가득 차면(consumer가 아직 재생 중) 빌 때까지 대기 — stop 시 빠져나옴
+                while not tts_stop_event.is_set():
+                    try:
+                        audio_queue.put(audio_data, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+            # 종료 신호
+            while True:
+                try:
+                    audio_queue.put(None, timeout=0.2)
+                    break
+                except queue.Full:
+                    if tts_stop_event.is_set():
+                        break
 
+        stream = None
+        prod_thread = None
         try:
             import numpy as np
             log_to_console("[TTS] _speak 스레드 시작")
@@ -3340,6 +3332,7 @@ def speak_text(text):
                 log_to_console(f"[TTS] 비프음 오류: {beep_e}")
 
             stop_current_playback()
+            time.sleep(0.15)  # 이전 재생 스트림이 완전히 정리될 여유
             tts_stop_event.clear()
             tts_playing = True
             tts_paused = False
@@ -3351,29 +3344,66 @@ def speak_text(text):
             prod_thread = threading.Thread(target=producer, daemon=True)
             prod_thread.start()
 
+            # gapless 재생: OutputStream 하나를 열어두고 청크 PCM을 연속으로 write.
+            # 청크마다 스트림을 닫지 않으므로 청크 사이 무음(끊김)이 0이다.
+            # (익스텐션의 단일 HTMLAudioElement src 교체 + silence 루프와 동등한 효과)
+            stream = sd.OutputStream(samplerate=24000, channels=1, dtype='int16')
+            stream.start()
+            tts_output_stream = stream  # stop_current_playback이 직접 abort할 수 있도록 전역 노출
+            BLOCK = 2400  # 0.1초 단위 write → 중지(stop) 반응성 확보
+            played_any = False
             while True:
-                audio_data = audio_queue.get()
+                try:
+                    audio_data = audio_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if tts_stop_event.is_set():
+                        break
+                    continue
                 if audio_data is None or tts_stop_event.is_set():
                     log_to_console(f"[TTS] consumer 루프 탈출 — data=None:{audio_data is None}, stop={tts_stop_event.is_set()}")
                     break
-                try:
-                    audio_float = audio_data.astype(np.float32) / 32768.0
-                    silence = np.zeros(int(24000 * 0.15), dtype=np.float32)
-                    sd.play(np.concatenate([audio_float, silence]), samplerate=24000)
-                    sd.wait()  # DAC 출력 완료까지 대기; sd.stop() 호출 시 즉시 반환
+                for off in range(0, len(audio_data), BLOCK):
                     if tts_stop_event.is_set():
                         break
-                except Exception as e:
-                    log_to_console(f"[TTS] 재생 오류: {e}")
+                    stream.write(audio_data[off:off + BLOCK])
+                played_any = True
+                if tts_stop_event.is_set():
+                    break
+
+            # 정상 종료: 마지막 버퍼가 DAC로 빠져나가도록 짧은 무음 1회만 드레인.
+            # (청크마다 넣지 않으므로 중간 끊김 없이 gapless 유지)
+            if played_any and not tts_stop_event.is_set():
+                try:
+                    stream.write(np.zeros(int(24000 * 0.25), dtype=np.int16))
+                except Exception:
+                    pass
 
         except Exception as e:
             import traceback
             logging.error(traceback.format_exc())
             log_to_console(f"[TTS] 오류: {e}")
         finally:
+            if stream is not None:
+                try:
+                    if tts_stop_event.is_set():
+                        stream.abort()   # 사용자 중지 → 즉시 멈춤
+                    else:
+                        stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+            tts_output_stream = None
+            # producer 정리: tts_stop_event를 clear하기 "전에" join.
+            #   여기서 먼저 clear하면 put(timeout)에 갇힌 producer의 while 조건이 되살아나
+            #   영구 좀비 스레드가 된다. stop 신호를 켜둔 채 join해야 producer가 보고 빠져나온다.
+            #   (clear는 다음 _speak 시작부 stop_current_playback 직후에서 수행)
+            if prod_thread is not None:
+                try:
+                    prod_thread.join(timeout=1.0)
+                except Exception:
+                    pass
             tts_playing = False
             tts_paused = False
-            tts_stop_event.clear()
             log_to_console("[TTS] 재생 종료")
             try:
                 update_tray_menu()
