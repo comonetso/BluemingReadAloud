@@ -398,6 +398,26 @@ messages = {
         "ko": "읽기 중지",
         "en": "Stop Reading"
     },
+    "menu_hide_controller": {
+        "ko": "○ 플로팅 아이콘 숨기기",
+        "en": "○ Hide Floating Icon"
+    },
+    "menu_show_controller": {
+        "ko": "◉ 플로팅 아이콘 보이기",
+        "en": "◉ Show Floating Icon"
+    },
+    "ctrl_menu_hide": {
+        "ko": "숨기기",
+        "en": "Hide"
+    },
+    "controller_hidden_log": {
+        "ko": "플로팅 컨트롤러를 숨겼습니다. (트레이 메뉴에서 다시 표시)",
+        "en": "Floating controller hidden. (Restore it from the tray menu)"
+    },
+    "controller_shown_log": {
+        "ko": "플로팅 컨트롤러를 다시 표시했습니다.",
+        "en": "Floating controller restored."
+    },
     "dialog_stt_title": {
         "ko": "STT 설정",
         "en": "STT Settings"

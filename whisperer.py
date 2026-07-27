@@ -66,6 +66,7 @@ default_device = None   # 기본 마이크 장치
 root = None             # Tk 창
 status_label = None     # 상태 표시 레이블
 tray_icon = None        # 트레이 아이콘
+tray_menu_updater = None # 트레이 메뉴 갱신 함수 참조 (setup_tray_icon 내부 함수를 외부에서 호출하기 위함)
 console_log_file = None # 콘솔 로그 파일
 api_key = None          # OpenAI API 키
 keyboard_listener = None # 키보드 리스너
@@ -74,6 +75,7 @@ floating_controller = None   # 플로팅 컨트롤러 창
 controller_canvas = None     # 컨트롤러 캔버스
 controller_position = None   # 컨트롤러 위치 {"x": int, "y": int}
 controller_mode = 'stt'      # 'stt' 또는 'tts' (STT 비활성화 시 TTS 전용 모드)
+controller_hidden = False    # 컨트롤러 숨김 여부 (우클릭 메뉴로 숨김 / 트레이 메뉴로 복원)
 
 # 성능 최적화 관련 변수
 use_performance_mode = True   # 성능 최적화 모드 사용 여부
@@ -1006,7 +1008,8 @@ def save_settings():
                 "voice_name": tts_voice_name,
                 "speaking_rate": tts_speaking_rate
             },
-            "controller_position": controller_position
+            "controller_position": controller_position,
+            "controller_hidden": controller_hidden
         }
         print(f"저장할 설정: {settings}")
         with open('whisperer_settings.json', 'w', encoding='utf-8') as f:
@@ -1027,7 +1030,7 @@ active_mode = "general"  # 기본값은 일반 대화 모드
 def load_settings():
     global current_language, hotkey_modifiers, hotkey_key, auto_language_detection, whisper_prompt, active_mode, google_credentials_path, google_stt_model
     global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate
-    global controller_position, stt_enabled, controller_mode
+    global controller_position, stt_enabled, controller_mode, controller_hidden
     try:
         if os.path.exists('whisperer_settings.json'):
             with open('whisperer_settings.json', 'r', encoding='utf-8') as f:
@@ -1074,6 +1077,10 @@ def load_settings():
                 # 컨트롤러 위치 로드
                 if "controller_position" in settings:
                     controller_position = settings["controller_position"]
+
+                # 컨트롤러 숨김 상태 로드 (숨긴 채 종료했으면 다음 실행도 숨김 유지)
+                if "controller_hidden" in settings:
+                    controller_hidden = bool(settings["controller_hidden"])
 
                 # Google STT 설정 로드
                 if "google_settings" in settings:
@@ -1564,6 +1571,9 @@ def setup_tray_icon():
             # 현재 언어 표시를 위한 라벨
             lang_label = get_msg("current_language_ko") if current_language == "ko" else get_msg("current_language_en")
 
+            # 플로팅 컨트롤러 표시/숨김 토글 라벨 (현재 상태의 반대 동작을 표시)
+            controller_toggle_label = get_msg("menu_show_controller") if controller_hidden else get_msg("menu_hide_controller")
+
             base_items = [
                 pystray.MenuItem(get_msg("open_recordings_folder"), open_recordings_folder),
                 pystray.MenuItem(get_msg("open_console"), open_console),
@@ -1577,11 +1587,17 @@ def setup_tray_icon():
                 pystray.Menu.SEPARATOR,
                 # TTS 토글 메뉴 (종료 바로 위)
                 pystray.MenuItem(tts_toggle_label, lambda icon, item: toggle_tts(), enabled=tts_enabled),
+                # 플로팅 컨트롤러 표시/숨김 (tkinter 조작이므로 큐를 통해 메인 스레드로 전달)
+                pystray.MenuItem(controller_toggle_label, lambda icon, item: gui_queue.put("toggle_controller")),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(get_msg("exit"), exit_program)
             ]
 
             tray_icon.menu = pystray.Menu(*base_items)
+
+        # 메뉴 갱신 함수를 전역에 노출 (플로팅 컨트롤러 우클릭 등 외부 경로에서 라벨 갱신용)
+        global tray_menu_updater
+        tray_menu_updater = update_tray_menu
 
         # 아이콘 객체 생성
         tray_icon = pystray.Icon("whisperer")
@@ -1601,6 +1617,10 @@ def setup_tray_icon():
                         show_tts_settings_dialog()
                     elif msg == "show_api_key_dialog":
                         show_api_key_dialog(required=False)
+                    elif msg == "toggle_controller":
+                        # 숨김 상태면 보이게, 보이는 상태면 숨기게
+                        # (메뉴 라벨 갱신은 set_controller_visible이 직접 처리)
+                        set_controller_visible(controller_hidden)
             except queue.Empty:
                 pass
             if root:
@@ -1621,6 +1641,43 @@ def setup_tray_icon():
     except Exception as e:
         logging.error(f"트레이 아이콘 설정 중 오류 발생: {str(e)}")
         return None
+
+def set_controller_visible(visible):
+    """플로팅 컨트롤러를 표시/숨김 전환합니다.
+
+    ⚠️ 반드시 메인(GUI) 스레드에서만 호출할 것.
+       트레이 아이콘은 별도 스레드에서 돌기 때문에 거기서 직접 부르면 안 되고,
+       gui_queue에 "toggle_controller"를 넣어 메인 스레드로 넘겨야 한다.
+    """
+    global controller_hidden
+
+    controller_hidden = not visible
+    save_settings()
+
+    if not floating_controller:
+        return
+
+    try:
+        if visible:
+            floating_controller.deiconify()
+            # withdraw 동안 창 관리자가 topmost를 잊는 경우가 있어 복원 시 재적용
+            floating_controller.attributes('-topmost', True)
+            floating_controller.lift()
+            log_to_console(get_msg("controller_shown_log"))
+        else:
+            floating_controller.withdraw()
+            log_to_console(get_msg("controller_hidden_log"))
+    except Exception as e:
+        logging.warning(f"컨트롤러 표시 전환 실패: {e}")
+
+    # 어느 경로로 상태가 바뀌든 트레이 메뉴 라벨을 항상 동기화
+    # (플로팅 우클릭 → 숨김 시에도 트레이가 "보이기"로 뒤집혀야 함)
+    if tray_menu_updater:
+        try:
+            tray_menu_updater()
+        except Exception as e:
+            logging.warning(f"트레이 메뉴 갱신 실패: {e}")
+
 
 # 플로팅 미니 녹음 컨트롤러
 def setup_floating_controller():
@@ -1782,9 +1839,34 @@ def setup_floating_controller():
             log_to_console("녹음 시작 (컨트롤러)")
             root.after(10, start_recording)
 
+    # ── 우클릭 컨텍스트 메뉴 (숨기기) ──
+    # ctrl_win은 WS_EX_NOACTIVATE라 포커스를 받지 못한다.
+    # 메뉴를 ctrl_win이 아닌 root의 자식으로 만들어야 바깥 클릭 시 정상적으로 닫힌다.
+    ctrl_menu = tk.Menu(root, tearoff=0)
+    ctrl_menu.add_command(label=get_msg("ctrl_menu_hide"),
+                          command=lambda: set_controller_visible(False))
+
+    menu_open = [False]   # 메뉴가 떠 있는 동안 keep-alive lift를 멈추기 위한 플래그
+
+    def on_right_click(event):
+        menu_open[0] = True
+        try:
+            # 언어가 바뀌었을 수 있으므로 팝업 직전 라벨 갱신
+            ctrl_menu.entryconfigure(0, label=get_msg("ctrl_menu_hide"))
+            ctrl_menu.tk_popup(event.x_root, event.y_root)
+        except Exception as e:
+            # 팝업이 실패하면 우클릭이 먹통이 되므로 즉시 숨김으로 폴백
+            logging.warning(f"컨트롤러 우클릭 메뉴 실패 → 즉시 숨김 폴백: {e}")
+            set_controller_visible(False)
+        finally:
+            ctrl_menu.grab_release()
+            # tk_popup은 메뉴가 닫히기 전에 반환될 수 있어 지연 해제
+            ctrl_win.after(300, lambda: menu_open.__setitem__(0, False))
+
     canvas.bind('<ButtonPress-1>', on_press)
     canvas.bind('<B1-Motion>', on_drag)
     canvas.bind('<ButtonRelease-1>', on_release)
+    canvas.bind('<Button-3>', on_right_click)
 
     # ── 상태 업데이트 + 사라짐 방지 루프 (500ms 주기) ──
     blink_state = [False]
@@ -1792,6 +1874,11 @@ def setup_floating_controller():
 
     def update_state():
         if not ctrl_win.winfo_exists():
+            return
+        # 숨김 상태면 그리기와 keep-alive lift를 모두 건너뛴다.
+        # (아래 lift/topmost가 살아 있으면 withdraw한 창이 되살아날 수 있음)
+        if controller_hidden:
+            ctrl_win.after(500, update_state)
             return
         try:
             if controller_mode == 'tts':
@@ -1838,8 +1925,9 @@ def setup_floating_controller():
                                    tags='btn_icon')
 
             # 3초마다 topmost 재적용 (사라짐 방지)
+            # 단, 우클릭 메뉴가 떠 있는 동안은 lift가 메뉴를 가리므로 건너뛴다
             keep_alive_counter[0] += 1
-            if keep_alive_counter[0] >= 6:  # 500ms * 6 = 3초
+            if keep_alive_counter[0] >= 6 and not menu_open[0]:  # 500ms * 6 = 3초
                 keep_alive_counter[0] = 0
                 ctrl_win.attributes('-topmost', True)
                 ctrl_win.lift()
@@ -1848,10 +1936,16 @@ def setup_floating_controller():
             pass
         ctrl_win.after(500, update_state)
 
+    # 저장된 숨김 상태 복원 (숨긴 채로 종료했으면 숨긴 채로 시작)
+    if controller_hidden:
+        ctrl_win.withdraw()
+        log_to_console("[컨트롤러] 숨김 상태로 시작 — 트레이 메뉴에서 다시 표시할 수 있습니다.")
+
     update_state()
 
     logging.info("플로팅 컨트롤러 생성 완료")
-    log_to_console(get_msg("controller_created"))
+    if not controller_hidden:
+        log_to_console(get_msg("controller_created"))
 
 # API 키 설정 대화 상자 표시 함수
 def show_api_key_dialog(required=False):
@@ -3447,6 +3541,15 @@ def read_selected_text():
 
         logging.info(f"이전 클립보드: '{old_clipboard[:50]}...' (길이: {len(old_clipboard)})")
 
+        # 선택 여부를 확실히 판별하기 위해 클립보드를 비운다.
+        # 선택된 텍스트가 없으면 Ctrl+C를 눌러도 클립보드가 그대로 남기 때문에,
+        # 비우지 않으면 직전 복사물을 "선택된 텍스트"로 오인해서 읽어버린다.
+        try:
+            pyperclip.copy("")
+            time.sleep(0.05)
+        except Exception:
+            pass
+
         # Ctrl+C 실행 (깨끗한 상태에서)
         keyboard.press(Key.ctrl)
         time.sleep(0.05)
@@ -3470,20 +3573,27 @@ def read_selected_text():
 
         logging.info(f"새 클립보드: '{new_text[:50] if new_text else ''}...' (길이: {len(new_text) if new_text else 0})")
 
-        # 새로운 텍스트가 있고, 이전과 다르면 읽기
-        if new_text and len(new_text.strip()) > 0:
-            if new_text != old_clipboard:
-                log_to_console(f"선택된 텍스트 감지: {new_text[:30]}...")
-                speak_text(new_text)
+        # ── 선택된 텍스트가 없을 때: 중지 / 컨트롤러 복원으로 분기 ──
+        if not new_text or len(new_text.strip()) == 0:
+            # 판별하려고 비웠던 클립보드를 원래 내용으로 되돌린다
+            try:
+                pyperclip.copy(old_clipboard if old_clipboard else "")
+            except Exception:
+                pass
+
+            if tts_playing:
+                # 숨김 상태에서도 단축키만으로 멈출 수 있게 한다 (중지가 복원보다 우선)
+                log_to_console("[TTS] 선택된 텍스트 없음 → 재생 중지")
+                stop_tts()
             else:
-                # 같은 텍스트라도 선택된 것이 있으면 읽기
-                if len(new_text.strip()) > 0:
-                    log_to_console(f"동일 텍스트 다시 읽기: {new_text[:30]}...")
-                    speak_text(new_text)
-                else:
-                    log_to_console("읽을 텍스트가 선택되지 않았습니다.")
-        else:
-            log_to_console("읽을 텍스트가 선택되지 않았거나 복사에 실패했습니다.")
+                # 플로팅 아이콘 표시/숨김 토글
+                log_to_console(f"[컨트롤러] 선택된 텍스트 없음 → 플로팅 아이콘 {'복원' if controller_hidden else '숨김'}")
+                set_controller_visible(controller_hidden)
+            return
+
+        # 선택된 텍스트가 있으면 읽는다 (직전과 같은 텍스트여도 그대로 읽어준다)
+        log_to_console(f"선택된 텍스트 감지: {new_text[:30]}...")
+        speak_text(new_text)
 
     except Exception as e:
         logging.error(f"선택 영역 읽기 오류: {e}")
