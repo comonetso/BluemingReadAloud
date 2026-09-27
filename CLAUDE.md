@@ -2,102 +2,119 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project
+
+**BluemingReadAloud** — a Windows tray app that reads selected text aloud with Google Cloud Text-to-Speech.
+It started as "Yeogiaen STT Typer" (speech-to-text + TTS). Speech-to-text has been removed; the app is TTS-only.
+The target behavior follows the Chrome extension `F:\workspace\EtcProject\ChromeExtentions\read-aloud-hrg`.
+
+Governance rules (Korean) are in `AGENTS.md`. Past session logs are in `docs/session_logs/`.
+
 ## Development Commands
 
-### Python Environment
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the application in development mode
-python whisperer.py
-
-# Build executable with PyInstaller
-pyinstaller Yeogiaen_WhisperTyper.spec
-
-# Alternative build command
-pyinstaller --onefile --noconsole --icon=favicon.ico --add-data "messages.py;." --add-data "README.md;." --add-data "README.KR.md;." --add-data "favicon.ico;." whisperer.py
-```
-
-### Testing and Distribution
-```bash
-# Test the built executable
-./dist/Yeogiaen_WhisperTyper.exe
-
-# Open console for debugging
+# Run in development mode (console output; PYTHONUTF8=1 avoids Korean encoding errors)
 python -u whisperer.py
+
+# Build the exe (the bare `pyinstaller` command is NOT on PATH on this PC)
+python -m PyInstaller BluemingReadAloud.spec --noconfirm
+# -> dist/BluemingReadAloud.exe (uac_admin=True: UAC prompt on launch)
 ```
+
+- `*.spec` is git-ignored (`.gitignore`), so `BluemingReadAloud.spec` is a local file only.
+  The old specs (`Yeogiaen_WhisperTyper.spec`, `Yeogiaen_STT_Typer*.spec`) are kept on disk until the user decides to remove them.
+- There is no automated test suite. Verification order used in this project:
+  edit → `py_compile` → dev run → user checks it for real → build (only after the user says it passed).
+- Check build success by the output file timestamp too, not only the exit code
+  (`cmd > log 2>&1; echo ...` returns the exit code of `echo`).
 
 ## Architecture Overview
 
-### Core Components
+### Core Files
 
-**whisperer.py** - Main application file containing:
-- Voice recording functionality using sounddevice
-- OpenAI Whisper API integration for speech-to-text conversion
-- System tray integration with pystray
-- Global hotkey handling with pynput
-- Audio file management and optimization
-- Multi-language support (Korean/English)
+- **whisperer.py** — the whole app in one file (the name is historical; renaming is a pending user decision).
+  Tray, global hotkey, floating icon, TTS pipeline, settings, dialogs.
+- **messages.py** — Korean/English UI strings. Add every user-facing message to both `ko` and `en`.
+  Keep the nested `messages["ko"]` / `messages["en"]` blocks: `get_message()` indexes them first,
+  and removing them turns every message into "[Missing message]".
 
-**messages.py** - Internationalization module:
-- Contains all user-facing messages in Korean and English
-- Used throughout the application for consistent localization
-- Includes system messages, error messages, and UI text
+### TTS Pipeline (whisperer.py)
 
-### Key Features Architecture
+1. **Entry points** — global hotkey (pynput listener `on_press`), floating icon click, tray menu.
+2. **`read_selected_text()`** — releases modifier keys, backs up the clipboard, **clears it**,
+   sends Ctrl+C, waits, then reads the clipboard. Three-way branch:
+   selection → `speak_text()`; no selection + playing → `stop_tts()`;
+   no selection + idle → `set_controller_visible()` toggle. The clipboard is restored when nothing was selected.
+3. **`_preprocess_for_tts()`** — Markdown/URL/symbol cleanup for speech.
+4. **`_chunk_text_for_tts()`** — chunking ported from the extension's CharBreaker (750, EastAsian, 200) as of 2026-06-07.
+   Switching to the extension's per-line chunk rule is planned (needed for the highlighter).
+5. **`_synthesize_chunk()`** — Google Cloud TTS v1 (`google.cloud.texttospeech`), LINEAR16 24 kHz, `speaking_rate`.
+6. **`_speak()`** — producer thread synthesizes ahead (`Queue(maxsize=2)`); consumer writes to one
+   `sd.OutputStream` in 0.1 s blocks (gapless). Global `tts_output_stream` holds the stream for abort.
+7. **Stop** — `stop_current_playback()` / `stop_tts()`: sets `tts_stop_event`, aborts the stream.
 
-**Audio Processing Pipeline:**
-1. Microphone input capture via sounddevice
-2. Real-time audio data collection
-3. FLAC format conversion with optimization
-4. Timestamp-based file naming
-5. Automatic cleanup and storage management
+### System Integration
 
-**API Integration:**
-- OpenAI Whisper API client initialization
-- Configurable temperature and prompt settings
-- Language detection and custom prompts for different modes
-- Error handling and retry logic
+- **Tray**: pystray, runs on its own thread. Menu labels are re-evaluated only when `update_tray_menu()`
+  (exposed as global `tray_menu_updater`) is called.
+- **Floating icon** (`setup_floating_controller`): Tk Toplevel with Win32 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`,
+  `HWND_TOPMOST`, round region. Click = read/stop, drag = move (position saved), right-click = popup menu (hide).
+  `update_state()` redraws every 500 ms and re-raises the window every 3 s.
+- **Global hotkey**: pynput. Default TTS hotkey Ctrl+Alt+D (user setting may differ).
+- **Single instance**: Windows named mutex + UDP socket bound to `localhost:51888`.
+- **Auth**: Google Cloud service account JSON (`google_credentials.json`, kept by user decision).
+  The auth dialog copies the chosen file into the app folder. If the saved path is invalid,
+  `load_settings()` falls back to `<app dir>/google_credentials.json` — note this fallback runs only when the settings file exists.
 
-**System Integration:**
-- Windows system tray icon with context menu
-- Global hotkey registration (default: Ctrl+Shift+Alt)
-- Clipboard integration for automatic text pasting
-- Multiple instance prevention using socket binding
+### Settings
 
-**Settings Management:**
-- JSON-based configuration in whisperer_settings.json
-- Runtime settings modification via system tray
-- API key secure storage in openai_api_key.txt
-- Language preference persistence
+- `whisperer_settings.json` in the working directory (git-ignored). TTS keys: `language`, `google_credentials_path`,
+  `tts_hotkey`, `tts_settings` (`voice_name`, `speaking_rate`), `controller_position`, `controller_hidden`.
+- `save_settings()` rewrites the whole file; keep `save_settings()` and `load_settings()` in sync when adding a key.
+
+### Threading
+
+- Main thread: tkinter (`root` is hidden) + `check_gui_queue()` polling every 100 ms.
+- Tray thread (pystray), pynput listener thread.
+- TTS: `_speak` consumer thread + producer thread; voice preview thread.
+- Anything that touches Tk from another thread must go through `gui_queue` → `check_gui_queue()`.
 
 ### Directory Structure
 
-- `/recordings/` - Audio files stored in FLAC format with timestamps
-- `/logs/` - Application logs with rotation
-- `/build/` - PyInstaller build artifacts
-- `/dist/` - Final executable and distribution files
+- `logs/` — app logs (`whisperer_*.log`), `whisperer_console.log` is the live console log
+- `docs/session_logs/` — past session logs (historical record; old names/paths are intentional)
+- `build/`, `dist/` — PyInstaller output (git-ignored)
+- `recordings/`, `tts_audio/` — leftovers from the STT era / old TTS files. Do not delete without asking the user.
 
-### Configuration System
+### In Development (not implemented yet)
 
-The application uses a hierarchical configuration approach:
-1. Default hardcoded settings in whisperer.py
-2. JSON configuration file (whisperer_settings.json) 
-3. Runtime modifications via system tray menu
-4. Environment-specific settings (API keys, device selection)
-
-### Threading Architecture
-
-- Main UI thread for system tray and basic operations
-- Recording thread for audio capture
-- API communication thread for Whisper requests
-- Background optimization threads for audio processing
+- Highlighter: color the chunk being read, per line, on the original text when possible, otherwise in a reader window.
+- Bottom playback controller.
 
 ## Important Notes
 
-- The application prevents multiple instances using socket binding on port 51889 (test port)
-- Audio files are optimized for API upload with configurable quality settings
-- Hotkey combinations are filtered to avoid Windows system conflicts
-- All user messages support Korean/English localization via the messages module
-- Logging includes both file-based and console output for debugging
+- **Change the floating icon's visibility only through `set_controller_visible()`.** It saves the setting and
+  refreshes the tray label together. Direct `withdraw()`/`deiconify()` desyncs the tray label and the saved state.
+- **Do not remove the hidden guard in `update_state()`.** Its periodic `lift()`/topmost would bring a withdrawn window back.
+- **Judge "is TTS playing" with `tts_playing`.** `is_speaking` is a dead variable.
+- **Never add `tts_stop_event.clear()` in `_speak`'s `finally`.** A producer blocked on `put()` comes back to life
+  as a zombie thread. Clear the event at the start of the next `_speak`, and join first.
+- **Keep the tray "Show floating icon" item.** Hidden state is persisted; the tray item is the emergency way back
+  (otherwise only hand-editing the settings file restores it).
+- `sd.stop()` does not stop an `sd.OutputStream`; use `tts_output_stream.abort()`/`stop()`.
+- Do not add the U+2200–22FF range to the noise regex in preprocessing (U+2212 minus sign would be lost).
+- `np.frombuffer(...)` is read-only; `.copy()` before writing it to the stream.
+- Keep clearing the clipboard before Ctrl+C in `read_selected_text()`; without it an old clipboard is read
+  when nothing is selected. The ~0.8 s wait on the Tk main thread is accepted by design.
+- The floating window cannot take focus (`WS_EX_NOACTIVATE`): create popup menus as children of `root`,
+  and stop the re-raise loop while a menu is open (`menu_open`).
+- Single-instance port is **51888** (51889 in older docs was wrong). Changing the mutex name or port
+  is a user decision — an old exe and a new exe could then run together and both catch the hotkey.
+- Do not register Windows reserved shortcuts (Win+L, Ctrl+Alt+Del, ...) as hotkeys. The code has no filter for this.
+- Keep the pynput `on_press`/`on_release` handlers free of I/O (Windows low-level hook timeout); hand work off with `root.after(...)`.
+- Modifier-key reset in `on_release` (Ctrl/Shift/Alt pressed flags) is required by the TTS hotkey — without it a
+  stuck Shift makes a bare key trigger reading.
+- `open_console.bat` is rewritten by the app every time the console is opened.

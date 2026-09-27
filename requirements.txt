@@ -1,12 +1,9 @@
 sounddevice
 numpy
-google-cloud-speech
 google-cloud-texttospeech
 pynput
-soundfile
 pyperclip
 pystray
 Pillow
-requests
 pyinstaller
 ttkbootstrap

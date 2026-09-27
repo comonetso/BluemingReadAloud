@@ -1,80 +1,106 @@
-**This application was developed on March 17, 2025, by developers at LMTY Yeogiaen Service Co., Ltd. to make Cursor AI more convenient to use.**
+# BluemingReadAloud
 
-# Yeogiaen STT Typer
-
-A lightweight desktop application that converts speech to text in real-time using Google Cloud Speech-to-Text V2 API. Perfect for quick voice memos, dictation, and accessibility needs.
+A lightweight Windows tray app that reads selected text aloud using Google Cloud Text-to-Speech.
+Select text in any application, press the hotkey, and it is read back to you.
 
 ## Key Features
 
-- **Easy Voice Recording**: Press default shortcut (Ctrl+Shift+Alt) to start recording, release any key to stop
-- **Google STT V2 Integration**: Accurate and fast speech recognition using the latest Google Cloud engine
-- **Conversation Mode**: Switch between General mode and Address+POI mode for optimized recognition rules (punctuation, etc.)
-- **Recognition Model Selection**: Choose from optimized models like long (long speech), short (commands), and telephony
-- **Clipboard Integration**: Automatically copies and pastes converted text
-- **Multi-language Support**: Full Korean and English interface (including menus and settings)
-- **Customizable Shortcuts**: Change shortcuts as needed (excluding Windows system reserved shortcuts)
-- **System Tray Integration**: Runs in the background with system tray icon access
-- **Automatic Recording Save**: All recordings are saved with timestamps in FLAC format (16kHz)
+- **Read selected text aloud**: Select text anywhere and press the hotkey (default `Ctrl+Alt+D`).
+  The app copies the selection, cleans it up for speech (Markdown symbols, URLs, special characters),
+  splits long text into chunks and plays them back-to-back without gaps.
+- **One hotkey, three actions**
+  - Text selected → read it (a new selection replaces what is currently being read)
+  - Nothing selected while reading → stop
+  - Nothing selected while idle → show / hide the floating icon
+- **Floating icon**: A small round always-on-top button.
+  - Click: read the current selection, or stop while reading
+  - Drag: move it (the position is remembered)
+  - Right-click: hide it
+- **System tray**: The app runs in the background with a tray icon (see the menu below).
+- **Voice settings**: Choose a Korean voice (default `ko-KR-Chirp3-HD-Callirrhoe`), preview it,
+  change the speaking rate and the hotkey.
+- **Korean / English interface**
+- **Single instance**: A second copy of the app will not start.
+
+### In development
+
+- **Highlighter**: highlight the part being read, line by line (on the original text where possible,
+  otherwise in a reader window).
+- **Bottom playback controller**
+
+These are not available yet.
 
 ## Requirements
 
-- Windows Operating System
-- Google Cloud Service Account JSON Key ([Setup Guide](https://cloud.google.com/speech-to-text/v2/docs/setup))
-- Internet connection for API access
-- Microphone device (default or selectable)
+- Windows
+- A Google Cloud **service account JSON key** for a project with the Cloud Text-to-Speech API enabled
+- Internet connection
+- An audio output device
 
-## Installation
+## Google Cloud Credentials
 
-1. Download the latest version from the releases page
-2. Extract the ZIP file to your desired location
-3. Run `STT_Typer.exe` (or `whisperer.exe`)
-4. Select your Google Cloud Service Account JSON file when prompted (only required on first run)
+1. On first run (or when no valid key is found) a dialog asks for the service account JSON file.
+2. The selected file is copied into the app folder as `google_credentials.json` and used from then on.
+3. You can change it later from the tray menu → **Google Cloud Credentials**.
+
+Never commit or share `google_credentials.json`.
 
 ## How to Use
 
-1. The application runs in the background with a system tray icon
-2. Press and hold the set shortcut (default: Ctrl+Shift+Alt) to start recording
-3. Speak clearly into your microphone
-4. Release any key to stop recording and automatically convert to text
-5. The converted text is automatically copied to clipboard and pasted at the current cursor position
-6. Recorded files are automatically saved in the 'recordings' folder
+1. Start the app. A tray icon and the floating icon appear.
+2. Select text in any application.
+3. Press the hotkey (default `Ctrl+Alt+D`) or click the floating icon.
+4. To stop, press the hotkey again with nothing selected, or click the floating icon.
 
-## System Tray Options
+## System Tray Menu
 
-Right-click the system tray icon to access the following options:
+Right-click the tray icon:
 
-- **Open Recordings Folder**: Opens the folder containing all recorded audio files
-- **Open README**: Opens help documentation in the current language
-- **Open Console Window**: Opens console window for debugging and log viewing
-- **Set Google Cloud Credentials**: Change your service account JSON key file
-- **Conversation Mode**: Choose between General or Address/POI mode (affects punctuation handling)
-- **Recognition Model**: Select Google STT models (long, short, telephony)
-- **Set Hotkey**: Modify recording start/stop shortcuts
-- **Change Language**: Switch between Korean and English interface (updates all menus)
-- **Exit**: Close the application
+- **TTS Settings**: voice model (with preview), speaking rate, hotkey
+- **Google Cloud Credentials**: change the service account JSON key
+- **Change Language (KR/EN)**
+- **Open README File**
+- **Open Console**: shows the live log (for troubleshooting)
+- **⏹ TTS 중지** (Stop reading; enabled only while reading)
+- **Show / Hide Floating Icon**: always available here, so a hidden icon can be restored
+- **Exit**
 
-## Notes
+## Run from Source
 
-- The application requires an internet connection to use the Google Cloud STT V2 API
-- Your service account JSON key is copied to the program directory and used for authentication
-- Recordings are saved in FLAC format in the `recordings` folder with timestamped filenames
-- The program automatically prevents duplicate execution
-- All logs are stored in the 'logs' folder to help with troubleshooting
+```bash
+pip install -r requirements.txt
+python whisperer.py
+```
+
+The main script is still named `whisperer.py`.
+
+## Build
+
+```bash
+python -m PyInstaller BluemingReadAloud.spec --noconfirm
+```
+
+- Output: `dist/BluemingReadAloud.exe`
+- The exe requests administrator rights (UAC prompt) because the global keyboard hook needs them.
+
+## Files
+
+- `whisperer_settings.json`: settings (language, hotkey, voice, speaking rate, floating icon position / visibility)
+- `google_credentials.json`: Google Cloud service account key
+- `logs/`: log files
+
+These are created in the app's working folder.
+
+## History
+
+Originally developed in 2025 at LMTY Yeogiaen Service Co., Ltd. as "Yeogiaen STT Typer" (speech-to-text + text-to-speech).
+Speech-to-text has been removed; the app is now text-to-speech only.
 
 ## Credits
 
-This application uses:
-- Google Cloud Speech-to-Text V2 API (Speech Recognition)
-- Python Libraries:
-  - google-cloud-speech (Authentication and API calls)
-  - sounddevice (Audio Recording)
-  - soundfile (Audio File Processing)
-  - pynput (Keyboard Event Handling)
-  - pystray (System Tray Icon)
-  - tkinter (GUI Elements)
+- Google Cloud Text-to-Speech API
+- Python libraries: google-cloud-texttospeech, sounddevice, numpy, pynput, pyperclip, pystray, Pillow, ttkbootstrap (tkinter)
 
 ## License
 
 This project is provided under the MIT License.
-
-
