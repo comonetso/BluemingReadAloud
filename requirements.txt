@@ -7,3 +7,5 @@ pystray
 Pillow
 pyinstaller
 ttkbootstrap
+comtypes
+audiotsm

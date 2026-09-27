@@ -36,9 +36,7 @@ messages = {
         "language_menu": "언어 설정",
         "korean_language": "한국어",
         "english_language": "영어",
-        "text_length": "텍스트 길이: {} 글자",
-        "controller_created": "미니 컨트롤러가 화면에 표시되었습니다.",
-        "controller_position_saved": "컨트롤러 위치가 저장되었습니다."
+        "text_length": "텍스트 길이: {} 글자"
     },
     "en": {
         "start": "=== BluemingReadAloud Started ===",
@@ -74,15 +72,13 @@ messages = {
         "language_menu": "Language Settings",
         "korean_language": "Korean",
         "english_language": "English",
-        "text_length": "Text length: {} characters",
-        "controller_created": "Mini controller is displayed on screen.",
-        "controller_position_saved": "Controller position saved."
+        "text_length": "Text length: {} characters"
     },
-    # 메뉴 항목
-    "open_readme": {
-        "ko": "README 파일 열기",
-        "en": "Open README File"
-    },
+    # 메뉴 항목 (트레이는 2026-09-28 사용자 확정 다섯 개: TTS 설정…·리더 창 사용·브라우저에서 비활성화·
+    #  텍스트 선택 시 읽기 버튼·종료. 옛 "README 파일 열기"(open_readme)·"언어 변경 (한/영)"(menu_language)·
+    #  "현재: 한국어/English"(current_language_ko/en)·"Google Cloud 인증 설정"(google_credential_setting) 문구는
+    #  그 항목을 트레이에서 빼면서 지웠다. 콘솔·인증·언어는 설정 창으로 옮겼다 — 아래 "설정 창 일반" 묶음)
+    # 설정 창 "콘솔 창 열기" 버튼 (옛 트레이 항목과 같은 문구)
     "open_console": {
         "ko": "콘솔 창 열기",
         "en": "Open Console"
@@ -128,10 +124,6 @@ messages = {
         "ko": "지우기",
         "en": "Clear"
     },
-    "google_credential_setting": {
-        "ko": "Google Cloud 인증 설정",
-        "en": "Google Cloud Credentials"
-    },
     "google_credential_updated": {
         "ko": "Google Cloud 인증 정보가 업데이트되었습니다.",
         "en": "Google Cloud credentials updated."
@@ -148,34 +140,17 @@ messages = {
         "ko": "읽어주기 단축키 설정",
         "en": "TTS Hotkey Configuration"
     },
+    # 트레이 첫 항목 — 설정 창을 연다(창을 여는 항목이라 말줄임표 "…" — 사용자가 정한 문구 "TTS 설정…")
     "menu_tts_settings": {
-        "ko": "TTS 설정",
-        "en": "TTS Settings"
+        "ko": "TTS 설정…",
+        "en": "TTS Settings…"
     },
     "menu_stop_tts": {
         "ko": "읽기 중지",
         "en": "Stop Reading"
     },
-    "menu_hide_controller": {
-        "ko": "○ 플로팅 아이콘 숨기기",
-        "en": "○ Hide Floating Icon"
-    },
-    "menu_show_controller": {
-        "ko": "◉ 플로팅 아이콘 보이기",
-        "en": "◉ Show Floating Icon"
-    },
-    "ctrl_menu_hide": {
-        "ko": "숨기기",
-        "en": "Hide"
-    },
-    "controller_hidden_log": {
-        "ko": "플로팅 컨트롤러를 숨겼습니다. (트레이 메뉴에서 다시 표시)",
-        "en": "Floating controller hidden. (Restore it from the tray menu)"
-    },
-    "controller_shown_log": {
-        "ko": "플로팅 컨트롤러를 다시 표시했습니다.",
-        "en": "Floating controller restored."
-    },
+    # (옛 플로팅 아이콘 문구 menu_hide_controller·menu_show_controller·ctrl_menu_hide·controller_hidden_log·
+    #  controller_shown_log·controller_created·controller_position_saved 는 2026-09-28 플로팅 아이콘 제거 때 지웠다)
     "settings_saved": {
         "ko": "설정이 저장되었습니다.",
         "en": "Settings saved."
@@ -208,27 +183,43 @@ messages = {
         "ko": "남성",
         "en": "Male"
     },
-    "menu_language": {
-        "ko": "언어 변경 (한/영)",
-        "en": "Change Language (KR/EN)"
-    },
     "language_changed": {
         "ko": "언어가 변경되었습니다: {0}",
         "en": "Language changed: {0}"
     },
-    "current_language_ko": {
-        "ko": "현재: 한국어",
-        "en": "Current: Korean"
+    # ── 설정 창 "일반" 묶음 (2026-09-28, 트레이에서 옮겨 옴 — whisperer.py show_tts_settings_dialog) ──
+    "group_general": {
+        "ko": "일반",
+        "en": "General"
     },
-    "current_language_en": {
-        "ko": "현재: English",
-        "en": "Current: English"
+    "label_language": {
+        "ko": "언어:",
+        "en": "Language:"
+    },
+    # 언어 이름은 그 언어 자신의 표기로 둔다(어느 화면 언어에서도 알아보게) — 그래서 ko/en 값이 같다
+    "language_name_ko": {
+        "ko": "한국어",
+        "en": "한국어"
+    },
+    "language_name_en": {
+        "ko": "English",
+        "en": "English"
+    },
+    # "인증 설정" 버튼 — Google Cloud 서비스 계정 JSON 고르는 창(show_api_key_dialog)을 연다
+    "btn_credentials": {
+        "ko": "인증 설정",
+        "en": "Credentials"
     },
     # ── 리더 창·하단 컨트롤 바 (2026-09-28) ──
-    # 트레이 메뉴 체크 항목 (whisperer.py update_tray_menu)
+    # 트레이 메뉴 체크 항목 (whisperer.py update_tray_menu). 켜 두면 "원문 위에 칠할 수 없을 때" 리더 창을 띄운다
     "menu_reader_window": {
-        "ko": "리더 창",
-        "en": "Reader Window"
+        "ko": "리더 창 사용",
+        "en": "Use Reader Window"
+    },
+    # 트레이 메뉴 체크 항목 — 켜면 Aside·웨일·크롬에서 빨간 점·단축키가 쉰다(그 브라우저는 크롬 확장이 읽는다)
+    "menu_disable_in_browsers": {
+        "ko": "브라우저에서 비활성화",
+        "en": "Disable in Browsers"
     },
     # 리더 창 제목 (reader_window.py)
     "reader_window_title": {
@@ -288,6 +279,19 @@ messages = {
     "pagebar_volume": {
         "ko": "볼륨",
         "en": "Volume"
+    },
+    # ── 빨간 점(선택 버튼) (2026-09-28) ──
+    # 글을 드래그·더블클릭으로 고르면 선택 끝 옆에 뜨는 빨간 점. 문구는 크롬 확장 read-aloud-hrg 의
+    # _locales/ko·en/messages.json 에서 그대로 가져왔다(selection_button_title · options_selection_button)
+    # 점에 마우스를 올렸을 때의 설명 (selection_button.py)
+    "selection_button_title": {
+        "ko": "선택한 글 읽기",
+        "en": "Read the selected text"
+    },
+    # 트레이 메뉴 켬/끔 체크 항목 (whisperer.py update_tray_menu)
+    "menu_selection_button": {
+        "ko": "텍스트 선택 시 읽기 버튼",
+        "en": "Read button on selected text"
     }
 }
 

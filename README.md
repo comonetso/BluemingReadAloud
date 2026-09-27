@@ -1,34 +1,45 @@
 # BluemingReadAloud
 
 A lightweight Windows tray app that reads selected text aloud using Google Cloud Text-to-Speech.
-Select text in any application, press the hotkey, and it is read back to you.
+Select text in any application and a small **red dot** appears next to the end of the selection.
+Click the dot or press the hotkey, and the text is read back to you.
 
 ## Key Features
 
 - **Read selected text aloud**: Select text anywhere and press the hotkey (default `Ctrl+Alt+D`).
   The app copies the selection, cleans it up for speech (Markdown symbols, URLs, special characters),
   splits long text into chunks and plays them back-to-back without gaps.
+- **Red dot (read-selection button)**: As in the Chrome extension, when you select text by **dragging or
+  double-clicking**, a small red dot appears next to where you released the mouse. Click it to read the selection.
+  - It disappears when you click elsewhere, press a key or scroll.
+  - Clicking the dot keeps the focus and the selection in the window where you selected the text.
+  - Windows does not tell other apps when text is selected, so the dot is shown from mouse gestures.
+    It can also appear after dragging a window's title bar (clicking it then acts like the hotkey: it reads text
+    still selected in that window, otherwise nothing happens), and it does not
+    appear for keyboard selections (Shift+arrows) — use the hotkey for those.
+  - When there is no room on the right (e.g. at the right edge of the screen) it appears to the left of the mouse
+    pointer, never right under it.
+  - Turn it on or off from the tray menu (**Read button on selected text**, on by default).
 - **One hotkey, three actions**
   - Text selected → read it (a new selection replaces what is currently being read)
   - Nothing selected while reading → stop
-  - Nothing selected while idle → show / hide the floating icon
-- **Floating icon**: A small round always-on-top button.
-  - Click: read the current selection, or stop while reading
-  - Drag: move it (the position is remembered)
-  - Right-click: hide it
+  - Nothing selected while idle → nothing happens
+- **Bottom playback bar**: shown at the bottom of the screen while reading
+  (pause, previous / next paragraph, mute, speed, volume, stop).
+- **Highlighter on the original text**: while reading, the current line is painted with a translucent yellow
+  highlight directly over the text in the window where you selected it. It scrolls the line into view if needed
+  and hides while another window is in front.
+- **Reader window**: only when the app cannot paint over the original text, a separate window shows the text and
+  highlights the current line (toggle it with **Use Reader Window** in the tray). It is not shown while the app is
+  still checking whether it can paint over the original text.
+- **Paused in browsers**: Aside, Whale and Chrome are handled by the Chrome extension (read-aloud-hrg), so in those
+  browser windows the red dot does not appear and the hotkey does not start a new reading (it can still stop a
+  reading in progress). Toggle it with **Disable in Browsers** in the tray (on by default). Web views inside other
+  apps (e.g. VS Code) are not affected.
 - **System tray**: The app runs in the background with a tray icon (see the menu below).
-- **Voice settings**: Choose a Korean voice (default `ko-KR-Chirp3-HD-Callirrhoe`), preview it,
-  change the speaking rate and the hotkey.
-- **Korean / English interface**
+- **Settings window**: Choose a Korean voice (default `ko-KR-Chirp3-HD-Callirrhoe`), preview it, change the speaking
+  rate, the hotkey and the interface language (한국어 / English), set the Google Cloud credentials, open the console.
 - **Single instance**: A second copy of the app will not start.
-
-### In development
-
-- **Highlighter**: highlight the part being read, line by line (on the original text where possible,
-  otherwise in a reader window).
-- **Bottom playback controller**
-
-These are not available yet.
 
 ## Requirements
 
@@ -41,29 +52,31 @@ These are not available yet.
 
 1. On first run (or when no valid key is found) a dialog asks for the service account JSON file.
 2. The selected file is copied into the app folder as `google_credentials.json` and used from then on.
-3. You can change it later from the tray menu → **Google Cloud Credentials**.
+3. You can change it later from the tray menu → **TTS Settings…** → **Credentials** button.
 
 Never commit or share `google_credentials.json`.
 
 ## How to Use
 
-1. Start the app. A tray icon and the floating icon appear.
-2. Select text in any application.
-3. Press the hotkey (default `Ctrl+Alt+D`) or click the floating icon.
-4. To stop, press the hotkey again with nothing selected, or click the floating icon.
+1. Start the app. A tray icon appears.
+2. Select text in any application by dragging or double-clicking. A red dot appears next to the selection.
+3. Click the red dot, or press the hotkey (default `Ctrl+Alt+D`).
+4. To stop, press the hotkey again with nothing selected, or use the stop button on the bottom playback bar.
 
 ## System Tray Menu
 
 Right-click the tray icon:
 
-- **TTS Settings**: voice model (with preview), speaking rate, hotkey
-- **Google Cloud Credentials**: change the service account JSON key
-- **Change Language (KR/EN)**
-- **Open README File**
-- **Open Console**: shows the live log (for troubleshooting)
-- **⏹ TTS 중지** (Stop reading; enabled only while reading)
-- **Show / Hide Floating Icon**: always available here, so a hidden icon can be restored
+- **TTS Settings…**: opens the settings window
+  - voice model (with preview), speaking rate, hotkey
+  - General: language (한국어 / English — applied when you press **Save**; the tray menu switches too),
+    **Credentials** (change the service account JSON key), **Open Console** (live log, for troubleshooting)
+- **Use Reader Window** (check): show the reader window when the app cannot paint over the original text
+- **Disable in Browsers** (check): pause the red dot and the hotkey in Aside, Whale and Chrome (on by default)
+- **Read button on selected text** (check): turn the red dot on / off
 - **Exit**
+
+To stop reading, use the stop button on the bottom playback bar, or press the hotkey with nothing selected.
 
 ## Run from Source
 
@@ -85,7 +98,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 
 ## Files
 
-- `whisperer_settings.json`: settings (language, hotkey, voice, speaking rate, floating icon position / visibility)
+- `whisperer_settings.json`: settings (language, hotkey, voice, speaking rate / volume, reader window, red dot on / off,
+  disable in browsers, and `source_highlight_enabled` — the highlighter on the original text; this one is not in any
+  menu and can only be changed in the file)
 - `google_credentials.json`: Google Cloud service account key
 - `logs/`: log files
 

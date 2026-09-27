@@ -28,3 +28,6 @@ dist/
 .windsurfrules
 whisperer_console.log
 build_log.txt
+
+# 설치 파일 결과물(Inno Setup)
+installer/Output/

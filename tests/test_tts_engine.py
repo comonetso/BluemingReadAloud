@@ -502,27 +502,21 @@ class TestMoves(EngineTestBase):
 
 
 class TestRateVolume(EngineTestBase):
-    def test_rate_change_applies_from_next_segment(self):
-        # 소리 값에 속도를 새긴다: (idx+1)*1000 + 속도*100
-        def audio_of(idx, rate, sec):
-            return np.full(int(sec * SR), (idx + 1) * 1000 + int(round(rate * 100)), dtype=np.int16)
+    def test_rate_change_applies_immediately_without_new_request(self):
+        # 2026-09-28 사용자 요청 "하단 바 속도가 즉시 반영돼야(확장처럼)": 합성은 늘 1.0, 속도를 바꾸면 다음 블록부터
+        # 재생 쪽에서 늘이고 줄인다(_Stretcher). 받아 둔 소리를 버리거나 다시 요청하지 않는다.
         texts = ["가.", "나.", "다."]
-        h = Harness(texts, seconds=lambda i, r: 2.0, audio_of=audio_of,
-                    hooks=[(lambda b, h: int(b[0]) == 1100 and len(h.stream.written()) == 4,
-                            lambda h: h.session.command("setRate", 1.5))])
+        h = Harness(texts, seconds=lambda i, r: 2.0,
+                    hooks=[(at_block(0, 4), lambda h: h.session.command("setRate", 1.5))])
         h.run()
-        values = np.concatenate([b for b in h.stream.written() if b.any()])
-        counts = {int(v): int(c) for v, c in zip(*np.unique(values, return_counts=True))}
-        full = 2 * SR
-        self.assertEqual(counts.get(1100), full, counts)   # 지금 조각은 옛 속도로 끝까지
-        self.assertEqual(counts.get(2150), full, counts)   # 다음 조각부터 새 속도
-        self.assertEqual(counts.get(3150), full, counts)
-        self.assertNotIn(2100, counts)                      # 옛 속도로 미리 만든 조각은 버림
-        self.assertNotIn(3100, counts)
+        self.assertEqual(sorted(h.synth.called()), [(0, 1.0), (1, 1.0), (2, 1.0)])   # 조각마다 한 번, 늘 1.0
+        total = sum(len(b) for b in h.stream.written())
+        orig = 3 * 2 * SR
+        fast = 5 * BLOCK + (orig - 5 * BLOCK) / 1.5          # 바꾸기 전 블록은 원본 그대로, 나머지는 1.5배 빠르게
+        drain = int(SR * tts_engine.DRAIN_SECONDS)
+        self.assertLess(total, orig * 0.8)                     # 원본 그대로였다면 orig — 즉시 빨라졌다
+        self.assertAlmostEqual(total - drain, fast, delta=0.15 * SR)   # WSOLA 끝 패딩·손실(조각당 수십 ms) 여유
         self.assertEqual(h.states()[-2]["rate"], 1.5)
-        for idx, rate in h.synth.called():
-            if idx == 0:
-                self.assertEqual(rate, 1.0)
 
     def test_rate_is_clamped_to_cloud_range(self):
         self.assertEqual(tts_engine.clamp_rate(10), tts_engine.RATE_MAX)
@@ -591,14 +585,14 @@ class TestTiming(EngineTestBase):
                 break
 
     def test_estimate_follows_rate_change(self):
-        h = Harness(self._texts(), seconds=lambda i, r: [10, 20, 30][i] * 0.1 / r,
+        # 합성은 늘 1.0(1·2·3초). 속도를 2.0 으로 바꾸면 이미 받은 조각까지 들리는 시간이 곧바로 절반 → 전체 3초
+        h = Harness(self._texts(), seconds=lambda i, r: [10, 20, 30][i] * 0.1,
                     hooks=[(at_block(0, 2), lambda h: h.session.set_rate(2.0))])
         h.run()
         after = [s for s in h.states() if s["rate"] == 2.0 and s["state"] == "PLAYING"]
         self.assertTrue(after)
-        # 조각 0 은 1초(이미 합성), 나머지는 속도 2배로 1초 + 1.5초 → 3.5초
         for s in after:
-            self.assertAlmostEqual(s["total"], 3.5, places=6)
+            self.assertAlmostEqual(s["total"], 3.0, places=6)
 
     def test_loading_shown_only_after_two_seconds(self):
         gate = threading.Event()
@@ -873,14 +867,15 @@ class TestRobustness(EngineTestBase):
         self.assertEqual([r[0] for r in runs_of(h.stream.written())], [0])
 
     def test_rate_change_then_move(self):
-        def audio_of(idx, rate, sec):
-            return np.full(int(sec * SR), (idx + 1) * 1000 + int(round(rate * 100)), dtype=np.int16)
-        h = Harness(["가.", "나.", "다."], seconds=lambda i, r: 3.0, audio_of=audio_of,
+        # 속도를 바꾸자마자 다음으로 이동: 다시 요청하지 않고(합성은 1.0), 이동한 조각부터 새 속도로 이어 읽는다
+        h = Harness(["가.", "나.", "다."], seconds=lambda i, r: 3.0,
                     hooks=[(lambda b, h: len(h.stream.written()) == 3,
                             lambda h: (h.session.set_rate(2.0), h.session.forward()))])
         h.run()
-        values = {int(b[0]) for b in h.stream.written() if b.any()}
-        self.assertEqual(values, {1100, 2200, 3200})
+        self.assertEqual(sorted(h.synth.called()), [(0, 1.0), (1, 1.0), (2, 1.0)])
+        self.assertEqual([d for k, d in h.all_events() if k == "segment"], [0, 1, 2])
+        total = sum(len(b) for b in h.stream.written())
+        self.assertLess(total, 7 * SR)                         # 원본 그대로였다면 9초 — 조각 1·2 는 절반 길이
 
     def test_volume_change_while_muted_stays_silent(self):
         def audio_of(idx, rate, sec):
@@ -894,6 +889,209 @@ class TestRobustness(EngineTestBase):
         self.assertEqual(firsts, [10000, 10000, 0, 0, 0, 3000, 3000, 3000, 3000, 3000])
 
 
+def rate_audio(idx, rate, sec):
+    """소리 값에 조각 번호와 속도를 새긴다: (idx+1)*1000 + 속도*100 → 어떤 속도 소리가 울렸는지 가려낸다."""
+    return np.full(int(sec * SR), (idx + 1) * 1000 + int(round(rate * 100)), dtype=np.int16)
+
+
+class TestSynthCache(EngineTestBase):
+    """합성 소리 재사용 (tts_engine 모듈 설명 "합성 소리 재사용", 확장 js/tts-engines.js:385-407).
+
+    가짜 합성의 호출 기록(h.synth.called())으로 "API 요청을 몇 번 보냈는지" 를 센다.
+    옛 엔진은 이동·속도 변경 때마다 들고 있던 소리를 전부 버리고 다시 요청했다(2차 UI 검증: 고유 조각 6개에 15번).
+    """
+
+    @staticmethod
+    def calls(h):
+        return [i for i, _ in h.synth.called()]
+
+    @staticmethod
+    def track_cache(h):
+        """블록을 쓸 때마다 캐시 칸 수를 기록한다(끝까지 SYNTH_CACHE_SIZE 를 넘지 않는지 보려고)."""
+        sizes = []
+        h.hooks.append([lambda b, h: sizes.append(len(h.session._cache)) or False, lambda h: None, False])
+        return sizes
+
+    def test_forward_then_rewind_needs_no_new_request(self):
+        # 조각 0 을 1.1초 들은 때 다음 → (0.75초 뒤) 조각 1 → 0.6초 들은 때 이전 → (0.75초 뒤) 조각 0 처음부터.
+        # 옛 엔진: 이동마다 소리를 버려 조각 0·1·2 를 다시 요청했다. 이제는 조각마다 딱 한 번.
+        texts = [f"조각{i}." for i in range(5)]
+        h = Harness(texts, seconds=lambda i, r: 5.0,
+                    hooks=[(at_block(0, 10), lambda h: h.session.forward()),
+                           (at_block(1, 5), lambda h: h.session.rewind())])
+        sizes = self.track_cache(h)
+        runs = h.run()
+        self.assertEqual([r[:2] for r in runs[:2]], [(0, 0), (1, 0)])
+        self.assertEqual(runs[2:], [(0, 0, 50), (1, 0, 50), (2, 0, 50), (3, 0, 50), (4, 0, 50)])
+        self.assertEqual(sorted(self.calls(h)), [0, 1, 2, 3, 4])
+        self.assertEqual(h.session._ready, {})       # 요청만 하고 안 쓰인 채 남은 소리가 없다
+        self.assertLessEqual(max(sizes), tts_engine.SYNTH_CACHE_SIZE)
+
+    def test_restart_current_segment_needs_no_new_request(self):
+        # 3초가 넘은 때 이전 = 지금 조각을 처음부터. 옛 엔진은 지금 조각을 다시 요청해 그동안 무음이었다
+        h = Harness(["가.", "나.", "다."], seconds=lambda i, r: 5.0,
+                    hooks=[(at_block(1, 35), lambda h: h.session.rewind())])
+        runs = h.run()
+        self.assertEqual(runs, [(0, 0, 50), (1, 0, 36), (1, 0, 50), (2, 0, 50)])
+        self.assertEqual(sorted(self.calls(h)), [0, 1, 2])
+        self.assertEqual(h.session._ready, {})
+
+    def test_rate_change_needs_no_new_request(self):
+        # 1.0 → 1.5 → 1.0 으로 오가도 합성 요청은 조각마다 한 번(늘 1.0). 예전에는 속도가 합성 값이라 다시 요청했다.
+        h = Harness(["가.", "나.", "다.", "라."], seconds=lambda i, r: 2.0,
+                    hooks=[(at_block(0, 4), lambda h: h.session.set_rate(1.5)),
+                           (lambda b, h: len(h.stream.written()) == 12, lambda h: h.session.set_rate(1.0))])
+        h.run()
+        self.assertEqual(sorted(h.synth.called()), [(i, 1.0) for i in range(4)])
+        self.assertEqual([d for k, d in h.all_events() if k == "segment"], [0, 1, 2, 3])
+
+    def test_cache_holds_two_and_drops_the_oldest(self):
+        # 조각 0 에서 다음 4번(→ 4): 들고 있던 0·1·2 가 캐시로 가는데 2칸이라 가장 오래된 0 이 밀려난다.
+        # 조각 4 에서 이전 4번(→ 0): 1·2 는 캐시에서 꺼내고 0 만 다시 요청. 이때 4·5·6 이 캐시로 가며 4 가 밀려난다.
+        texts = [f"조각{i}." for i in range(8)]
+
+        def jump_forward(h):
+            wait_until(lambda: len(h.synth.called()) >= 3, 3)
+            for _ in range(4):
+                h.session.forward()
+
+        def jump_back(h):
+            wait_until(lambda: len(h.synth.called()) >= 6, 3)
+            for _ in range(4):
+                h.session.rewind()
+        h = Harness(texts, seconds=lambda i, r: 2.0,
+                    hooks=[(at_block(0, 5), jump_forward), (at_block(4, 3), jump_back)])
+        sizes = self.track_cache(h)
+        runs = h.run()
+        self.assertEqual([r[0] for r in runs], [0, 4, 0, 1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(self.calls(h), [0, 1, 2, 4, 5, 6, 0, 3, 4, 7])
+        self.assertEqual(tts_engine.SYNTH_CACHE_SIZE, 2)       # 확장 tts-engines.js:407 .slice(0, 2)
+        self.assertTrue(sizes and max(sizes) <= 2, sizes)
+        self.assertEqual(h.session._ready, {})
+
+    def test_late_result_after_move_goes_to_cache_and_is_not_requested_twice(self):
+        # 조각 2 요청이 네트워크에 걸린 채 "다음"(→ 1). 이동 뒤 도착한 조각 2 결과는 옛 세대라 재생 자리에 넣지
+        # 않고 캐시에만 둔다. 새 자리에서도 같은 글·같은 속도의 조각 2 가 필요하므로 캐시에서 꺼내 쓴다 → 요청 1번
+        gate = threading.Event()
+        logs = []
+
+        def forward_while_in_flight(h):
+            wait_until(lambda: (2, 1.0) in h.synth.called(), 3)   # 조각 2 요청이 나가 걸린 뒤에 누른다
+            h.session.forward()
+        h = Harness(["가.", "나.", "다.", "라."], seconds=lambda i, r: 2.0, gates={2: gate}, log=logs.append,
+                    hooks=[(at_block(0, 3), forward_while_in_flight)])
+        h.session.start()
+        # 이동 적용 뒤(조각 1 은 가짜 시간이라 순식간에 지나가고 조각 2 를 기다리며 멈춘다) 결과를 도착시킨다
+        self.assertTrue(wait_until(lambda: h.session._cur >= 1))
+        gate.set()
+        self.assertTrue(h.session.join(10))
+        runs = runs_of(h.stream.written())
+        self.assertEqual(runs[1:], [(1, 0, 20), (2, 0, 20), (3, 0, 20)])
+        self.assertEqual(sorted(self.calls(h)), [0, 1, 2, 3])
+        self.assertTrue(any("캐시에만" in m for m in logs), logs)
+        self.assertEqual(h.session._ready, {})
+
+    def test_request_in_flight_during_rate_change_is_still_used(self):
+        # 속도 변경은 세대 번호를 올리지 않는다(합성 값이 아니므로) — 받는 중이던 조각 1 소리도 그대로 쓴다(다시 요청 없음)
+        gate = threading.Event()
+
+        def faster_while_in_flight(h):
+            wait_until(lambda: (1, 1.0) in h.synth.called(), 3)
+            h.session.set_rate(2.0)
+        h = Harness(["가.", "나.", "다."], seconds=lambda i, r: 2.0, gates={1: gate},
+                    hooks=[(lambda b, h: len(h.stream.written()) == 3, faster_while_in_flight)])
+        h.session.start()
+        self.assertTrue(wait_until(lambda: h.session.rate == 2.0))
+        gate.set()
+        self.assertTrue(h.session.join(10))
+        self.assertEqual(h.synth.called(), [(0, 1.0), (1, 1.0), (2, 1.0)])
+        self.assertEqual([d for k, d in h.all_events() if k == "segment"], [0, 1, 2])
+
+    def test_stop_after_move_with_request_in_flight_leaves_no_thread(self):
+        # 이동 직후 합성이 걸린 채 정지 → 늦게 온 결과는 캐시에도 안 넣고 끝난다. 스레드가 남지 않는다(좀비 함정)
+        baseline = threading.active_count()
+        gate = threading.Event()
+
+        def forward_while_in_flight(h):
+            wait_until(lambda: (2, 1.0) in h.synth.called(), 3)
+            h.session.forward()
+        h = Harness(["가.", "나.", "다.", "라."], seconds=lambda i, r: 2.0, gates={2: gate},
+                    hooks=[(at_block(0, 3), forward_while_in_flight)])
+        h.session.start()
+        self.assertTrue(wait_until(lambda: h.session._cur >= 1))
+        h.session.stop()
+        gate.set()
+        self.assertTrue(h.session.join(2.0))
+        self.assertTrue(wait_until(lambda: threading.active_count() == baseline, 2.0))
+        self.assertTrue(h.session._stop_event.is_set())
+        self.assertEqual(h.kinds().count("session_end"), 1)
+        self.assertNotIn("다.", [e[0] for e in h.session._cache])
+
+    def test_cache_rules_follow_extension(self):
+        # 확장 tts-engines.js:403-407: 최근 것이 앞 · 2개까지 · 글 하나당 1개 · 먼저 보낸 요청은 새 것을 못 덮음 · 실패 제외.
+        # 2026-09-28 부터 합성은 늘 속도 1.0(SYNTH_RATE) 이라 캐시에 속도 구분이 없다(속도 우선 규칙도 쓰이지 않음).
+        s = TtsSession("", [{"text": "가."}, {"text": "나."}, {"text": "다."}], lambda t, r: None, lambda: None)
+        a = np.ones(10, np.int16)
+        b = np.ones(5, np.int16)
+        R = tts_engine.SYNTH_RATE
+
+        def keys():
+            return [(t, sq) for t, _r, _a, sq in s._cache]
+        with s._cond:
+            s._cache_put_locked("가.", R, a, 1)
+            s._cache_put_locked("가.", R, a, 2)
+            self.assertEqual(keys(), [("가.", 2)])                    # 같은 글은 1개(나중 요청)
+            s._cache_put_locked("나.", R, a, 3)
+            s._cache_put_locked("다.", R, a, 4)
+            self.assertEqual(keys(), [("다.", 4), ("나.", 3)])        # 2개까지 — 가장 오래된 "가." 밀려남
+            s._cache_put_locked("나.", R, b, 1)
+            self.assertEqual(keys(), [("다.", 4), ("나.", 3)])        # 먼저 보낸 요청(순번 1)은 새 것(3)을 못 덮음
+            s._cache_put_locked("가.", R, None, 6)
+            s._cache_put_locked("가.", R, np.zeros(0, np.int16), 7)
+            self.assertEqual(keys(), [("다.", 4), ("나.", 3)])        # 실패·빈 소리는 넣지 않음
+            self.assertTrue(s._take_cached_locked(2))                 # "다." → 꺼내 씀
+            self.assertIs(s._ready[2][0], a)
+            self.assertEqual(keys(), [("나.", 3)])                    # 꺼낸 것은 캐시에서 빠진다
+            self.assertFalse(s._take_cached_locked(0))                # "가." 는 없다
+        off = TtsSession("", [{"text": "가."}], lambda t, r: None, lambda: None, cache_size=0)
+        with off._cond:
+            off._cache_put_locked("가.", R, a, 1)
+            self.assertEqual(off._cache, [])
+
+    # (뺀 테스트) test_rate_back_then_move_keeps_current_rate_sound — 속도를 캐시 키로 비교하던 시절의 결함
+    # ("1.0 → 1.5 → 1.0 뒤 이전" 에서 1.0 소리가 1.5 소리에 밀려 버려짐) 재발 방지였다. 2026-09-28 부터 합성은 늘 1.0 이라
+    # 캐시에 속도 구분이 없어 그 결함이 생길 수 없다. 속도를 오가도 다시 요청하지 않는 것은 test_rate_change_needs_no_new_request.
+
+    def test_new_reading_starts_with_empty_cache(self):
+        # 정지 직후 같은 글·다른 글을 새로 읽어도 앞 읽기의 소리를 쓰지 않는다(캐시는 세션 안에만 — 음성이 바뀌었을
+        # 수 있다. 확장도 읽기마다 새 options 라 앞 읽기 소리를 안 쓴다: document.js:276-285).
+        texts = ["가.", "나.", "다."]
+        first = Harness(texts, seconds=lambda i, r: 2.0,
+                        hooks=[(at_block(0, 3), lambda h: h.session.forward())])
+        first.run()
+        self.assertTrue(first.session._cache)                       # 앞 읽기 캐시에 소리가 남아 있는 상태에서
+        again = Harness(texts, seconds=lambda i, r: 2.0, previous=first.session)
+        self.assertEqual(again.session._cache, [])
+        again.run()
+        self.assertEqual(again.synth.called(), [(0, 1.0), (1, 1.0), (2, 1.0)])   # 같은 글이어도 새로 요청
+
+    def test_new_session_does_not_keep_previous_session_alive(self):
+        # 새 세션이 앞 세션(previous=)을 계속 붙잡으면, 읽는 중에 새 글 읽기를 반복할 때 세션 사슬이 생겨
+        # 멈춘 세션마다 남은 소리(_ready·_audio·캐시)가 메모리에 쌓였다(2026-09-28 반증 — tts_engine._play 주석)
+        import gc
+        import weakref
+        old = Harness(["가.", "나."], seconds=lambda i, r: 2.0,
+                      hooks=[(at_block(0, 3), lambda h: h.session.stop())])
+        old.run()
+        ref = weakref.ref(old.session)
+        new = Harness(["다."], seconds=lambda i, r: 0.5, previous=old.session)
+        new.run()
+        del old
+        gc.collect()
+        self.assertIsNone(ref(), "끝난 새 세션이 앞 세션을 아직 붙잡고 있다")
+        self.assertIsNone(new.session._previous)
+
+
 # ════════════════════════════════════════════════════════════════════
 # whisperer.py 연결부 — import 하지 않는다(트레이·전역 키보드 훅이 뜬다).
 # 소스에서 필요한 함수만 AST 로 뽑아 가짜 부품(가짜 합성·가짜 스트림·가짜 바/리더)과 함께 돌린다.
@@ -901,7 +1099,10 @@ class TestRobustness(EngineTestBase):
 
 _GLUE_FUNCS = ["stop_current_playback", "_make_tts_event_handler", "speak_text", "stop_tts", "_safe_ui",
                "_ensure_reading_ui", "_on_bar_command", "_on_reader_geometry_changed", "_show_reader_window",
-               "_hide_reading_ui", "_handle_tts_event", "toggle_reader_window"]
+               "_hide_reading_ui", "_handle_tts_event", "toggle_reader_window",
+               # 원문 위 형광펜 연결(2026-09-28) — speak_text·_handle_tts_event·_show_reader_window 가 부른다
+               "_ensure_source_highlighter", "_source_highlight_active", "_source_highlight_blocks_reader",
+               "_begin_source_highlight", "_on_source_highlight_result", "_end_source_highlight"]
 _GLUE_VARS = ["_tts_state_lock"]
 
 
@@ -992,6 +1193,9 @@ def _load_glue(ui_log):
         "_current_work_area": lambda: (0, 0, 1920, 1040),
         "tts_playing": False, "tts_paused": False, "tts_stop_event": threading.Event(), "tts_session": None,
         "sd": types.SimpleNamespace(stop=lambda: None), "_streams": streams,
+        # 원문 위 형광펜: 기본은 "모듈 없음"(None) — 예전 리더 창 흐름 그대로. 형광펜을 시험할 땐 테스트가 바꿔 넣는다
+        "SourceHighlighter": None, "source_highlighter": None, "source_highlight_enabled": True,
+        "_source_hl_session": None, "_source_hl_state": None, "_reading_ui_session": None,
     })
     exec(code, ns)
     return ns
