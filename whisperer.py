@@ -41,7 +41,8 @@ Copyright (c) 2024 Yeogiaen
   - 재생 정지는 출력 스트림 abort 로(sd.stop() 은 OutputStream 을 못 멈춘다).
     재생 쪽 finally 에서 멈춤 신호를 clear() 하지 말 것(좀비 스레드 재발)
   - Ctrl+C 전에 클립보드를 비우는 동작을 유지할 것(안 비우면 "선택 없음" 을 판별할 수 없다)
-  - 인증은 서비스 계정 JSON(google_credentials.json). .env 방식은 재시도 금지(06-07 세션에서 폐기)
+  - 인증은 API 키 두 개 — TTS 키·Gemini 키(2026-09-29 사용자 결정, 서비스 계정 JSON 에서 바꿈). 인증 창에 넣고
+    설정 파일에 저장한다. .env 는 읽지 않는다. 키 하나로 둘 다는 안 된다(init_tts_client 설명)
   - 이 파일은 UI Automation 을 직접 부르지 않는다. 원문 위 형광펜의 UIA 호출은 source_highlight.py 의 전용 스레드에서만
     한다(2026-09-28 VS Code 를 얼린 전례 — 창·문서 전체를 훑는 호출 금지는 그쪽 몫)
   - "브라우저인가" 판별(전경 창 → 프로세스 → 실행 파일 이름)은 Tk 메인에서만(_foreground_disabled_browser). 훅 콜백에서 하지 않는다
@@ -125,6 +126,8 @@ from messages import messages, get_message
 # (numpy·sounddevice·google 은 엔진 안에서 필요할 때 불러온다)
 import readaloud_text
 import tts_engine
+# 주 언어가 아닌 문장 번역(2026-09-29) — requests 는 번역기를 만들 때(init_tts_client) 불러온다
+import translation
 
 # 하단 컨트롤 바·리더 창(형광펜) — 다른 파일(bottom_bar.py, reader_window.py)에 있다.
 # ⚠️ 이 둘은 없어도(파일 없음·문법 오류·import 오류) 앱이 죽으면 안 된다 → 실패하면 None 으로 두고
@@ -219,13 +222,19 @@ Controller = None
 Key = None
 KeyCode = None
 
-# Google Cloud 인증 관련 변수 (TTS 클라이언트가 사용)
-google_credentials_path = None  # 인증용 서비스 계정 JSON 키 경로
-google_project_id = None         # 구글 프로젝트 ID (로그 표시용)
+# Google 인증 — API 키 두 개 (2026-09-29 사용자 결정. 그 전엔 서비스 계정 JSON 경로 google_credentials_path)
+google_tts_api_key = None   # Cloud Text-to-Speech API 를 허용한 키. 없으면 시작할 때 필수 인증 창
+gemini_api_key = None       # Gemini API 를 허용한 키(번역용). 없어도 되고, 없으면 번역할 때 멈추고 알린다
 
 # Google Cloud TTS 관련 변수
 google_tts = None          # google.cloud.texttospeech 모듈 (요청 객체를 만들 때 씀). init_tts_client 가 채운다
 google_tts_client = None   # TextToSpeechClient. None 이면 "인증 안 됨" — speak_text 가 읽지 않고 돌아간다
+# 주 언어가 아닌 문장 번역 (2026-09-29, translation.py). 규칙은 translation.py 머리 설명.
+translate_enabled = True   # 설정 창 "일반" 체크. 기본 켬(사용자 결정)
+# 번역된 조각은 원문 위 형광펜 막에 번역문을 쓴다(짙은 회색 바탕 + 흰 글씨, source_highlight caption). 끄면 노랑 형광펜만.
+translation_overlay_enabled = True   # 설정 창 "일반" 체크. 기본 켬(2026-09-29 사용자 결정 "옵션으로 빼고 기본은 레이어로")
+_translation_lookup = None  # (세션, 조각 글 → 번역문 함수). speak_text 가 넣고 session_end 가 비운다. Tk 메인에서만
+gemini_translator = None   # translation.GeminiTranslator(키가 없거나 못 만들었으면 MissingTranslator). init_tts_client 가 채운다
 tts_hotkey_modifiers = {"ctrl": True, "shift": False, "alt": True} # 기본 TTS 단축키: Ctrl+Alt+D
 tts_hotkey_key = "D"
 tts_voice_name = "ko-KR-Chirp3-HD-Callirrhoe"  # 기본 음성 모델
@@ -357,11 +366,18 @@ def setup_logging():
     if sys.stdout is not None:
         log_handlers.append(logging.StreamHandler(sys.stdout))
 
+    # force=True: 이 함수보다 먼저 logging.info/warning 이 불리면(단일 실행 확인·창 아이콘 — main 앞부분) 파이썬이 기본 설정을
+    # 알아서 깔고, 그 뒤 basicConfig 는 조용히 무시된다. 그래서 2026-07 부터 logs/whisperer_*.log 가 전부 0바이트였고
+    # 형광펜 모듈이 남긴 기록(멈춤·숨김 이유)이 어디에도 없었다(2026-09-29 발견) → 먼저 깔린 설정을 덮어쓴다.
     logging.basicConfig(
         level=logging.DEBUG,
         format=log_format,
-        handlers=log_handlers
+        handlers=log_handlers,
+        force=True
     )
+    # 외부 라이브러리의 세세한 기록(DEBUG)이 로그를 덮지 않게 — 경고 이상만 남긴다
+    for noisy in ("comtypes", "urllib3", "PIL", "google", "grpc", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # 콘솔 로그 초기화
     try:
@@ -420,29 +436,29 @@ def _format_hotkey(modifiers, key):
         parts.append(str(key))
     return "+".join(parts) if parts else "(없음)"
 
-def init_tts_client(credentials_path):
-    """서비스 계정 JSON으로 Google Cloud TTS 클라이언트를 초기화한다.
+def init_tts_client(tts_key, gemini_key=None):
+    """API 키로 Google Cloud TTS 클라이언트를 만들고, Gemini 키로 번역기를 만든다.
 
-    STT와 완전히 독립이다 (과거에는 STT 초기화 분기 안에서만 TTS를 만들었다).
     반환:
-      True  — google_tts / google_tts_client 준비 완료
+      True  — google_tts / google_tts_client 준비 완료 (번역기는 키가 없어도 MissingTranslator 로 채워진다)
       False — google-cloud-texttospeech 모듈을 불러올 수 없어 건너뜀 (로그만 남김)
-    인증 파일이 잘못돼 JSON 읽기나 클라이언트 생성이 실패하면 예외를 그대로 올린다
-    (호출부가 인증 창을 띄우거나 오류를 표시한다).
+    TTS 키가 비었거나 클라이언트 생성이 실패하면 예외를 그대로 올린다(호출부가 인증 창을 띄우거나 오류를 표시한다).
+    ⚠️ 클라이언트 생성은 키가 맞는지 확인하지 않는다(네트워크 요청 없음). 확인은 인증 창 "설정" 이 한다
+       (_check_tts_key·translation.check_gemini_key). 시작할 때는 확인하지 않는다 — 인터넷이 끊긴 채 켜도 창이 뜨지 않게.
 
     부르는 곳 두 군데:
-      - main() 시작 때: 설정에 저장된 경로(또는 앱 폴더의 google_credentials.json)로 시도. 예외면 필수 인증 창.
-      - show_api_key_dialog 의 "설정" 버튼: 사용자가 고른 파일을 앱 폴더로 복사한 뒤 시도.
-    왜 서비스 계정 JSON 인가: 2026-06-07 에 .env(API 키) 방식을 시도했다가 STT v2 의 IAM 제약 때문에 폐기했다.
-      STT 는 걷어냈지만 인증 방식은 사용자 결정으로 JSON 을 유지한다(재시도 금지 — 06-07 로그 §10).
+      - main() 시작 때: 설정 파일의 키로 시도. TTS 키가 없거나 예외면 필수 인증 창.
+      - show_api_key_dialog 의 "설정" 버튼: 확인을 통과한 키로 시도.
+    왜 키 두 개인가 (2026-09-29 사용자 결정 — 그 전엔 서비스 계정 JSON 파일):
+      - 구글이 Gemini API 키는 서비스 계정에 묶게 하고, 묶인 키는 Vertex·Gemini 만 부른다. 실측: Gemini 키로 TTS 는
+        401("API keys are not supported by this API"), TTS 키로 Gemini 는 403(API_KEY_SERVICE_BLOCKED) → 키 하나로는 안 된다.
+      - 2026-06-07 에 키 방식을 버린 이유는 STT v2 의 IAM 제약이었다. STT 를 걷어내 그 제약은 없어졌다.
     전역 google_tts / google_tts_client 는 성공했을 때만 바꾼다 → 실패해도 앞에서 만든 클라이언트는 그대로 남는다.
     """
-    global google_tts, google_tts_client, google_project_id
+    global google_tts, google_tts_client
 
-    # JSON에서 project_id 추출 (잘못된 JSON이면 여기서 예외)
-    with open(credentials_path, 'r', encoding='utf-8') as f:
-        creds_data = json.load(f)
-    google_project_id = creds_data.get('project_id')
+    if not tts_key:
+        raise ValueError("TTS 키가 없습니다")
 
     # ⚠️ ImportError만 잡으면 안 된다. protobuf 버전 충돌(TypeError) 같은 import 시점 오류가
     #    "인증 파일 오류"로 올라가면, 필수 인증 창이 저장해도 계속 실패 + 취소 불가 → 영영 못 닫힌다.
@@ -454,12 +470,47 @@ def init_tts_client(credentials_path):
         log_to_console(f"[TTS] TTS 모듈(google-cloud-texttospeech)을 불러올 수 없습니다: {e}")
         return False
 
-    client = texttospeech.TextToSpeechClient.from_service_account_file(credentials_path)
+    client = texttospeech.TextToSpeechClient(client_options={"api_key": tts_key})
     google_tts = texttospeech
     google_tts_client = client
-    log_to_console(f"[TTS] Google Cloud TTS 클라이언트 초기화 성공! (프로젝트: {google_project_id})")
-    logging.info(f"Google Cloud TTS 클라이언트 초기화 완료 (프로젝트: {google_project_id})")
+    log_to_console("[TTS] Google Cloud TTS 클라이언트 초기화 성공 (API 키)")
+    logging.info("Google Cloud TTS 클라이언트 초기화 완료 (API 키)")
+    _init_translator(gemini_key)
     return True
+
+def _check_tts_key(tts_key):
+    """인증 창 "설정" 때 TTS 키가 맞는지 확인한다 — 한국어 음성 목록 요청 한 번. 틀리면 예외.
+
+    실측(2026-09-29): TTS 키 성공(0.28초), Gemini 키 401 — 두 칸을 바꿔 넣어도 잡힌다.
+    제한 시간은 번역과 같은 값(translation.TIMEOUT, 3초 — 사용자가 번역에 정한 값을 같이 쓴다).
+    TTS 모듈을 못 불러오면 확인을 건너뛴다(예외로 올리면 필수 인증 창을 영영 못 닫는다 — init_tts_client 와 같은 규칙).
+    """
+    try:
+        from google.cloud import texttospeech
+    except Exception as e:
+        log_to_console(f"[TTS] TTS 모듈을 불러올 수 없어 키 확인을 건너뜁니다: {e}")
+        return
+    client = texttospeech.TextToSpeechClient(client_options={"api_key": tts_key})
+    client.list_voices(language_code="ko-KR", timeout=translation.TIMEOUT)
+
+def _init_translator(gemini_key):
+    """Gemini 키로 번역기를 만든다(2026-09-29 사용자 결정 — TTS 키와 따로인 키).
+
+    키가 없거나 만들지 못해도 예외를 올리지 않는다 — 읽기는 그대로 돼야 한다.
+    그때는 MissingTranslator 를 넣어 두어, 번역할 문장이 나오면 그 조각에서 멈추고 이유를 알린다(사용자 결정).
+    """
+    global gemini_translator
+    if not gemini_key:
+        gemini_translator = translation.MissingTranslator("Gemini 키가 설정되지 않았습니다 (설정 창 → 인증 설정)")
+        log_to_console("[번역] Gemini 키가 없습니다 — 번역할 문장이 나오면 읽기를 멈추고 알립니다")
+        return
+    try:
+        gemini_translator = translation.GeminiTranslator(gemini_key)
+        log_to_console(f"[번역] Gemini 번역기 준비 ({translation.MODEL})")
+    except Exception as e:
+        gemini_translator = translation.MissingTranslator(str(e))
+        logging.error(f"번역기 생성 실패: {e}")
+        log_to_console(f"[번역] 번역기를 만들지 못했습니다: {e}")
 
 def main():
     """앱 초기화 순서를 한곳에 모은 함수. 순서가 곧 의존 관계라 함부로 바꾸지 말 것.
@@ -540,19 +591,18 @@ def main():
         print("Google Cloud 인증 확인 중...")
         log_to_console("Google Cloud 인증 확인 중...")
 
-        # 설정에서 경로를 이미 로드했으므로, TTS 클라이언트 초기화 시도
-        # (STT와 무관하게 인증 경로만 유효하면 TextToSpeechClient를 만든다)
-        if google_credentials_path and os.path.exists(google_credentials_path):
+        # 설정에서 키를 이미 로드했으므로, TTS 클라이언트·번역기 만들기 시도 (키 확인 요청은 하지 않는다 — init_tts_client)
+        if google_tts_api_key:
             try:
                 log_to_console("[TTS] TTS 클라이언트 초기화 시도 중...")
-                init_tts_client(google_credentials_path)
+                init_tts_client(google_tts_api_key, gemini_api_key)
             except Exception as e:
                 logging.error(f"Google Cloud 인증 오류: {str(e)}")
                 log_to_console(f"Google Cloud 인증 오류: {str(e)}")
                 show_api_key_dialog(required=True)
         else:
-            logging.warning("Google Cloud 인증 파일이 없습니다.")
-            log_to_console("Google Cloud 인증 파일이 없습니다. 설정 창을 표시합니다.")
+            logging.warning("TTS API 키가 없습니다.")
+            log_to_console("TTS API 키가 없습니다. 인증 창을 표시합니다.")
             show_api_key_dialog(required=True)
 
         # 키보드 리스너 설정
@@ -909,17 +959,20 @@ def save_settings():
     (옛 구조 그대로 — 설정 저장은 사람 손으로 드물게 일어난다).
     ⚠️ 파일은 "지금 작업 폴더" 기준 상대 경로다. 사용자 데이터이므로 키 이름을 바꾸면 옛 설정을 못 읽는다
        → 키를 바꿀 땐 load_settings 에 옛 키 읽기를 남길 것.
-    키 목록: language, google_credentials_path, tts_hotkey{modifiers,key}, tts_settings{voice_name,speaking_rate,volume},
+    키 목록: language, google_tts_api_key, gemini_api_key, tts_hotkey{modifiers,key}, tts_settings{voice_name,speaking_rate,volume},
             reader_window_enabled, reader_window_geometry, bottom_bar_monitor, selection_button_enabled,
-            disable_in_browsers, source_highlight_enabled
+            disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled
     """
     try:
         # ※ 설정 파일 전체를 이 dict로 덮어쓴다. 옛 STT 키(stt_enabled, hotkey, auto_detection,
         #   google_settings, whisper_settings)는 로드 시 무시되고, 첫 저장 때 파일에서 빠진다.
         #   옛 플로팅 아이콘 키(controller_position, controller_hidden)도 같다(2026-09-28 플로팅 아이콘 제거).
+        #   옛 인증 파일 경로 키(google_credentials_path)도 같다(2026-09-29 API 키 방식으로 바꿈).
+        # ⚠️ API 키가 평문으로 들어간다 — 이 파일은 .gitignore 에 있다(공개 저장소). 설치 파일에도 넣지 않는다.
         settings = {
             "language": current_language,
-            "google_credentials_path": google_credentials_path,
+            "google_tts_api_key": google_tts_api_key,
+            "gemini_api_key": gemini_api_key,
             "tts_hotkey": {
                 "modifiers": tts_hotkey_modifiers,
                 "key": tts_hotkey_key
@@ -938,9 +991,13 @@ def save_settings():
             # 브라우저(Aside·웨일·크롬)에서 빨간 점·단축키 쉬기 (2026-09-28 추가, 트레이 체크)
             "disable_in_browsers": disable_in_browsers,
             # 원문 위 형광펜 전체 켬/끔 (2026-09-28 추가). 트레이·설정 창에는 없다 — 이 파일을 직접 고쳐서만 끈다
-            "source_highlight_enabled": source_highlight_enabled
+            "source_highlight_enabled": source_highlight_enabled,
+            # 주 언어가 아닌 문장 번역 켬/끔 (2026-09-29 추가, 설정 창 "일반" 체크)
+            "translate_enabled": translate_enabled,
+            # 번역문을 원문 위 막으로 표시 켬/끔 (2026-09-29 추가, 설정 창 "일반" 체크)
+            "translation_overlay_enabled": translation_overlay_enabled
         }
-        print(f"저장할 설정: {settings}")
+        print(f"저장할 설정: {_mask_keys(settings)}")
         with open('whisperer_settings.json', 'w', encoding='utf-8') as f:
             json.dump(settings, f, ensure_ascii=False, indent=2)
             # 파일 강제 쓰기
@@ -958,21 +1015,22 @@ def load_settings():
     부르는 곳: main() 시작 때, setup_keyboard_listener() 안(단축키를 다시 읽으려고).
     - 파일이 깨졌으면(JSON 오류) 로그만 남기고 기본값으로 계속 간다 — 설정 때문에 앱이 안 뜨면 안 된다.
     - 새 키(reader_window_*, bottom_bar_monitor, tts_settings.volume, selection_button_enabled,
-      disable_in_browsers, source_highlight_enabled)는 값 모양이 이상하면 무시한다(true/false 가 아니면 기본값 유지).
+      disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled)는 값 모양이 이상하면 무시한다
+      (true/false 가 아니면 기본값 유지).
     - 옛 플로팅 아이콘 키(controller_position, controller_hidden)는 남아 있어도 읽지 않는다(플로팅 아이콘 제거).
-    - 인증 파일 경로가 없거나 가리키는 파일이 사라졌으면 앱 폴더의 google_credentials.json 을 대신 찾는다
-      (인증 창이 "설정" 할 때 거기로 복사해 두므로, 앱 폴더를 통째로 옮겨도 인증이 살아 있다).
+    - 옛 인증 파일 경로(google_credentials_path)도 읽지 않는다(2026-09-29 API 키 방식). 키가 없으면 main 이 필수 인증 창을 띄운다.
+      앱 폴더의 google_credentials.json 을 찾아 쓰던 폴백도 없앴다. .env 도 읽지 않는다(사용자 결정: 인증 창에 입력).
     ⚠️ 여기서 읽은 tts_speaking_rate 는 범위를 자르지 않는다 — 합성할 때 tts_engine.clamp_rate 가 자른다.
     """
-    global current_language, google_credentials_path
+    global current_language, google_tts_api_key, gemini_api_key
     global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, tts_volume
     global reader_window_enabled, reader_window_geometry, bottom_bar_monitor, selection_button_enabled
-    global disable_in_browsers, source_highlight_enabled
+    global disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled
     try:
         if os.path.exists('whisperer_settings.json'):
             with open('whisperer_settings.json', 'r', encoding='utf-8') as f:
                 settings = json.load(f)
-                print(f"로드된 설정: {settings}")
+                print(f"로드된 설정: {_mask_keys(settings)}")
                 if "language" in settings:
                     current_language = settings["language"]
                 # 옛 STT 키(stt_enabled, hotkey, auto_detection, google_settings, whisper_settings)는
@@ -1010,17 +1068,17 @@ def load_settings():
                     disable_in_browsers = settings["disable_in_browsers"]
                 if isinstance(settings.get("source_highlight_enabled"), bool):
                     source_highlight_enabled = settings["source_highlight_enabled"]
+                # 번역 켬/끔 — true/false 가 아니면 무시(기본 켬 유지)
+                if isinstance(settings.get("translate_enabled"), bool):
+                    translate_enabled = settings["translate_enabled"]
+                if isinstance(settings.get("translation_overlay_enabled"), bool):
+                    translation_overlay_enabled = settings["translation_overlay_enabled"]
 
-                # Google Cloud 인증 파일 경로 로드
-                if "google_credentials_path" in settings:
-                    google_credentials_path = settings["google_credentials_path"]
-
-                # 경로가 유효하지 않으면 앱 디렉토리 내의 기본 파일 확인 (백업/이동 대응)
-                if not google_credentials_path or not os.path.exists(google_credentials_path):
-                    default_path = os.path.join(get_app_dir(), "google_credentials.json")
-                    if os.path.exists(default_path):
-                        google_credentials_path = default_path
-                        logging.info(f"기본 위치에서 인증 파일 발견: {google_credentials_path}")
+                # API 키 두 개 (2026-09-29). 글자가 아니거나 비었으면 없는 것으로 둔다
+                tts_key = settings.get("google_tts_api_key")
+                google_tts_api_key = tts_key.strip() if isinstance(tts_key, str) and tts_key.strip() else None
+                gem_key = settings.get("gemini_api_key")
+                gemini_api_key = gem_key.strip() if isinstance(gem_key, str) and gem_key.strip() else None
 
             logging.info(f"설정 로드 완료: 언어={current_language}, 읽어주기 단축키 수정자={tts_hotkey_modifiers}, 단축키={tts_hotkey_key}")
             print(f"설정 로드 완료: 언어={current_language}, 읽어주기 단축키 수정자={tts_hotkey_modifiers}, 단축키={tts_hotkey_key}")
@@ -1028,6 +1086,19 @@ def load_settings():
     except Exception as e:
         logging.error(f"설정 로드 오류: {str(e)}")
         print(f"설정 로드 오류: {str(e)}")
+
+_SECRET_SETTING_KEYS = ("google_tts_api_key", "gemini_api_key")
+
+def _mask_keys(settings):
+    """설정 dict 를 콘솔·로그에 찍기 전에 API 키를 가린다(앞 4글자 + 길이만). 원본은 건드리지 않는다."""
+    if not isinstance(settings, dict):
+        return settings
+    shown = dict(settings)
+    for k in _SECRET_SETTING_KEYS:
+        v = shown.get(k)
+        if isinstance(v, str) and v:
+            shown[k] = f"{v[:4]}…({len(v)}자)"
+    return shown
 
 # 단일 설정 함수들 (이전 코드와의 호환성)
 # (지금은 부르는 곳이 없다. 옛 코드가 부르던 이름이라 남겨 둔 껍데기 — 전체 저장/로드와 같다)
@@ -2032,30 +2103,27 @@ def _notify_source_scroll():
 
 # API 키 설정 대화 상자 표시 함수
 def show_api_key_dialog(required=False):
-    """Google Cloud 인증 파일 선택 대화 상자를 표시합니다.
+    """Google API 키 두 개(TTS 키·Gemini 키)를 넣는 인증 창 (2026-09-29 — 그 전엔 서비스 계정 JSON 파일 고르기).
 
-    저장하면 TTS 클라이언트를 초기화하고, 필수 모드(required=True)의 취소·닫기는
-    TTS 클라이언트(google_tts_client)가 준비됐을 때만 허용한다.
-
-    ⚠️ Tk 메인 스레드에서만 부른다(main 의 인증 확인 / 트레이 → gui_queue "show_api_key_dialog").
-    흐름: "..." 로 JSON 고르기 → "설정" → 앱 폴더에 google_credentials.json 으로 복사 → init_tts_client →
-          설정 저장 → 1.5초 뒤 창 닫힘. 실패하면 창에 빨간 글씨로 이유를 보이고 창은 열어 둔다.
-    필수 모드(시작할 때 인증이 없거나 깨졌을 때): 클라이언트가 준비될 때까지 취소·X·Esc 로 닫을 수 없다.
-      그래서 init_tts_client 는 "모듈 import 오류" 를 예외로 올리지 않고 False 를 돌려준다
-      (예외로 올리면 저장이 계속 실패하고 취소도 안 돼 창을 영영 못 닫는다 — 그 함수의 ⚠️ 설명).
+    ⚠️ Tk 메인 스레드에서만 부른다(main 의 인증 확인 / 설정 창 "인증 설정" 버튼 / 트레이 → gui_queue "show_api_key_dialog").
+    흐름: 두 칸에 키 붙여넣기 → "저장" → 키 확인 요청(TTS: 음성 목록, Gemini: 모델 정보 — Gemini 칸이 비면 건너뜀)
+          → 통과하면 init_tts_client → 설정 저장 → 1.5초 뒤 창 닫힘.
+          실패하면 창에 빨간 글씨로 이유를 보이고 저장하지 않는다(창은 열어 둔다 — 파일 방식 때와 같은 규칙).
+          두 칸을 바꿔 넣어도 확인에서 걸린다(실측: TTS 키로 Gemini 403, Gemini 키로 TTS 401).
+    확인 요청은 Tk 메인에서 바로 한다(실측 0.3~0.5초씩, 제한 3초) — 그동안 창이 잠깐 멈춘다. 드물게 하는 일이라 그대로 둔다.
+    필수 모드(시작할 때 TTS 키가 없거나 클라이언트를 못 만들었을 때): 클라이언트가 준비될 때까지 취소·X·Esc 로 닫을 수 없다.
+      그래서 init_tts_client·_check_tts_key 는 "모듈 import 오류" 를 예외로 올리지 않는다
+      (예외로 올리면 저장이 계속 실패하고 취소도 안 돼 창을 영영 못 닫는다 — init_tts_client 의 ⚠️ 설명).
+    키 칸은 가려서(●) 보이고, "키 보이기" 체크로 드러낸다.
     wait_window() 로 창이 닫힐 때까지 이 함수가 돌아오지 않는다(그동안에도 Tk 이벤트는 돈다).
-    반환: 새로 설정한 경로, 없으면 기존 경로.
+    반환: 저장했으면 True, 아니면 False.
     """
-    global google_credentials_path
-
-    from tkinter import filedialog
-    import shutil
+    global google_tts_api_key, gemini_api_key
 
     # 완전히 독립적인 모달 대화 상자 생성
     # (부모를 안 주면 기본 루트가 부모가 된다. 창 아이콘은 main 이 건 "기본 아이콘"(favicon.ico)을 따른다)
     dialog = ttk.Toplevel()
-    dialog.title("Google Cloud 인증 설정")
-    dialog.geometry("550x350")
+    dialog.title(get_msg("auth_title"))
     dialog.resizable(False, False)
     _dark_title_bar(dialog)   # 창 안은 darkly 테마, 윈도우 제목 표시줄도 어둡게
 
@@ -2065,145 +2133,126 @@ def show_api_key_dialog(required=False):
     dialog.focus_set()
     dialog.attributes("-topmost", True)
 
-    # 메인 프레임
     frame = ttk.Frame(dialog, padding=20)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    # 설명 라벨
-    if current_language == "ko":
-        label_text = "Google Cloud Service Account JSON 파일을 선택해 주세요\n\n파일은 Google Cloud Console에서 다운로드할 수 있습니다:\nhttps://console.cloud.google.com/iam-admin/serviceaccounts"
-    else:
-        label_text = "Select your Google Cloud Service Account JSON file\n\nYou can download the file from Google Cloud Console:\nhttps://console.cloud.google.com/iam-admin/serviceaccounts"
+    ttk.Label(frame, text=get_msg("auth_help"), justify=tk.LEFT, wraplength=560).pack(anchor="w", pady=(0, 15))
 
-    ttk.Label(frame, text=label_text, justify=tk.LEFT).pack(anchor="w", pady=(0, 15))
+    # 키 두 칸 — 지금 저장된 키를 채워 둔다(가려서 보인다)
+    fields = ttk.Frame(frame)
+    fields.pack(fill=tk.X, pady=4)
+    tts_var = tk.StringVar(value=google_tts_api_key or "")
+    gem_var = tk.StringVar(value=gemini_api_key or "")
+    ttk.Label(fields, text=get_msg("auth_tts_key")).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=4)
+    tts_entry = ttk.Entry(fields, textvariable=tts_var, width=52, show="●")
+    tts_entry.grid(row=0, column=1, sticky="ew", pady=4)
+    ttk.Label(fields, text=get_msg("auth_gemini_key")).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
+    gem_entry = ttk.Entry(fields, textvariable=gem_var, width=52, show="●")
+    gem_entry.grid(row=1, column=1, sticky="ew", pady=4)
+    fields.columnconfigure(1, weight=1)
 
-    # 파일 경로 표시 프레임
-    path_frame = ttk.Frame(frame)
-    path_frame.pack(fill=tk.X, pady=8)
+    show_var = tk.BooleanVar(value=False)
 
-    # 현재 설정된 경로 표시
-    current_path = google_credentials_path if google_credentials_path else ""
-    path_var = tk.StringVar(value=current_path)
+    def toggle_show():
+        """"키 보이기" 체크: 두 칸의 가림(●)을 켜고 끈다."""
+        mask = "" if show_var.get() else "●"
+        tts_entry.config(show=mask)
+        gem_entry.config(show=mask)
 
-    path_entry = ttk.Entry(path_frame, textvariable=path_var, width=50, state="readonly")
-    path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-    # 파일 선택 함수
-    def browse_file():
-        """"..." 버튼: 파일 선택 창으로 JSON 을 고르면 경로 칸에 넣는다(아직 저장·검사 안 함 — "설정" 때 한다)."""
-        filename = filedialog.askopenfilename(
-            title="Google Service Account JSON 파일 선택",
-            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
-            parent=dialog
-        )
-        if filename:
-            path_var.set(filename)
-            # 초기화 (기본 스타일로)
-            result_label.config(text="", bootstyle="default")
-
-    # 찾아보기 버튼
-    browse_btn = ttk.Button(path_frame, text="...", command=browse_file, width=3, bootstyle="info-outline")
-    browse_btn.pack(side=tk.RIGHT, padx=(5, 0))
+    ttk.Checkbutton(frame, text=get_msg("auth_show_keys"), variable=show_var,
+                    command=toggle_show).pack(anchor="w", pady=(4, 0))
 
     # 결과 메시지 라벨 (bootstyle 활용)
-    result_label = ttk.Label(frame, text="")
-    result_label.pack(pady=10)
+    result_label = ttk.Label(frame, text="", wraplength=560, justify=tk.LEFT)
+    result_label.pack(fill=tk.X, pady=10)
 
     # 버튼 프레임
     btn_frame = ttk.Frame(frame)
     btn_frame.pack(pady=10)
 
     # 결과 변수
-    result = [None]
+    result = [False]
 
-    # 저장 함수
+    def _first_line(e):
+        """오류 문구를 창에 보일 만큼만(gRPC 오류는 여러 줄이라 첫 줄, 200자까지)."""
+        text = str(e).strip().splitlines()
+        return (text[0] if text else type(e).__name__)[:200]
+
     def save_credentials():
-        """"설정" 버튼(또는 Enter): 고른 파일을 앱 폴더로 복사하고 TTS 클라이언트를 만든다.
+        """"저장" 버튼(또는 Enter): 키를 확인하고 통과하면 클라이언트·번역기를 만들고 설정 파일에 저장한다."""
+        global google_tts_api_key, gemini_api_key
 
-        ⚠️ 복사가 먼저라, 잘못된 파일을 고르면 앱 폴더의 google_credentials.json 이 그 파일로 덮인다
-           (init_tts_client 가 실패해도 되돌리지 않는다 — 옛 동작 그대로). 전역 경로도 복사본으로 바뀐 채 남는다.
-        """
-        global google_credentials_path
+        tts_key = tts_var.get().strip()
+        gem_key = gem_var.get().strip()
 
-        selected_path = path_var.get().strip()
-
-        if required and not selected_path:
-            result_label.config(text="인증 파일을 선택해 주세요.", bootstyle="danger")
+        if not tts_key:
+            result_label.config(text=get_msg("auth_need_tts_key"), bootstyle="danger")
             return
 
-        if not os.path.exists(selected_path):
-            result_label.config(text="파일이 존재하지 않습니다.", bootstyle="danger")
+        result_label.config(text=get_msg("auth_checking"), bootstyle="default")
+        dialog.update_idletasks()
+        try:
+            _check_tts_key(tts_key)
+        except Exception as e:
+            result_label.config(text=get_msg("auth_tts_key_failed", _first_line(e)), bootstyle="danger")
+            logging.error(f"TTS 키 확인 실패: {_first_line(e)}")
             return
+        if gem_key:
+            try:
+                translation.check_gemini_key(gem_key)
+            except Exception as e:
+                result_label.config(text=get_msg("auth_gemini_key_failed", _first_line(e)), bootstyle="danger")
+                logging.error(f"Gemini 키 확인 실패: {_first_line(e)}")
+                return
 
         try:
-            # 앱 폴더에 복사할 파일명
-            dest_filename = "google_credentials.json"
-            dest_path = os.path.join(get_app_dir(), dest_filename)
-
-            # 파일 복사 (이미 같은 위치가 아니면)
-            if os.path.abspath(selected_path) != os.path.abspath(dest_path):
-                shutil.copy2(selected_path, dest_path)
-                log_to_console(f"인증 파일이 복사되었습니다: {dest_path}")
-
-            # 전역 변수에 설정
-            google_credentials_path = dest_path
-
-            # Google Cloud TTS 클라이언트 초기화 (project_id 추출 포함)
-            # - 인증 파일이 잘못됐으면 예외 → 아래 except에서 오류 표시, 창은 열어 둔다
-            # - texttospeech 모듈이 없으면 False(로그만) — 옛 STT 때 모듈이 없으면 건너뛰던 것처럼 저장은 진행
-            init_tts_client(dest_path)
-
-            # 설정 저장
-            save_settings()
-
-            # 성공 메시지
-            result_label.config(text="✓ Google Cloud 인증 설정이 완료되었습니다.", bootstyle="success")
-            logging.info(f"Google Cloud 인증 파일 설정됨: {dest_path}")
-            log_to_console(f"Google Cloud 인증 파일 설정됨: {dest_path}")
-
-            result[0] = dest_path
-
-            # 성공 후 창 닫기
-            dialog.after(1500, dialog.destroy)
-
+            # texttospeech 모듈이 없으면 False(로그만) — 옛 파일 방식처럼 저장은 진행한다
+            init_tts_client(tts_key, gem_key or None)
         except Exception as e:
-            result_label.config(text=f"오류: {str(e)}", bootstyle="danger")
-            logging.error(f"인증 파일 설정 오류: {str(e)}")
+            result_label.config(text=get_msg("auth_error", _first_line(e)), bootstyle="danger")
+            logging.error(f"인증 설정 오류: {_first_line(e)}")
+            return
 
-    # 취소 함수
+        google_tts_api_key = tts_key
+        gemini_api_key = gem_key or None
+        save_settings()
+
+        result_label.config(text=get_msg("auth_saved"), bootstyle="success")
+        logging.info("Google API 키 설정됨")
+        log_to_console("Google API 키 설정됨 (TTS 키" + (", Gemini 키" if gem_key else ", Gemini 키 없음") + ")")
+        result[0] = True
+        dialog.after(1500, dialog.destroy)
+
     def cancel():
         """"취소"·Esc·X 모두 여기로 온다. 필수 모드에서 클라이언트가 없으면 닫지 않고 안내만 한다."""
-        # 필수 모드에서는 TTS 클라이언트가 준비된 뒤에만 닫을 수 있다
         if required and not google_tts_client:
-            result_label.config(text="인증 파일을 선택해 주세요.", bootstyle="danger")
+            result_label.config(text=get_msg("auth_need_tts_key"), bootstyle="danger")
             return
         dialog.destroy()
 
-    # 저장 버튼
-    save_btn = ttk.Button(btn_frame, text="설정" if current_language == "ko" else "Save", command=save_credentials, width=12, bootstyle="success")
-    save_btn.pack(side=tk.LEFT, padx=10)
-
-    # 취소 버튼
-    cancel_btn = ttk.Button(btn_frame, text="취소" if current_language == "ko" else "Cancel", command=cancel, width=12, bootstyle="secondary")
-    cancel_btn.pack(side=tk.LEFT, padx=10)
+    ttk.Button(btn_frame, text=get_msg("save"), command=save_credentials, width=12,
+               bootstyle="success").pack(side=tk.LEFT, padx=10)
+    ttk.Button(btn_frame, text=get_msg("cancel"), command=cancel, width=12,
+               bootstyle="secondary").pack(side=tk.LEFT, padx=10)
 
     # 이벤트 바인딩
     dialog.bind("<Return>", lambda event: save_credentials())
     dialog.bind("<Escape>", lambda event: cancel())
     dialog.protocol("WM_DELETE_WINDOW", cancel)
 
-    # 창 위치 설정 (화면 중앙)
+    # 창 크기는 내용에 맞추고 화면 가운데에
     dialog.update_idletasks()
-    width = dialog.winfo_width()
-    height = dialog.winfo_height()
+    width = max(600, dialog.winfo_reqwidth())
+    height = dialog.winfo_reqheight()
     x = (dialog.winfo_screenwidth() // 2) - (width // 2)
     y = (dialog.winfo_screenheight() // 2) - (height // 2)
-    dialog.geometry(f"+{x}+{y}")
+    dialog.geometry(f"{width}x{height}+{x}+{y}")
+    (tts_entry if not tts_var.get() else gem_entry).focus_set()
 
     # 모달 대화 상자 실행
     dialog.wait_window()
 
-    return result[0] or google_credentials_path
+    return result[0]
 
 
 def open_console_window():
@@ -2444,6 +2493,16 @@ def show_tts_settings_dialog():
     ttk.Radiobutton(lang_row, text=get_msg("language_name_ko"), value="ko", variable=lang_var).pack(side="left", padx=5)
     ttk.Radiobutton(lang_row, text=get_msg("language_name_en"), value="en", variable=lang_var).pack(side="left", padx=5)
 
+    # 주 언어(= 음성 언어)가 아닌 문장은 번역해서 읽기 (2026-09-29 사용자 결정: 설정 창 체크, 기본 켬).
+    # 트레이는 5항목 고정(2026-09-28 사용자 결정)이라 여기에만 둔다. 다른 값처럼 "저장" 을 눌러야 바뀐다.
+    translate_var = tk.BooleanVar(value=translate_enabled)
+    ttk.Checkbutton(general_frame, text=get_msg("label_translate_foreign"),
+                    variable=translate_var).pack(anchor="w", padx=5, pady=5)
+    # 번역문을 원문 위 막으로 표시 (2026-09-29 사용자 결정: 옵션, 기본 켬). 번역에 딸린 옵션이라 한 칸 들여 둔다
+    overlay_var = tk.BooleanVar(value=translation_overlay_enabled)
+    ttk.Checkbutton(general_frame, text=get_msg("label_translate_overlay"),
+                    variable=overlay_var).pack(anchor="w", padx=(25, 5), pady=(0, 5))
+
     def open_credentials():
         """"인증 설정" 버튼: 옛 트레이 "Google Cloud 인증 설정" 과 같은 창(show_api_key_dialog, 필수 아님)을 연다.
 
@@ -2471,7 +2530,8 @@ def show_tts_settings_dialog():
         글자 칸이 비면 단축키 글자를 None 으로 둔다(→ 단축키가 꺼진다). 음성을 못 찾으면 ko-KR-Wavenet-A(옛 기본값).
         언어가 바뀌었으면 _apply_language 가 전역 언어를 바꾸고 트레이 문구를 새 언어로 다시 만든다. 저장은 아래 한 번.
         """
-        global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate
+        global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, translate_enabled
+        global translation_overlay_enabled
 
         tts_hotkey_modifiers["ctrl"] = ctrl_var.get()
         tts_hotkey_modifiers["shift"] = shift_var.get()
@@ -2492,6 +2552,10 @@ def show_tts_settings_dialog():
                 pass
 
         _apply_language(lang_var.get())
+        # 번역은 읽기를 시작할 때 정해지므로 다음 읽기부터 적용된다(읽는 중인 세션은 그대로)
+        translate_enabled = bool(translate_var.get())
+        # 막 표시는 다음 조각부터 바로 적용된다(조각이 바뀔 때마다 _caption_for 가 이 값을 본다)
+        translation_overlay_enabled = bool(overlay_var.get())
 
         save_settings()
 
@@ -2747,7 +2811,7 @@ def speak_text(text):
        시작 직전에 원문 위 형광펜을 시작한다(_begin_source_highlight — 결과는 나중에 Tk 메인으로 온다).
     4) 엔진 알림 → gui_queue → _handle_tts_event 가 하단 바·형광펜(원문 위 또는 리더 창)을 움직인다.
     """
-    global tts_session, tts_playing, tts_paused, _reading_work_area, _reading_segment_idx
+    global tts_session, tts_playing, tts_paused, _reading_work_area, _reading_segment_idx, _translation_lookup
 
     log_to_console(f"[TTS] speak_text 호출됨 (원본 길이: {len(text) if text else 0})")
 
@@ -2760,8 +2824,13 @@ def speak_text(text):
         return
 
     lang = tts_engine.voice_lang_of(tts_voice_name)
+    words = _get_english_words()
+    # 번역(2026-09-29): 켜져 있고 음성 언어가 지원 대상(지금은 한국어)이면, 조각마다 변환 전 글도 받아서
+    # 한글이 없는 문장이 든 조각만 번역 경로로 보낸다(translation.mark_for_translation). 규칙은 translation.py 머리 설명.
+    use_translation = translate_enabled and translation.supports(lang)
     try:
-        segments = readaloud_text.split_for_reading(text, lang, lang, _get_english_words())
+        segments = readaloud_text.split_for_reading(text, lang, lang, words, keep_raw=use_translation)
+        raw_texts = translation.mark_for_translation(segments) if use_translation else set()
     except Exception as e:
         logging.error(f"조각 나누기 오류: {e}")
         log_to_console(f"[TTS] 조각 나누기 오류: {e}")
@@ -2778,9 +2847,20 @@ def speak_text(text):
 
     box = {}
     try:
+        synthesize = tts_engine.make_google_synthesize(google_tts_client, google_tts, tts_voice_name, log=log_to_console)
+        if raw_texts:
+            # 번역 대상 조각만 번역 → 읽기용 변환 → 합성. 번역 실패는 SegmentFailed → 그 조각 차례에 멈추고 알림
+            translator = gemini_translator or translation.MissingTranslator("번역기가 준비되지 않았습니다(인증 전)")
+            # on_translated: 번역이 끝나면(합성 스레드) Tk 메인에 알려 지금 칠하는 조각을 번역문 막으로 다시 칠하게 한다.
+            # box["session"] 은 아래에서 세션을 만든 뒤 채워진다 — 번역은 start() 뒤에야 일어나므로 늘 채워져 있다.
+            synthesize = translation.make_translating_synthesize(
+                synthesize, translator, lambda t: readaloud_text.spoken_text(t, lang, words).text,
+                raw_texts, log=log_to_console,
+                on_translated=lambda t: gui_queue.put(("tts_event", box.get("session"), "translation_ready", t)))
+            log_to_console(f"[번역] 번역할 문장이 있는 조각 {sum(1 for s in segments if s['text'] in raw_texts)}개")
         session = tts_engine.TtsSession(
             text, segments,
-            tts_engine.make_google_synthesize(google_tts_client, google_tts, tts_voice_name, log=log_to_console),
+            synthesize,
             tts_engine.sounddevice_stream_factory(),
             _make_tts_event_handler(box),
             rate=tts_speaking_rate, volume=tts_volume, muted=False,   # 음소거는 읽기마다 풀린다(확장 page-ui-host.js:105)
@@ -2790,6 +2870,8 @@ def speak_text(text):
         log_to_console(f"[TTS] 읽기 시작 오류: {e}")
         return
     box["session"] = session
+    # 번역문 막(2026-09-29): 조각이 바뀔 때 _caption_for 가 이 세션의 번역문을 찾아 형광펜에 넘긴다(옛 세션 것은 안 씀)
+    _translation_lookup = (session, synthesize.translated_of) if raw_texts else None
     # ⚠️ start() 전에 넣어야 session_start 알림이 "옛 세션"으로 버려지지 않는다.
     #    세 값을 락 안에서 한 번에 바꾼다 — 옛 세션의 끝 알림이 그 사이에 끼어 tts_playing 을 False 로 덮지 못하게.
     with _tts_state_lock:
@@ -3087,7 +3169,7 @@ def _handle_tts_event(session, kind, data):
       전에 불리고 segment 알림은 start 뒤에만 오므로 늘 begin 뒤다. _reading_segment_idx 에도 적어 둔다(결과가
       ok=False 면 _show_reader_window 가 그 번호로 리더 창을 칠한다).
     """
-    global tts_session, _reading_segment_idx, _reading_ui_session
+    global tts_session, _reading_segment_idx, _reading_ui_session, _translation_lookup
     if session is None or session is not tts_session:
         return
     if kind == "session_start":
@@ -3098,20 +3180,44 @@ def _handle_tts_event(session, kind, data):
         _show_reader_window(session)   # 원문 위 형광펜이 기다리는 중·칠하는 중이면 안에서 건너뛴다
     elif kind == "segment":
         _reading_segment_idx = data
+        caption = _caption_for(session, data)
+        # 진단용(2026-09-29 Codex 분석 260929_211454): 실제로 읽기 시작한 조각 번호. 콘솔의 "조각 N/M 합성" 은
+        # 미리 합성한 기록이라 재생 순서와 다르다 — 형광펜 로그와 같은 파일에 순서대로 남긴다
+        logging.info(f"[형광펜] 재생 조각 {data + 1 if isinstance(data, int) else data} "
+                     f"(형광펜 상태 {_source_hl_state}, 번역문 {'있음' if caption else '없음'})")
         if session is _source_hl_session and _source_hl_state == "on":
             if _source_highlight_active():
-                _safe_ui("원문 형광펜", source_highlighter.highlight, data)
+                _safe_ui("원문 형광펜", source_highlighter.highlight, data, caption)
         elif session is _source_hl_session and _source_hl_state == "pending":
             if source_highlighter is not None:
-                _safe_ui("원문 형광펜(결과 대기 중 번호 전달)", source_highlighter.highlight, data)
+                _safe_ui("원문 형광펜(결과 대기 중 번호 전달)", source_highlighter.highlight, data, caption)
         elif reader_window is not None and reader_window_enabled and not _source_highlight_blocks_reader(session):
             _safe_ui("형광펜", reader_window.highlight, data)
     elif kind == "state":
         if bottom_bar is not None:
             _safe_ui("하단 바 갱신", bottom_bar.update, data)
+    elif kind == "translation_ready":
+        # 번역이 방금 끝났다(data = 그 조각 글). 지금 칠하는(또는 결과를 기다리며 번호만 넘긴) 조각이 그 글이면
+        # 번역문 막으로 다시 칠한다 — 첫 조각은 번역보다 칠하기가 먼저라 이게 없으면 노랑으로 남는다(2026-09-29 실사용).
+        # 형광펜은 같은 번호에 번역문만 바뀌면 원문에 다시 묻지 않고 받아 둔 사각형으로 다시 그린다.
+        idx = _reading_segment_idx
+        if (isinstance(idx, int) and session is _source_hl_session and source_highlighter is not None
+                and _source_hl_state in ("on", "pending")):
+            try:
+                same = session.segments[idx].get("text") == data
+            except Exception:
+                same = False
+            caption = _caption_for(session, idx) if same else None
+            if caption:
+                _safe_ui("원문 형광펜(번역문 도착)", source_highlighter.highlight, idx, caption)
+    elif kind == "segment_failed":
+        # 번역 실패로 그 조각 차례에 읽기가 멈췄다(2026-09-29 사용자 결정 "읽기 멈추고 알림"). 정리는 곧 올 session_end 가 한다
+        _notify_segment_failed(data)
     elif kind == "session_end":
         _end_source_highlight()
         _hide_reading_ui()
+        if _translation_lookup is not None and _translation_lookup[0] is session:
+            _translation_lookup = None      # 번역 결과(세션 캐시)를 놓는다
         with _tts_state_lock:
             tts_session = None
         _reading_segment_idx = None
@@ -3120,6 +3226,36 @@ def _handle_tts_event(session, kind, data):
             update_tray_menu()
         except Exception:
             pass
+
+def _caption_for(session, idx):
+    """(Tk 메인) idx 조각이 번역된 조각이면 원문 위 막에 쓸 번역문, 아니면 None(→ 노랑 형광펜).
+
+    설정 "번역문을 원문 위에 막으로 표시"(translation_overlay_enabled)가 꺼져 있거나, 이 세션의 번역이 아니거나,
+    아직 번역이 안 끝났으면 None. 번역은 합성 스레드가 2조각 앞서 하므로 조각 차례에는 보통 이미 있다.
+    """
+    if not translation_overlay_enabled or _translation_lookup is None:
+        return None
+    owner, lookup = _translation_lookup
+    if owner is not session or not isinstance(idx, int):
+        return None
+    try:
+        text = session.segments[idx].get("text")
+        return lookup(text) if text else None
+    except Exception:
+        return None
+
+def _notify_segment_failed(data):
+    """(Tk 메인) 번역 실패로 읽기가 멈췄다고 경고 창으로 알린다(앱이 이미 쓰는 messagebox — 창이 포커스를 가져간다).
+
+    창은 root.after 로 미뤄 연다 — 지금은 check_gui_queue 가 엔진 알림을 처리하는 중이라, 여기서 바로 모달 창을 열면
+    뒤이은 session_end(하단 바 숨기기 등) 처리가 그 창 뒤로 밀린다.
+    """
+    data = data if isinstance(data, dict) else {}
+    idx = data.get("index")
+    reason = data.get("message") or ""
+    log_to_console(f"[번역] 조각 {idx + 1 if isinstance(idx, int) else '?'} 번역 실패로 읽기를 멈춤: {reason}")
+    root.after(0, lambda: messagebox.showwarning(get_msg("translate_failed_title"),
+                                                 get_msg("translate_failed_body", reason)))
 
 def toggle_reader_window():
     """(Tk 메인) 트레이 "리더 창 사용" 체크 켬/끔. 읽는 도중에 켜면 바로 띄우고, 끄면 바로 숨긴다. 설정에 저장한다.

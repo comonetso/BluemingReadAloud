@@ -8,6 +8,8 @@ stop_current_playback 의 스트림 멈춤 부분)를 옮겨 와서 클래스 �
 소리 없이 테스트할 수 있게 바깥 의존성은 전부 "주입"받는다.
   - synthesize(text, rate) -> numpy int16 배열(24kHz 모노) 또는 None. 실패하면 예외를 던져도 된다.
       실제 앱에서는 make_google_synthesize() 가 만든 함수(Google Cloud TTS)를 넣는다.
+      보통 예외·None 은 "그 조각만 건너뛰기" 다. SegmentFailed 를 던지면 건너뛰지 않고, 그 조각을 읽을 차례가
+      왔을 때 읽기를 멈춘다(번역 실패 — translation.py, 2026-09-29 사용자 결정 "그 조각 차례에 멈춤").
   - open_stream() -> start/write/stop/abort/close 가 있는 출력 스트림.
       실제 앱에서는 sounddevice_stream_factory() 가 만든 함수(sd.OutputStream)를 넣는다.
   - clock() -> 초 단위 시각. 기본 time.monotonic. 테스트는 가짜 시계를 넣는다.
@@ -17,6 +19,8 @@ stop_current_playback 의 스트림 멈춤 부분)를 옮겨 와서 클래스 �
   kind="segment"        data=조각 번호(int)  — 형광펜을 옮길 때
   kind="state"          data={"state", "elapsed", "total", "progress", "can_prev", "can_next",
                               "can_mute", "muted", "rate", "volume"} — 하단 바 표시용
+  kind="segment_failed" data={"index": 조각 번호, "message": 이유} — synthesize 가 SegmentFailed 를 던진 조각을
+                        읽을 차례가 와서 읽기를 멈췄다. 앞 조각은 끝까지 들린다. 뒤이어 state·session_end 가 온다.
   kind="session_end"    data=None — 읽기가 끝났거나 멈췄다(맨 마지막에 딱 한 번)
   ⚠️ session_start(와 첫 segment·state)는 start() 를 부른 스레드에서, 나머지는 전부 재생 스레드 하나
      ("tts-player")에서만 보낸다. 보내는 스레드가 하나라서 순서가 뒤섞이지 않는다(일시정지를 눌렀는데 늦게 도착한
@@ -107,7 +111,7 @@ import readaloud_text
 __all__ = [
     "SAMPLE_RATE", "BLOCK_SAMPLES", "PREFETCH_AHEAD", "SYNTH_CACHE_SIZE", "MOVE_DELAY", "RESTART_AFTER", "LOADING_DELAY",
     "STATE_TICK", "DRAIN_SECONDS", "PRODUCER_JOIN_TIMEOUT", "RATE_MIN", "RATE_MAX", "VOLUME_MIN", "VOLUME_MAX",
-    "TtsSession", "make_google_synthesize", "sounddevice_stream_factory", "play_start_beep",
+    "TtsSession", "SegmentFailed", "make_google_synthesize", "sounddevice_stream_factory", "play_start_beep",
     "voice_lang_of", "voice_type_of", "clamp_rate", "clamp_volume", "is_silent_segment", "count_spoken_chars",
     "apply_gain", "pcm_from_linear16",
 ]
@@ -141,6 +145,13 @@ VOLUME_MIN, VOLUME_MAX = 0.0, 1.0
 # 대기 한 번의 최대 길이(실제 시간). 이동 마감·로딩 표시 같은 "시각" 조건을 다시 확인하는 주기다.
 # 옛 코드의 queue.get/put(timeout=0.2)·블록 0.1초와 같은 역할의 구현 세부값(동작 규칙이 아님).
 POLL = 0.1
+
+
+class SegmentFailed(Exception):
+    """synthesize 가 이걸 던지면 그 조각은 건너뛰지 않는다 — 읽을 차례가 오면 읽기를 멈추고 segment_failed 를 보낸다.
+
+    메시지(str(e))가 알림의 "message" 로 간다. 이동하면(이전/다음) 실패 기록은 지워지고 그 조각은 다시 요청된다.
+    """
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -533,6 +544,8 @@ class TtsSession:
         self._synth_gen = 0
         self._next_synth = 0         # 합성 스레드가 다음에 합성할 조각
         self._ready = {}             # 조각 번호 → (소리 또는 None(실패), 합성 속도, 요청 순번)
+        # 조각 번호 → SegmentFailed 이유. 그 번호는 _ready 에 None 으로도 들어 있다. 이동 때 _ready 와 함께 비운다.
+        self._failed = {}
         # 합성 소리 캐시 [(글, 속도, 소리, 요청 순번)] — 최근 것이 앞 (모듈 설명 "합성 소리 재사용")
         self._cache = []
         self._synth_seq = 0          # 합성 요청 순번(보낼 때마다 +1). 확장 prefetchSeq(tts-engines.js:389, 401)
@@ -864,9 +877,14 @@ class TtsSession:
                     seq = self._synth_seq
                     text = self._texts[idx]
                 audio = None
+                failure = None
                 try:
                     self._log(f"[TTS] 조각 {idx + 1}/{self._n} 합성 ({len(text)}자, 속도 {rate:.2f}): {text[:80]}")
                     audio = self._synthesize(text, rate)
+                except SegmentFailed as e:
+                    # 건너뛰지 않는다 — 이 조각 차례가 오면 재생 스레드가 읽기를 멈춘다(_step_locked)
+                    failure = str(e)
+                    self._log(f"[TTS] 조각 {idx + 1} 실패 — 차례가 오면 읽기를 멈춥니다: {failure}")
                 except Exception as e:
                     # 실패한 조각은 건너뛴다(번호 유지). 옛 producer 도 실패 조각을 continue 로 건너뛰었다.
                     self._log(f"[TTS] 조각 {idx + 1} 합성 오류: {e}")
@@ -876,9 +894,12 @@ class TtsSession:
                         return
                     if gen != self._synth_gen:
                         # ⚠️ 옛 세대 결과는 재생 자리에 넣지 않는다(늦게 온 소리가 새 위치·새 속도에서 울리면 안 됨).
+                        #    실패도 기록하지 않는다 — 새 자리에서 필요하면 다시 요청한다.
                         self._cache_put_locked(text, rate, audio, seq)
                         self._log(f"[TTS] 조각 {idx + 1}: 이동·속도 변경 전 요청이라 재생하지 않고 캐시에만 둡니다")
                         continue
+                    if failure is not None:
+                        self._failed[idx] = failure
                     self._put_ready_locked(idx, audio, rate, seq)
         except Exception:
             # 합성 요청 자체의 실패(네트워크·API 오류)는 위 안쪽 except 가 조각 하나만 건너뛰게 처리한다.
@@ -1036,6 +1057,13 @@ class TtsSession:
                 return ("wait", self._poll)
             self._waiting_since = None
             audio, rate, seq = entry
+            failure = self._failed.pop(self._cur, None)
+            if failure is not None:
+                # SegmentFailed — 건너뛰지 않고 여기서 읽기를 멈춘다. 앞 조각 소리는 이미 다 썼다(finally 의 stream.stop()
+                # 이 남은 버퍼를 다 들려주고 멈춘다). 알림은 _outbox 로 → 락 밖에서 state·session_end 보다 먼저 나간다.
+                self._log(f"[TTS] 조각 {self._cur + 1}: 실패한 조각이라 읽기를 멈춥니다")
+                self._outbox.append(("segment_failed", {"index": self._cur, "message": failure}))
+                return ("done", "segment_failed")
             if audio is None or len(audio) == 0:
                 # 합성 실패(또는 빈 소리) → 건너뛴다. 번호는 그대로라 뒤 조각의 형광펜이 어긋나지 않는다
                 self._log(f"[TTS] 조각 {self._cur + 1}: 소리가 없어 건너뜁니다")
@@ -1149,6 +1177,7 @@ class TtsSession:
         """
         out = [(i, a, r, s) for i, (a, r, s) in self._ready.items() if a is not None and len(a) > 0]
         self._ready = {}
+        self._failed = {}    # 실패(SegmentFailed)도 잊는다 — 새 자리에서 필요하면 다시 요청한다(번역 재시도)
         return out
 
     def _refill_window_locked(self, first, outgoing):

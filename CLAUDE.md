@@ -44,8 +44,11 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 - **source_highlight.py** — highlighter painted directly over the original text in the foreground app
   (UI Automation on its own thread + a click-through overlay). Optional: if it fails to import, the app falls back
   to the reader window. Contract: `SourceHighlighter(root)`, `begin(source_text, segments, on_result)`,
-  `highlight(idx)`, `notify_scroll()`, `end()`, `destroy()`, `active`.
+  `highlight(idx, caption=None)` (caption = translated text → drawn as a caption box instead of yellow),
+  `notify_scroll()`, `end()`, `destroy()`, `active`.
 - **tts_engine.py** / **readaloud_text.py** — playback engine and text splitting (tests in `tests/`).
+- **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
+  client are in its header. Voices are Korean only, so "primary language" = Hangul.
 - **messages.py** — Korean/English UI strings. Add every user-facing message to both `ko` and `en`.
   Keep the nested `messages["ko"]` / `messages["en"]` blocks: `get_message()` indexes them first,
   and removing them turns every message into "[Missing message]".
@@ -70,6 +73,12 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    then starts a new `tts_engine.TtsSession`. Right before `session.start()` it calls `_begin_source_highlight()`
    → `SourceHighlighter.begin(source_text, segments, on_result)` while the selection is still alive. Sound never waits
    for that result.
+   **Translation** (setting `translate_enabled`, default on — user decisions 2026-09-29): a sentence with **no Hangul at
+   all** is translated to Korean by Gemini (`gemini-3.5-flash-lite`, Gemini API key) before synthesis; Korean sentences
+   with English terms stay as they are. `split_for_reading(keep_raw=True)` → `translation.mark_for_translation` puts the
+   pre-spoken raw text into those segments → `make_translating_synthesize` wraps `synthesize`: translate → spoken_text →
+   TTS. Timeout 3 s (user decision; measured 0.87–1.55 s). A failed translation raises `tts_engine.SegmentFailed` →
+   reading **stops at that segment's turn** and a warning box appears (`segment_failed` event → `_notify_segment_failed`).
 4. **`tts_engine.TtsSession`** — one object per reading. Thread `tts-producer` synthesizes up to 2 segments ahead
    (`PREFETCH_AHEAD`) with Google Cloud TTS v1 (`make_google_synthesize`, LINEAR16 24 kHz, `speaking_rate`);
    thread `tts-player` writes 0.1 s blocks to one `sd.OutputStream` (gapless). Recent results are reused
@@ -81,6 +90,10 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    State: `_source_hl_session` + `_source_hl_state` (`None` / `"pending"` / `"on"` / `"off"`); stale results from an
    older session are dropped. `session_end` → `_end_source_highlight()` → `SourceHighlighter.end()`.
    Mouse wheel → `SourceHighlighter.notify_scroll()` from the mouse hook (`_notify_source_scroll`, flag only).
+   **Translation caption** (setting `translation_overlay_enabled`, default on): a translated segment is painted as a
+   dark-gray box (#383838, text #CCCCCC, yellow border, GDI ClearType) over the original lines (`_caption_for`).
+   The first segment is painted before its translation arrives, so `on_translated` → `"translation_ready"` event
+   repaints it. If the paragraph is only partly visible (fewer lines than first seen, or clipped), yellow is used instead.
 6. **Stop** — `stop_current_playback()` / `stop_tts()`: takes the session under `_tts_state_lock`, then
    `session.stop()` aborts the stream.
 
@@ -106,24 +119,36 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 - **Single instance**: Windows named mutex + UDP socket bound to `localhost:51888`.
 - **Source highlight** (`source_highlight.py`): all UI Automation calls on one dedicated thread (COM initialized there,
   request queue); the overlay window is drawn on the Tk main thread (click-through `WS_EX_TRANSPARENT|WS_EX_LAYERED`,
-  NOACTIVATE, TOOLWINDOW, topmost) and hidden when the target window is no longer in the foreground.
+  NOACTIVATE, TOOLWINDOW, topmost). It stays visible while the target is not minimized and either in the foreground or
+  **not covered at the overlay spot** (5 `WindowFromPoint` probes — user decision 2026-09-29). Wheel → hidden while
+  scrolling, one position query after `SETTLE_TICKS` of quiet (user decision "hide while scrolling").
+  Known open issue: ranges are taken once at `begin` and never re-verified; Chromium can silently move them after a DOM
+  rebuild (Codex analysis `docs/codex_rescue/260929_211454_response_highlight-overlay-vanish.md`). Diagnostic logs
+  (position boxes, show/hide reasons) are kept on purpose until that is confirmed.
   2026-09-28 measurements in VS Code: only the ancestor **Document** element (ControlType 50030) has TextPattern;
   `GetCurrentPattern(UIA_TextPatternId).QueryInterface(IUIAutomationTextPattern)` works (`GetCurrentPatternAs` failed);
   `RangeFromPoint` → `ExpandToEnclosingUnit(TextUnit_Line)` → `GetBoundingRectangles()` takes 1–2 ms.
-- **Auth**: Google Cloud service account JSON (`google_credentials.json`, kept by user decision).
-  The auth dialog copies the chosen file into the app folder. If the saved path is invalid,
-  `load_settings()` falls back to `<app dir>/google_credentials.json` — note this fallback runs only when the settings file exists.
+- **Auth** (user decision 2026-09-29, replaced the service account JSON): **two API keys** typed into the auth dialog
+  and saved in the settings file — a TTS key (Cloud Text-to-Speech) and a Gemini key (Gemini API). One key cannot do
+  both (measured: the Gemini key is service-account-bound → TTS 401; the TTS key → Gemini 403). The dialog checks each
+  key once on Save (`_check_tts_key` list_voices / `translation.check_gemini_key`); startup does not. `.env` is not read.
+  `google_credentials.json` in the app folder is no longer used (not deleted).
 
 ### Settings
 
-- `whisperer_settings.json` in the working directory (git-ignored). Keys: `language`, `google_credentials_path`,
+- `whisperer_settings.json` in the working directory (git-ignored — it holds API keys in plain text). Keys: `language`,
+  `google_tts_api_key`, `gemini_api_key`,
   `tts_hotkey`, `tts_settings` (`voice_name`, `speaking_rate`, `volume`), `reader_window_enabled`,
   `reader_window_geometry`, `bottom_bar_monitor`, `selection_button_enabled`, `disable_in_browsers` (default true),
   `source_highlight_enabled` (default true — deliberately **not** in the tray or the settings dialog; the user fixed the
-  tray list, so it can only be turned off by editing the file). Boolean keys with non-boolean values are ignored.
+  tray list, so it can only be turned off by editing the file), `translate_enabled` and `translation_overlay_enabled`
+  (both default true, in the settings dialog "General"). Boolean keys with non-boolean values are ignored.
+  Settings printed to the console go through `_mask_keys` (key prefix + length only).
 - `save_settings()` rewrites the whole file; keep `save_settings()` and `load_settings()` in sync when adding a key.
-  Old keys (STT keys, the floating icon's `controller_position` / `controller_hidden`) are ignored on load and
-  dropped from the file at the next save.
+  Old keys (STT keys, the floating icon's `controller_position` / `controller_hidden`, `google_credentials_path`) are
+  ignored on load and dropped from the file at the next save.
+- Logging: `setup_logging()` uses `basicConfig(force=True)` — earlier `logging.*` calls in `main()` had installed a
+  default handler, so `logs/whisperer_*.log` stayed 0 bytes from 2026-07 until 2026-09-29.
 
 ### Threading
 

@@ -14,6 +14,8 @@
         on_result(ok: bool, reason: str) 는 나중에 **Tk 메인에서** 불린다(root.after 틱으로 넘김). begin 안에서
         바로 불리는 일은 없다. 읽기(소리)는 이 결과를 기다리지 않는다.
     hl.highlight(idx)      # Tk 메인. idx 조각을 칠한다. None 이면 지운다. 화면 밖이면 보이게 스크롤한다
+    hl.highlight(idx, caption)  # (2026-09-29) caption(번역문)이 있으면 노랑 대신 "짙은 회색 바탕 + 흰 글씨 +
+                                # 노랑 테두리" 막으로 원문 줄 자리를 덮고 그 글을 쓴다(build_caption_bitmap)
     hl.notify_scroll()     # 어느 스레드에서 불러도 된다(플래그만 세움 — 마우스 훅 콜백에서 부름)
     hl.end()               # Tk 메인. 막을 지우고 잡은 범위를 놓는다(end 뒤에는 on_result 를 부르지 않는다)
     hl.destroy()
@@ -86,7 +88,7 @@ import unicodedata
 log = logging.getLogger(__name__)
 
 __all__ = ["SourceHighlighter", "align_source_to_uia", "TextAlignment", "grapheme_counts",
-           "build_overlay_bitmap", "rects_from_uia", "clip_rects", "uia_on_screen"]
+           "build_overlay_bitmap", "build_caption_bitmap", "rects_from_uia", "clip_rects", "uia_on_screen"]
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -417,6 +419,238 @@ def build_overlay_bitmap(rects, pixel=PREMULT_PIXEL):
             off = y * w * 4 + x0
             buf[off:off + len(row)] = row
     return left, top, w, h, bytes(buf)
+
+
+# ── 번역문 막 (2026-09-29 사용자 결정: 번역된 조각은 원문 줄 자리를 덮고 번역문을 쓴다. 넘치면 막을 아래로 늘린다.
+#    바탕은 짙은 회색에 흰 글씨. 설정 창 체크로 끌 수 있다 — whisperer translation_overlay_enabled) ──
+CAPTION_BG = (0x38, 0x38, 0x38)    # 리더 창 TEXT_BG "#383838"(확장 설정 패널 배경)과 같은 짙은 회색
+# 글자는 옅은 회색(2026-09-29 사용자 "흰색은 너무 밝다 — 옅은 회색으로"). 리더 창 HEADER_FG_DIM "#CCCCCC" 와 같은 값
+# (= VS Code 다크 테마 기본 글자색)
+CAPTION_FG = (0xCC, 0xCC, 0xCC)
+CAPTION_BORDER = HIGHLIGHT_RGBA[:3]  # 형광펜과 같은 노랑(불투명) — "지금 읽는 자리" 표시
+CAPTION_BORDER_PX = 2              # [임의] 테두리 두께(화면 px)
+CAPTION_PAD_PX = 2                 # [임의] 테두리와 글자 사이(화면 px). 막은 원문 줄 상자보다 이 둘만큼 바깥으로 크다
+CAPTION_FONT_FACE = "Malgun Gothic"  # 리더 창 FONT_FAMILIES 첫째. 없으면 윈도우가 비슷한 글꼴로 바꿔 준다
+CAPTION_MIN_FONT_PX = 6            # [임의] 줄 높이가 아주 작아도 글꼴을 이보다 줄이지 않는다
+# 글자는 윈도우 GDI 로 ClearType 을 켜고 그린다. 처음(Pillow, 흑백 부드럽게만)에는 옆의 VS Code 글자(ClearType)보다
+# 거칠고 흐려 "깨져 보인다"(2026-09-29 사용자). 막이 불투명이라 GDI 글자(알파를 0 으로 씀)를 쓰고 알파만 255 로 채우면 된다.
+_FW_NORMAL = 400
+_DEFAULT_CHARSET = 1
+_CLEARTYPE_QUALITY = 5
+_BK_TRANSPARENT = 1
+
+
+def _u16len(s):
+    """GDI 에 넘길 글 길이(UTF-16 단위) — 이모지 같은 BMP 밖 글자는 2칸이다."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _bgra_opaque(rgb):
+    return bytes((rgb[2], rgb[1], rgb[0], 255))
+
+
+def _wrap_caption(text, measure, max_w):
+    """번역문 → 막 너비(max_w)에 맞춘 줄 목록. measure(글) = 그 글의 너비(px).
+
+    줄바꿈은 지키고, 공백에서 끊고, 공백 없이 긴 덩어리는 글자 단위로 끊는다.
+    """
+    lines = []
+    for para in (text or "").split("\n"):
+        para = " ".join(para.split())
+        if not para:
+            continue
+        cur = ""
+        for word in para.split(" "):
+            cand = word if not cur else cur + " " + word
+            if measure(cand) <= max_w:
+                cur = cand
+                continue
+            if cur:
+                lines.append(cur)
+            cur = word
+            while len(cur) > 1 and measure(cur) > max_w:
+                cut = 1
+                while cut < len(cur) and measure(cur[:cut + 1]) <= max_w:
+                    cut += 1
+                lines.append(cur[:cut])
+                cur = cur[cut:]
+        if cur:
+            lines.append(cur)
+    return lines or [""]
+
+
+class _GdiText:
+    """메모리 DC + ClearType 글꼴 — 글자 재기·그리기. build_caption_bitmap 안에서만 만들고 close 로 다 놓는다."""
+
+    def __init__(self):
+        self.dc = _g32.CreateCompatibleDC(None)
+        if not self.dc:
+            raise OSError("CreateCompatibleDC 실패")
+        self.font = None
+        self._old_font = None
+        self.size = None
+
+    def set_size(self, px):
+        font = _g32.CreateFontW(-int(px), 0, 0, 0, _FW_NORMAL, 0, 0, 0, _DEFAULT_CHARSET, 0, 0,
+                                _CLEARTYPE_QUALITY, 0, CAPTION_FONT_FACE)
+        if not font:
+            raise OSError("CreateFontW 실패")
+        old = _g32.SelectObject(self.dc, font)
+        if self._old_font is None:
+            self._old_font = old
+        if self.font:
+            _g32.DeleteObject(self.font)
+        self.font = font
+        self.size = int(px)
+
+    def height(self):
+        """글꼴 한 줄 높이(ascent+descent, px)."""
+        tm = _TEXTMETRICW()
+        if not _g32.GetTextMetricsW(self.dc, ctypes.byref(tm)):
+            raise OSError("GetTextMetricsW 실패")
+        return tm.tmHeight
+
+    def width(self, s):
+        size = wintypes.SIZE()
+        if not _g32.GetTextExtentPoint32W(self.dc, s, _u16len(s), ctypes.byref(size)):
+            raise OSError("GetTextExtentPoint32W 실패")
+        return size.cx
+
+    def fit(self, line_h):
+        """원문 줄 높이(line_h) 안에 글꼴 한 줄이 들어가는 가장 큰 크기로 — "글자 크기는 원문 줄 높이에 맞춘다"."""
+        size = max(CAPTION_MIN_FONT_PX, int(line_h))
+        while True:
+            self.set_size(size)
+            if size <= CAPTION_MIN_FONT_PX or self.height() <= line_h:
+                return size
+            size -= 1
+
+    def close(self):
+        if self._old_font:
+            _g32.SelectObject(self.dc, self._old_font)
+        if self.font:
+            _g32.DeleteObject(self.font)
+        _g32.DeleteDC(self.dc)
+        self.font = self._old_font = None
+
+
+def _bbox(rects):
+    """사각형 목록을 감싼 상자 (왼, 위, 오른, 아래). 비었으면 None — 진단 로그용."""
+    if not rects:
+        return None
+    return (min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects), max(r[3] for r in rects))
+
+
+def _line_count(rects):
+    """줄 사각형 목록의 줄 수 — 세로 구간이 겹치는 사각형은 한 줄로 친다(굵은 글씨 등으로 한 줄이 여러 사각형일 때)."""
+    n, end = 0, None
+    for top, bottom in sorted((r[1], r[3]) for r in rects or ()):
+        if end is None or top >= end:
+            n += 1
+            end = bottom
+        else:
+            end = max(end, bottom)
+    return n
+
+
+def _probe_points(box, inset=2):
+    """막 영역 (왼, 위, 오른, 아래) 의 가운데와 네 모서리(안쪽으로 inset) — "막 자리가 가려졌나" 볼 점 다섯 개."""
+    l, t, r, b = box
+    x0, x1 = min(l + inset, r - 1), max(r - 1 - inset, l)
+    y0, y1 = min(t + inset, b - 1), max(b - 1 - inset, t)
+    return [((l + r) // 2, (t + b) // 2), (x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+
+
+def _crop_bgra(left, top, w, h, bits, clip):
+    """(왼, 위, 너비, 높이, BGRA) 그림을 clip((왼, 위, 오른, 아래) 화면 좌표)과 겹치는 부분만 잘라 같은 모양으로.
+
+    clip 이 None 이면 그대로. 겹치는 곳이 없으면 None.
+    """
+    if not clip:
+        return left, top, w, h, bits
+    x0, y0 = max(left, clip[0]), max(top, clip[1])
+    x1, y1 = min(left + w, clip[2]), min(top + h, clip[3])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    if (x0, y0, x1, y1) == (left, top, left + w, top + h):
+        return left, top, w, h, bits
+    a, b = (x0 - left) * 4, (x1 - left) * 4
+    rows = [bits[(y * w) * 4 + a:(y * w) * 4 + b] for y in range(y0 - top, y1 - top)]
+    return x0, y0, x1 - x0, y1 - y0, b"".join(rows)
+
+
+def build_caption_bitmap(rects, text, clip=None):
+    """번역문 막 그림 한 장. (왼, 위, 너비, 높이, BGRA bytes) — build_overlay_bitmap 과 같은 모양. 보일 곳이 없으면 None.
+
+    rects 는 **잘리기 전** 원래 줄 사각형이다(UIA 가 준 그대로). clip(문서·창의 보이는 영역)은 다 그린 뒤에만 쓴다.
+    (2026-09-29 실사용 결함 — 처음엔 clip_rects 로 잘린 사각형을 받아 글꼴·폭을 계산해서, 문단이 일부만 보이면 글씨가
+     원문의 절반만 하고 막이 좁아졌다. Codex 분석 docs/codex_rescue/260929_211454_response_highlight-overlay-vanish.md)
+
+    - 자리: 원문 줄 사각형들을 감싼 상자를 테두리+여백만큼 바깥으로 넓힌 곳. 줄마다 너비가 달라도 상자 전체를 덮는다
+      (계단 모양으로 남은 원문 글자가 번역문과 겹쳐 보이지 않게).
+    - 글자 크기: 원문 줄 높이(사각형 높이의 가운데 값)에 맞춘다. 줄 간격도 원문 줄 높이.
+    - 번역문이 원문 상자에 다 안 들어가면 막을 아래로 늘린다(사용자 결정). 위·왼쪽·오른쪽은 원문 자리 그대로.
+    - 전부 불투명(알파 255) — 반투명이면 아래 원문 글자가 비쳐 번역문과 겹친다. 그래서 미리 곱하기가 필요 없다.
+    - 글자는 GDI(ClearType)로 그린다(위 CAPTION_* 설명). Tk 메인에서만 부른다(_Overlay.show).
+    Windows 가 아니거나 GDI 가 실패하면 예외 — 부르는 쪽(_Overlay.show)이 노랑 형광펜으로 되돌린다.
+    """
+    if not _IS_WIN:
+        raise OSError("번역문 막은 Windows 에서만 그린다")
+    left = min(r[0] for r in rects)
+    top = min(r[1] for r in rects)
+    right = max(r[2] for r in rects)
+    bottom = max(r[3] for r in rects)
+    heights = sorted(r[3] - r[1] for r in rects)
+    line_h = max(1, heights[len(heights) // 2])
+    inner_w = max(1, right - left)
+    edge = CAPTION_BORDER_PX + CAPTION_PAD_PX
+    gdi = _GdiText()
+    bmp = old_bmp = None
+    try:
+        gdi.fit(line_h)
+        lines = _wrap_caption(text, gdi.width, inner_w)
+        inner_h = max(bottom - top, len(lines) * line_h)
+        w, h = inner_w + 2 * edge, inner_h + 2 * edge
+
+        bmi = _BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = w
+        bmi.bmiHeader.biHeight = -h          # 위→아래
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        bits = ctypes.c_void_p()
+        bmp = _g32.CreateDIBSection(gdi.dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+        if not bmp or not bits.value:
+            raise OSError("CreateDIBSection 실패")
+        old_bmp = _g32.SelectObject(gdi.dc, bmp)
+
+        # 바탕: 전체를 테두리색으로 칠하고 안쪽을 짙은 회색으로
+        b = CAPTION_BORDER_PX
+        buf = bytearray(_bgra_opaque(CAPTION_BORDER) * (w * h))
+        inner_row = _bgra_opaque(CAPTION_BG) * (w - 2 * b)
+        for y in range(b, h - b):
+            off = (y * w + b) * 4
+            buf[off:off + len(inner_row)] = inner_row
+        ctypes.memmove(bits.value, bytes(buf), len(buf))
+
+        _g32.SetBkMode(gdi.dc, _BK_TRANSPARENT)
+        _g32.SetTextColor(gdi.dc, CAPTION_FG[0] | (CAPTION_FG[1] << 8) | (CAPTION_FG[2] << 16))
+        dy = max(0, (line_h - gdi.height()) // 2)
+        for i, line in enumerate(lines):
+            if line:
+                _g32.TextOutW(gdi.dc, edge, edge + i * line_h + dy, line, _u16len(line))
+        _g32.GdiFlush()                      # GDI 는 모아서 그린다 — 비트를 읽기 전에 다 그리게
+
+        out = bytearray(ctypes.string_at(bits.value, w * h * 4))
+        out[3::4] = b"\xff" * (w * h)        # GDI 글자는 알파를 0 으로 쓴다 → 막 전체를 불투명으로
+        # 다 그린 뒤 보이는 영역만 남긴다 — 문단 일부가 화면 밖이어도 글꼴·줄바꿈은 원래 크기 그대로
+        return _crop_bgra(left - edge, top - edge, w, h, bytes(out), clip)
+    finally:
+        if old_bmp:
+            _g32.SelectObject(gdi.dc, old_bmp)
+        if bmp:
+            _g32.DeleteObject(bmp)
+        gdi.close()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -998,6 +1232,8 @@ if _IS_WIN:
     _u32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
     _u32.SetWindowPos.restype = wintypes.BOOL
+    _u32.WindowFromPoint.argtypes = [wintypes.POINT]
+    _u32.WindowFromPoint.restype = wintypes.HWND
     _u32.GetDC.argtypes = [wintypes.HWND]
     _u32.GetDC.restype = wintypes.HDC
     _u32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
@@ -1018,6 +1254,35 @@ if _IS_WIN:
     _g32.SelectObject.restype = wintypes.HGDIOBJ
     _g32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
     _g32.DeleteObject.restype = wintypes.BOOL
+
+    # 번역문 막 글자(build_caption_bitmap, 2026-09-29) — GDI + ClearType
+    class _TEXTMETRICW(ctypes.Structure):
+        _fields_ = [("tmHeight", wintypes.LONG), ("tmAscent", wintypes.LONG), ("tmDescent", wintypes.LONG),
+                    ("tmInternalLeading", wintypes.LONG), ("tmExternalLeading", wintypes.LONG),
+                    ("tmAveCharWidth", wintypes.LONG), ("tmMaxCharWidth", wintypes.LONG),
+                    ("tmWeight", wintypes.LONG), ("tmOverhang", wintypes.LONG),
+                    ("tmDigitizedAspectX", wintypes.LONG), ("tmDigitizedAspectY", wintypes.LONG),
+                    ("tmFirstChar", wintypes.WCHAR), ("tmLastChar", wintypes.WCHAR),
+                    ("tmDefaultChar", wintypes.WCHAR), ("tmBreakChar", wintypes.WCHAR),
+                    ("tmItalic", wintypes.BYTE), ("tmUnderlined", wintypes.BYTE), ("tmStruckOut", wintypes.BYTE),
+                    ("tmPitchAndFamily", wintypes.BYTE), ("tmCharSet", wintypes.BYTE)]
+
+    _g32.CreateFontW.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                 wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                 wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR]
+    _g32.CreateFontW.restype = wintypes.HFONT
+    _g32.GetTextMetricsW.argtypes = [wintypes.HDC, ctypes.POINTER(_TEXTMETRICW)]
+    _g32.GetTextMetricsW.restype = wintypes.BOOL
+    _g32.GetTextExtentPoint32W.argtypes = [wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int, ctypes.POINTER(wintypes.SIZE)]
+    _g32.GetTextExtentPoint32W.restype = wintypes.BOOL
+    _g32.TextOutW.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.LPCWSTR, ctypes.c_int]
+    _g32.TextOutW.restype = wintypes.BOOL
+    _g32.SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
+    _g32.SetTextColor.restype = wintypes.COLORREF
+    _g32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
+    _g32.SetBkMode.restype = ctypes.c_int
+    _g32.GdiFlush.argtypes = []
+    _g32.GdiFlush.restype = wintypes.BOOL
 
 
 class _Win32Env:
@@ -1049,6 +1314,17 @@ class _Win32Env:
         pid = wintypes.DWORD()
         _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return pid.value
+
+    def root_at(self, x, y):
+        """화면 점 (x, y) 에서 맨 위에 있는 창의 최상위 창 핸들(int) 또는 None — "막 자리가 가려졌나" 판정용.
+
+        WindowFromPoint 는 숨긴 창을 건너뛴다. 막 창(클릭 통과)이 잡히더라도 부르는 쪽이 이 앱 창은 가림으로 치지 않는다.
+        """
+        h = _u32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+        if not h:
+            return None
+        root = _u32.GetAncestor(h, GA_ROOT)
+        return int(root or h)
 
 
 def _no_autostyle(cls):
@@ -1159,29 +1435,43 @@ class _Overlay:
     def hwnd(self):
         return self._styled
 
-    def show(self, rects):
-        """rects(화면 좌표 (왼, 위, 오른, 아래) 목록)를 칠해 보인다. 비었으면 숨긴다."""
+    def show(self, rects, caption=None, caption_src=None, clip=None):
+        """rects(화면 좌표 (왼, 위, 오른, 아래) 목록 — 보이는 영역으로 자른 것)를 칠해 보인다. 비었으면 숨긴다.
+
+        caption(번역문)이 있으면 노랑 대신 번역문 막(build_caption_bitmap)으로 그린다. 그때 크기 계산은 caption_src
+        (잘리기 전 원래 사각형 — 없으면 rects)로 하고 clip(보이는 영역)으로 마지막에 자른다. 그리다 실패하면 노랑으로.
+        돌려주는 값: 실제로 보이게 했으면 True, 아니면 False(부르는 쪽이 "보임" 기록을 이것으로 정한다).
+        """
         if self._destroyed:
-            return
+            return False
         if not rects:
             self.hide()
-            return
+            return False
         hwnd = self._hwnd()
         if not hwnd:
-            return
-        key = tuple(rects)
+            return False
+        key = (tuple(rects), caption, tuple(caption_src) if caption_src else None, clip)
         if key != self._drawn:
-            left, top, w, h, bits = build_overlay_bitmap(rects)
+            bitmap = None
+            if caption:
+                try:
+                    bitmap = build_caption_bitmap(caption_src or rects, caption, clip)
+                except Exception:
+                    log.exception("번역문 막 그리기 실패 — 노랑 형광펜으로 칠한다")
+            if bitmap is None:
+                bitmap = build_overlay_bitmap(rects)
+            left, top, w, h, bits = bitmap
             if not _ulw(hwnd, left, top, w, h, bits):
                 log.warning("원문 형광펜: UpdateLayeredWindow 실패 — 막을 숨긴다")
                 self.hide()
-                return
+                return False
             self._drawn = key
         if not self._shown:
             _u32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
             self._shown = True
         _u32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
+        return True
 
     def hide(self):
         if self._shown and self._styled:
@@ -1227,6 +1517,11 @@ class SourceHighlighter:
         self._state = "idle"           # idle | pending(begin 결과 기다림) | active
         self._on_result = None
         self._scroll_flag = False      # notify_scroll 이 아무 스레드에서나 세운다(대입 하나라 안전)
+        # 막이 지금 보이는가 — 보임↔숨김이 바뀔 때만 이유를 로그에 남긴다(2026-09-29 "형광펜이 가끔 사라진다" 진단용.
+        # 틱은 50ms 라 매번 찍으면 로그가 넘친다)
+        self._overlay_visible = False
+        self._hidden_reason = None     # 마지막으로 숨긴 이유 — 숨긴 채로 이유가 바뀔 때도 남긴다
+        self._last_rects_note = None   # 마지막으로 기록한 위치 결과 요약(조각, 사각형 수, 스크롤함) — 바뀔 때만 남긴다
         self._caret_token = 0          # query_selection_end 요청 번호
         self._caret_waiting = {}       # 요청 번호 → on_done (결과가 오면 Tk 틱이 부른다)
         self._reset_view()
@@ -1237,7 +1532,9 @@ class SourceHighlighter:
         self._target_pid = None
         self._mapped = set()
         self._want_idx = None          # 마지막으로 highlight 로 받은 번호(begin 결과 전에 와도 기억)
+        self._want_caption = None      # 그 번호와 함께 받은 번역문(없으면 None — 노랑 형광펜)
         self._current_idx = None       # 지금 칠하는 번호
+        self._current_caption = None   # 지금 칠하는 번호의 번역문
         self._fg_ok = None             # 대상 창이 전경인지(None = 아직 모름)
         self._last_win_rect = None
         self._doc_rect = None
@@ -1246,7 +1543,17 @@ class SourceHighlighter:
         self._need_query = False
         self._reveal_pending = False
         self._settle_left = 0
+        # 휠 뒤 "스크롤 중" 으로 막을 숨겨 두는 남은 틱. 0 이 되면(마지막 휠에서 SETTLE_TICKS 뒤) 한 번 물어 다시 그린다.
+        # 2026-09-29 사용자 결정 "스크롤 중엔 숨기기" — 막은 다른 창이라 원문 스크롤보다 늦게 따라가 밀려 보였다.
+        self._scroll_hold = 0
         self._next_refresh = None
+        # 조각 번호 → 지금까지 받은 가장 많은 줄 수. 지금 보이는 줄이 이보다 적거나 경계에 잘리면 "문단 일부만 보임"
+        # → 번역문 막 대신 노랑(2026-09-29 사용자 결정). 윈도우는 화면 밖 줄 위치를 안 줘서 문단 전체 크기를 따로 모른다.
+        # 창 크기가 바뀌면(줄바꿈이 달라짐) 비운다.
+        self._full_lines = {}
+        self._partial_noted = False    # "일부만 보여 노랑" 을 로그에 남겼나(바뀔 때만 남긴다)
+        # 마지막으로 그린 막 영역(보이는 부분). 대상 창이 앞 창이 아닐 때 "막 자리가 가려졌나" 를 이 자리로 본다
+        self._shown_box = None
 
     # ── 약속된 메서드 ───────────────────────────────────────────────────
 
@@ -1304,17 +1611,29 @@ class SourceHighlighter:
             self._worker.submit(("begin", gen, source_text or "", spans, pid, self._win.own_pid))
         self._schedule_tick()
 
-    def highlight(self, idx):
-        """idx 조각을 칠한다. None 이면 지운다. 조각이 바뀔 때만 화면 밖이면 보이게 스크롤한다(확장 revealRanges)."""
+    def highlight(self, idx, caption=None):
+        """idx 조각을 칠한다. None 이면 지운다. 조각이 바뀔 때만 화면 밖이면 보이게 스크롤한다(확장 revealRanges).
+
+        caption(번역문, 2026-09-29)이 있으면 그 조각은 번역문 막으로 덮는다(build_caption_bitmap). 같은 번호에 번역문만
+        달라지면 다시 묻지 않고(스크롤 없이) 받아 둔 사각형으로 다시 그린다.
+        """
         self._check_thread("highlight")
         if idx is None:
             self._want_idx = None
+            self._want_caption = None
             self._current_idx = None
+            self._current_caption = None
             self._raw_rects = []
-            self._hide_overlay()
+            self._hide_overlay("지우기 요청(highlight None)")
             return
         self._want_idx = idx
-        if self._state != "active" or idx == self._current_idx:
+        self._want_caption = caption or None
+        if self._state != "active":
+            return
+        if idx == self._current_idx:
+            if self._want_caption != self._current_caption:
+                self._current_caption = self._want_caption
+                self._redraw()
             return
         self._select(idx)
 
@@ -1374,7 +1693,7 @@ class SourceHighlighter:
                     self._worker.submit(("end", self._gen))
         self._state = "idle"
         self._on_result = None
-        self._hide_overlay()
+        self._hide_overlay("읽기 끝")
         self._reset_view()
 
     def _stop(self, reason):
@@ -1473,6 +1792,15 @@ class SourceHighlighter:
             self._stop(kind)
         elif kind == "rects" and self._state == "active":
             _, _, idx, rects, doc_rect, scrolled = msg
+            note = (idx, len(rects or ()), bool(scrolled), _bbox(rects), doc_rect)
+            if note != self._last_rects_note:
+                # 진단용: 위치 요청 결과가 바뀔 때만. 사각형 0개가 이어지면 "범위가 죽었거나 화면 밖",
+                # 문서 영역과 동떨어진 좌표면 "범위가 엉뚱한 곳을 가리킴" 이다(Codex 분석 260929_211454).
+                # 좌표만 남긴다 — 글 내용은 남기지 않는다.
+                log.info("원문 형광펜 위치 받음: 조각 %s, 줄 사각형 %d개%s · 감싼 상자 %s · 문서 영역 %s",
+                         idx + 1 if isinstance(idx, int) else "?", note[1],
+                         ", 보이게 스크롤함" if scrolled else "", note[3], doc_rect)
+                self._last_rects_note = note
             if idx == self._current_idx:
                 self._doc_rect = doc_rect
                 if scrolled:
@@ -1482,6 +1810,9 @@ class SourceHighlighter:
                     self._settle_left = SETTLE_TICKS
                 else:
                     self._raw_rects = rects
+                    n = _line_count(rects)
+                    if n > self._full_lines.get(idx, 0):
+                        self._full_lines[idx] = n
                 self._redraw()
             self._flush_query()
 
@@ -1491,20 +1822,30 @@ class SourceHighlighter:
         if not self._win.is_window(root):
             self._stop("target_closed")
             return
-        fg_ok = self._win.foreground_root() == root and not self._win.is_iconic(root)
+        fg_ok = self._visible_ok(root)
         if fg_ok != self._fg_ok:
             self._fg_ok = fg_ok
             if fg_ok:
                 self._need_query = True          # 돌아오면 새로 받아 그린다(그 사이 스크롤됐을 수 있다)
             else:
-                self._hide_overlay()
+                self._hide_overlay("막 자리가 다른 창에 가려짐·대상 창 최소화")
         rect = self._win.window_rect(root)
         if rect != self._last_win_rect:
+            if self._last_win_rect is not None and rect is not None and (
+                    rect[2] - rect[0], rect[3] - rect[1]) != (
+                    self._last_win_rect[2] - self._last_win_rect[0], self._last_win_rect[3] - self._last_win_rect[1]):
+                self._full_lines.clear()          # 창 크기가 바뀌면 줄바꿈이 달라진다 — 줄 수를 새로 센다
             self._last_win_rect = rect
             self._settle_left = SETTLE_TICKS
         if self._scroll_flag:
+            # 휠: 따라가지 않고 숨긴다. 휠이 이어지면 계속 숨긴 채로(남은 틱을 다시 채움), 멈추면 새 자리에 한 번 그린다
             self._scroll_flag = False
-            self._settle_left = SETTLE_TICKS
+            self._scroll_hold = SETTLE_TICKS
+            self._hide_overlay("스크롤 중 — 멈추면 새 자리에 다시 그림")
+        if self._scroll_hold > 0:
+            self._scroll_hold -= 1
+            if self._scroll_hold == 0:
+                self._need_query = True          # 스크롤이 멈췄다 → 새 자리를 한 번 받아 그린다
         if self._settle_left > 0:
             self._settle_left -= 1
             self._need_query = True
@@ -1513,14 +1854,40 @@ class SourceHighlighter:
             self._need_query = True
         self._flush_query()
 
+    def _visible_ok(self, root):
+        """막을 보여도 되나. 대상 창이 최소화가 아니고, 전경이거나 — 전경이 아니어도 막 자리가 가려지지 않았으면 True.
+
+        2026-09-29 사용자 결정 "막 자리가 안 가려지면 유지": 예전엔 대상 창이 전경일 때만 보여서, 다른 앱을 누르면
+        VS Code 가 그대로 보이는데도 막이 사라졌다. 막은 항상 맨 위 창이라 다른 창이 그 자리를 덮으면 그 위에 뜨므로,
+        막 자리 다섯 점(_probe_points)의 맨 위 창이 모두 대상 창(또는 이 앱의 창 — 막·하단 바)일 때만 유지한다.
+        가벼운 Win32 조회(WindowFromPoint)만 쓴다 — UIA 아님. 조회 수단이 없는 환경이면 예전처럼 전경일 때만.
+        """
+        if self._win.is_iconic(root):
+            return False
+        if self._win.foreground_root() == root:
+            return True
+        root_at = getattr(self._win, "root_at", None)
+        box = self._shown_box
+        if root_at is None or not box:
+            return False
+        for x, y in _probe_points(box):
+            h = root_at(x, y)
+            if h == root:
+                continue
+            if h and self._win.pid_of(h) == self._win.own_pid:
+                continue
+            return False
+        return True
+
     # ── 사각형 받기·그리기 ────────────────────────────────────────────
 
     def _select(self, idx):
         """칠할 조각을 idx 로 바꾸고 사각형을 (보이게 스크롤하며) 받으러 보낸다."""
         self._current_idx = idx
+        self._current_caption = self._want_caption if idx == self._want_idx else None
         if idx not in self._mapped:
             self._raw_rects = []
-            self._hide_overlay()                 # 원문에 맞추지 못한 조각 — 칠하지 않는다
+            self._hide_overlay(f"조각 {idx + 1} 은 원문에서 자리를 못 찾음")   # 원문에 맞추지 못한 조각 — 칠하지 않는다
             return
         self._reveal_pending = True
         self._need_query = True
@@ -1529,7 +1896,8 @@ class SourceHighlighter:
     def _flush_query(self):
         """보낼 요청이 있고, 보낸 것이 안 돌아온 게 없고, 대상 창이 전경이면 UIA 스레드에 사각형을 묻는다."""
         if (self._state != "active" or not self._need_query or self._inflight
-                or self._current_idx not in self._mapped or self._fg_ok is False):
+                or self._current_idx not in self._mapped or self._fg_ok is False
+                or self._scroll_hold > 0):      # 스크롤 중에는 묻지 않는다(요청은 남겨 두었다가 멈춘 뒤 보낸다)
             return
         self._need_query = False
         reveal, self._reveal_pending = self._reveal_pending, False
@@ -1539,21 +1907,70 @@ class SourceHighlighter:
     def _redraw(self):
         """받아 둔 사각형을 대상 창·문서 영역으로 잘라 막에 그린다. 전경이 아니면 숨긴 채로 둔다."""
         if self._fg_ok is False or self._state != "active":
-            self._hide_overlay()
+            self._hide_overlay("막 자리가 다른 창에 가려짐·대상 창 최소화" if self._fg_ok is False
+                               else "칠하기 동작 중 아님")
+            return
+        if self._scroll_hold > 0:
+            # 휠 전에 보낸 요청의 결과가 스크롤 중에 돌아왔다 — 옛 자리라 그리지 않는다(멈춘 뒤 새로 받는다)
+            self._hide_overlay("스크롤 중 — 멈추면 새 자리에 다시 그림")
             return
         bounds = _intersect(self._doc_rect, self._last_win_rect)
         rects = clip_rects(self._raw_rects, bounds)
         if not rects:
-            self._hide_overlay()
+            n = self._current_idx + 1 if isinstance(self._current_idx, int) else "?"
+            if self._raw_rects:
+                reason = f"조각 {n} 이 보이는 영역 밖"
+            elif self._settle_left > 0:
+                reason = "스크롤·창 이동 직후 — 새 위치를 기다림"
+            else:
+                reason = f"조각 {n} 의 사각형이 비었음(화면 밖이거나 원문 앱이 그 부분을 다시 그림)"
+            self._hide_overlay(reason)
             return
         if self._overlay is None:
             self._overlay = self._overlay_factory(self._root)
+        caption = self._current_caption
+        if caption:
+            # 문단 일부만 보이면(화면 밖 줄이 빠졌거나 보이는 영역 경계에 잘림) 번역문 막 대신 노랑 — 2026-09-29 사용자 결정.
+            # 보이는 줄만으로 막을 그리면 폭이 그 줄 폭(마지막 짧은 줄이면 75px)이 돼 세로로 길쭉해졌다(실측 로그).
+            partial = (_line_count(self._raw_rects) < self._full_lines.get(self._current_idx, 0)
+                       or _bbox(rects) != _bbox(self._raw_rects))
+            if partial != self._partial_noted:
+                log.info("원문 형광펜: %s", "문단 일부만 보임 — 번역문 막 대신 노랑" if partial
+                         else "문단이 다 보임 — 번역문 막으로")
+                self._partial_noted = partial
+            if partial:
+                caption = None
         try:
-            self._overlay.show(rects)
+            if caption:
+                # 번역문 막: 크기는 잘리기 전 원래 사각형으로, 보이는 영역(bounds)은 마지막에 자르기만
+                ok = self._overlay.show(rects, caption, self._raw_rects, bounds)
+            else:
+                ok = self._overlay.show(rects)
         except Exception:
             log.exception("원문 형광펜 막 그리기 실패")
+            ok = False
+        if ok is False:
+            # 막 창이 그리기에 실패했다(UpdateLayeredWindow 등) — "보임" 으로 기록하지 않는다
+            self._hide_overlay("막 그리기 실패")
+            return
+        if not self._overlay_visible:
+            log.info("원문 형광펜 보임: 조각 %s%s · 막 영역 %s · 보이는 영역 %s",
+                     self._current_idx + 1 if isinstance(self._current_idx, int) else "?",
+                     " (번역문 막)" if caption else "", _bbox(rects), bounds)
+        self._overlay_visible = True
+        self._hidden_reason = None
+        self._shown_box = _bbox(rects)
 
-    def _hide_overlay(self):
+    def _hide_overlay(self, reason=""):
+        """막을 숨긴다. 보이던 막이 숨겨질 때, 또는 숨긴 채로 이유가 바뀔 때만 로그에 남긴다
+        (진단용 — "형광펜이 사라졌다가 다시 안 나타난다". 틱마다 같은 이유를 반복해 찍지 않는다)."""
+        reason = reason or "이유 미상"
+        if self._overlay_visible:
+            log.info("원문 형광펜 숨김: %s", reason)
+        elif reason != self._hidden_reason and self._state == "active":
+            log.info("원문 형광펜 숨긴 채 — 이유 바뀜: %s", reason)
+        self._hidden_reason = reason
+        self._overlay_visible = False
         if self._overlay is not None:
             try:
                 self._overlay.hide()

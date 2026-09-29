@@ -9,3 +9,4 @@ pyinstaller
 ttkbootstrap
 comtypes
 audiotsm
+requests

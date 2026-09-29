@@ -17,7 +17,8 @@ Aside·웨일·크롬에는 크롬 확장이 있어서, 그 브라우저가 전�
 - 언어: Python 3.13.5
 - 플랫폼: Windows 데스크탑 (시스템 트레이 상주 앱)
 - 음성합성: Google Cloud Text-to-Speech API v1 (기본 음성 `ko-KR-Chirp3-HD-Callirrhoe`)
-- 인증: Google Cloud 서비스 계정 JSON (`google_credentials.json`)
+- 인증: Google API 키 두 개 — TTS 키·Gemini 키(번역). 인증 창에 넣어 `whisperer_settings.json` 에 저장 (2026-09-29, 서비스 계정 JSON 에서 바꿈)
+- 번역: Gemini API `gemini-3.5-flash-lite` — `translation.py` (한글이 없는 문장만 번역, 제한 3초)
 - GUI: ttkbootstrap (tkinter 확장), pystray (시스템 트레이), Win32(ctypes) 빨간 점·하단 바·리더 창·원문 위 형광펜 막(포커스 안 뺏는 창)
 - 원문 위 형광펜: UI Automation (comtypes) — `source_highlight.py` 전용 스레드에서만
 - 오디오: sounddevice (`OutputStream` 연속 재생), numpy, winsound (비프음)
@@ -55,8 +56,10 @@ python -m pip install -r requirements.txt
 - 테스트 목적의 임시 파일은 반드시 시스템 `/tmp` (Windows: `%TEMP%`)에 생성하고, 확인 후 삭제한다.
 
 ### 인증 및 민감 정보
-- Google Cloud 서비스 계정 JSON 키: `google_credentials.json` (gitignore됨). 인증 창에서 고른 파일을 앱 폴더에 이 이름으로 복사한다.
-- 설정 파일: `whisperer_settings.json` (gitignore됨)
+- API 키 두 개(TTS 키·Gemini 키): 인증 창에 입력 → `whisperer_settings.json` 에 평문 저장. 키 하나로 둘 다는 안 된다
+  (Gemini 키는 서비스 계정 바인딩이라 TTS 401, TTS 키는 Gemini 403 — 2026-09-29 실측). `.env` 는 앱이 읽지 않는다.
+- 설정 파일: `whisperer_settings.json` (gitignore됨 — 키가 들어 있다. 콘솔 출력은 `_mask_keys` 로 가린다)
+- `google_credentials.json`: 옛 서비스 계정 키. 더 이상 안 쓰지만 지우지 않았다(gitignore됨)
 - 민감 파일은 절대 Git에 커밋하지 않는다.
 
 ---
@@ -155,7 +158,7 @@ BluemingReadAloud/
   messages.py               # 다국어 메시지 모듈
   whisperer_settings.json   # 런타임 설정 (gitignore)
   requirements.txt          # pip 의존성
-  google_credentials.json   # Google Cloud 서비스 계정 키 (gitignore)
+  google_credentials.json   # 옛 서비스 계정 키 — 2026-09-29 부터 안 씀 (gitignore)
   favicon.ico               # 앱 아이콘
   open_console.bat          # 콘솔 로그 모니터링 (콘솔 열기 때마다 앱이 다시 씀)
   BluemingReadAloud.spec    # PyInstaller 빌드 스펙 (gitignore)
@@ -179,7 +182,7 @@ BluemingReadAloud/
 - `setup_tray_icon()` -- 시스템 트레이 메뉴 구성(TTS 설정…·리더 창 사용·브라우저에서 비활성화·텍스트 선택 시 읽기 버튼·종료 다섯 개만), `check_gui_queue()` -- 스레드→GUI 통로(100ms 폴링)
 - `setup_selection_button()` / `setup_mouse_listener()` / `toggle_selection_button()` -- 빨간 점 창·전역 마우스 훅 시작 / 트레이 켬·끔
 - `_make_selection_hook()` -- 훅 스레드용 가벼운 판정(점 누름·우리 창 위 동작 거르기, gui_queue 로 보이기/숨기기)
-- `show_api_key_dialog()` -- Google 인증 파일 선택 UI
+- `show_api_key_dialog()` -- API 키 두 개(TTS·Gemini) 입력 UI. 저장 때 키마다 확인 요청 1회
 - `show_tts_settings_dialog()` -- TTS 설정 UI (음성·미리듣기·속도·단축키 + 일반: 언어·인증 설정 버튼·콘솔 창 열기 버튼)
 - `open_console_window()` / `_apply_language()` -- 콘솔 창 열기 / 언어 바꾸기(트레이 문구도 새 언어로)
 - `save_settings()` / `load_settings()` -- JSON 설정 저장/로드

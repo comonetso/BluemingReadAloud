@@ -900,13 +900,16 @@ def load_english_words(path):
 # 공개 함수
 # ════════════════════════════════════════════════════════════════════
 
-def split_for_reading(source_text, lang, voice_lang=None, words=None):
+def split_for_reading(source_text, lang, voice_lang=None, words=None, keep_raw=False):
     """원문 → 읽을 조각 목록 [{"text", "src_start", "src_end"}].
 
     text: 음성에 보낼 글(읽기용 변환 뒤). src_start/src_end: 원문 기준 반열린 구간.
     원문에 맞추지 못하면 src_start/src_end 가 None 이다(확장처럼 형광펜만 포기하고 읽기는 계속).
     lang: 조각 나누기 규칙용 언어(확장 options.lang). voice_lang: 읽기용 변환용 음성 언어(없으면 lang).
     words: 영어 단어 목록(load_english_words). 없으면 영어 단어 규칙이 꺼진다.
+    keep_raw: True 면 조각마다 "raw"(읽기용 변환 전 조각 글 — build_segments 결과)도 담는다.
+      번역(translation.py)이 쓴다 — 변환된 영어(카멜케이스 쪼개기·약어 풀기)를 번역하면 품질이 떨어져서,
+      번역은 변환 전 글에 하고 변환은 번역 뒤에 한다.
     """
     if not source_text:
         return []
@@ -919,9 +922,12 @@ def split_for_reading(source_text, lang, voice_lang=None, words=None):
     result = []
     for i, seg in enumerate(segments):
         span = alignment.segment_range(i) if alignment is not None else None
-        result.append({
+        item = {
             "text": spoken_text(seg, spoken_lang, words).text,
             "src_start": span[0] if span else None,
             "src_end": span[1] if span else None,
-        })
+        }
+        if keep_raw:
+            item["raw"] = seg
+        result.append(item)
     return result

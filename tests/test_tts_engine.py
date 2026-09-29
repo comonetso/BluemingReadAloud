@@ -20,6 +20,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import readaloud_text  # noqa: E402
+import translation  # noqa: E402
 import tts_engine  # noqa: E402
 from tts_engine import TtsSession  # noqa: E402
 
@@ -1092,6 +1093,65 @@ class TestSynthCache(EngineTestBase):
         self.assertIsNone(new.session._previous)
 
 
+def fatal_audio(bad, attempts=None):
+    """audio_of: 조각 bad 의 요청이면 SegmentFailed(번역 실패 흉내). attempts 가 있으면 그 횟수만큼만 실패한다."""
+    left = {"n": attempts}
+
+    def audio_of(idx, rate, sec):
+        if idx in bad and (left["n"] is None or left["n"] > 0):
+            if left["n"] is not None:
+                left["n"] -= 1
+            raise tts_engine.SegmentFailed(f"번역 실패 {idx}")
+        return block_audio(idx, sec)
+    return audio_of
+
+
+class TestSegmentFailed(EngineTestBase):
+    """SegmentFailed(번역 실패) — 건너뛰지 않고 그 조각 차례에 멈춘다 (2026-09-29 사용자 결정)."""
+
+    def test_stops_at_failed_segment_after_earlier_segments_play(self):
+        h = Harness(["가.", "나.", "다.", "라."], seconds=lambda i, r: 0.3, audio_of=fatal_audio({2}))
+        runs = h.run()
+        # 앞 조각(0·1)은 끝까지 들리고, 실패한 조각 2 에서 멈춘다(3 은 들리지 않음)
+        self.assertEqual(runs, [(0, 0, 3), (1, 0, 3)])
+        events = h.all_events()
+        kinds = [k for k, _ in events]
+        self.assertEqual(kinds.count("segment_failed"), 1)
+        failed = [d for k, d in events if k == "segment_failed"][0]
+        self.assertEqual(failed, {"index": 2, "message": "번역 실패 2"})
+        # 순서: segment_failed → (마지막) state STOPPED → session_end
+        i = kinds.index("segment_failed")
+        self.assertEqual(kinds[-1], "session_end")
+        self.assertEqual(kinds[-2], "state")
+        self.assertEqual(events[-2][1]["state"], "STOPPED")
+        self.assertLess(i, len(kinds) - 2)
+        # 정상 종료처럼 남은 버퍼를 들려주고 닫는다(abort 아님). 끝 드레인 무음은 "다 읽음" 때만이라 없다
+        self.assertTrue(h.stream.stopped and h.stream.closed)
+        self.assertFalse(h.stream.aborted)
+        self.assertTrue(h.stream.written()[-1].any())
+
+    def test_first_segment_failure_plays_nothing(self):
+        h = Harness(["가.", "나."], seconds=lambda i, r: 0.3, audio_of=fatal_audio({0}))
+        self.assertEqual(h.run(), [])
+        self.assertEqual([d for k, d in h.all_events() if k == "segment_failed"],
+                         [{"index": 0, "message": "번역 실패 0"}])
+        self.assertEqual(h.kinds()[-1], "session_end")
+
+    def test_move_forgets_failure_and_retries(self):
+        # 조각 1 은 첫 요청만 실패한다. 조각 0 을 읽는 동안 실패가 기록된 뒤 "다음" → 이동하면 다시 요청해서 읽는다
+        def forward_after_failure(h):
+            assert wait_until(lambda: 1 in h.session._failed), "조각 1 실패가 기록되지 않았다"
+            h.session.forward()
+        h = Harness(["가.", "나.", "다."], seconds=lambda i, r: 2.0 if i == 0 else 0.3,
+                    audio_of=fatal_audio({1}, attempts=1),
+                    hooks=[(at_block(0, 2), forward_after_failure)])
+        runs = h.run()
+        self.assertEqual([r[0] for r in runs], [0, 1, 2])
+        self.assertEqual(runs[1], (1, 0, 3))
+        self.assertNotIn("segment_failed", h.kinds())
+        self.assertEqual([i for i, _ in h.synth.called()].count(1), 2)
+
+
 # ════════════════════════════════════════════════════════════════════
 # whisperer.py 연결부 — import 하지 않는다(트레이·전역 키보드 훅이 뜬다).
 # 소스에서 필요한 함수만 AST 로 뽑아 가짜 부품(가짜 합성·가짜 스트림·가짜 바/리더)과 함께 돌린다.
@@ -1102,7 +1162,9 @@ _GLUE_FUNCS = ["stop_current_playback", "_make_tts_event_handler", "speak_text",
                "_hide_reading_ui", "_handle_tts_event", "toggle_reader_window",
                # 원문 위 형광펜 연결(2026-09-28) — speak_text·_handle_tts_event·_show_reader_window 가 부른다
                "_ensure_source_highlighter", "_source_highlight_active", "_source_highlight_blocks_reader",
-               "_begin_source_highlight", "_on_source_highlight_result", "_end_source_highlight"]
+               "_begin_source_highlight", "_on_source_highlight_result", "_end_source_highlight",
+               # 번역문 막(2026-09-29) — _handle_tts_event 가 부른다
+               "_caption_for"]
 _GLUE_VARS = ["_tts_state_lock"]
 
 
@@ -1172,8 +1234,13 @@ def _load_glue(ui_log):
             return s
         return open_stream
 
+    synth_texts = []   # 합성에 실제로 들어간 글(번역 시험용)
+
     def make_synth(client, tts, voice_name, sample_rate=SR, log=None):
-        return lambda text, rate: np.full(int(SR * 10.0), 1000, dtype=np.int16)   # 조각마다 10초 소리(100블록 ≈ 0.5초)
+        def synth(text, rate):
+            synth_texts.append(text)
+            return np.full(int(SR * 10.0), 1000, dtype=np.int16)   # 조각마다 10초 소리(100블록 ≈ 0.5초)
+        return synth
 
     engine = types.SimpleNamespace(**{k: getattr(tts_engine, k) for k in dir(tts_engine) if not k.startswith("__")})
     engine.sounddevice_stream_factory = stream_factory
@@ -1196,6 +1263,11 @@ def _load_glue(ui_log):
         # 원문 위 형광펜: 기본은 "모듈 없음"(None) — 예전 리더 창 흐름 그대로. 형광펜을 시험할 땐 테스트가 바꿔 넣는다
         "SourceHighlighter": None, "source_highlighter": None, "source_highlight_enabled": True,
         "_source_hl_session": None, "_source_hl_state": None, "_reading_ui_session": None,
+        # 번역(2026-09-29): 기본은 끔 — 예전 흐름 그대로. 번역을 시험할 땐 테스트가 켜고 가짜 번역기를 넣는다
+        "translation": translation, "translate_enabled": False, "gemini_translator": None,
+        "translation_overlay_enabled": True, "_translation_lookup": None,
+        "_notify_segment_failed": lambda data: ui_log.append(("notify_failed", data)),
+        "_synth_texts": synth_texts,
     })
     exec(code, ns)
     return ns
@@ -1230,6 +1302,137 @@ class TestWhispererGlue(EngineTestBase):
             if s is not None:
                 s.stop()
         super().tearDown()
+
+    KO_LINE = "첫째 줄입니다 그리고 이어지는 글이 조금 더 있습니다 README 를 봅니다"
+    EN_LINE = "This line is written only in English and it is long enough to stand alone."
+
+    def test_translation_off_sends_spoken_text_as_before(self):
+        ui = []
+        ns = self.ns = _load_glue(ui)
+        calls = []
+        dict.__setitem__(ns, "gemini_translator", lambda xs: calls.append(xs) or xs)
+        ns["speak_text"](self.KO_LINE + "\n" + self.EN_LINE)
+        self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))
+        self.assertEqual(calls, [])
+        ns["stop_tts"]()
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+
+    def test_translation_on_translates_only_foreign_segment(self):
+        ui = []
+        ns = self.ns = _load_glue(ui)
+        calls = []
+
+        def fake_translate(xs):
+            calls.append(list(xs))
+            return ["영어로만 쓴 줄입니다" for _ in xs]
+        dict.__setitem__(ns, "translate_enabled", True)
+        dict.__setitem__(ns, "gemini_translator", fake_translate)
+        ns["speak_text"](self.KO_LINE + "\n" + self.EN_LINE)
+        self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))
+        self.assertEqual(calls, [[self.EN_LINE]])               # 한국어 조각은 번역하지 않는다
+        self.assertIn("README", ns["_synth_texts"][0])          # 한국어 조각 속 영어 용어는 그대로
+        self.assertIn("영어로만 쓴 줄입니다", ns["_synth_texts"][1])
+        self.assertNotIn("English", ns["_synth_texts"][1])
+        ns["stop_tts"]()
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+        self.assertFalse([u for u in ui if u[0] == "notify_failed"])
+
+    def test_translated_segment_passes_caption_to_source_highlighter(self):
+        # 원문 위 형광펜이 칠하는 중("on")일 때: 번역된 조각은 번역문을, 아닌 조각은 None 을 넘긴다
+        ui = []
+        ns = self.ns = _load_glue(ui)
+
+        class FakeHL:
+            active = True
+
+            def __init__(self):
+                self.calls = []
+
+            def highlight(self, idx, caption=None):
+                self.calls.append((idx, caption))
+        dict.__setitem__(ns, "translate_enabled", True)
+        dict.__setitem__(ns, "gemini_translator", lambda xs: ["영어로만 쓴 줄입니다" for _ in xs])
+        ns["speak_text"](self.KO_LINE + "\n" + self.EN_LINE)
+        session = dict.__getitem__(ns, "tts_session")
+        self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))   # 두 조각 모두 번역·합성 끝
+        self.assertIs(dict.__getitem__(ns, "_translation_lookup")[0], session)
+        hl = FakeHL()
+        dict.__setitem__(ns, "source_highlighter", hl)
+        dict.__setitem__(ns, "_source_hl_session", session)
+        dict.__setitem__(ns, "_source_hl_state", "on")
+        ns["_handle_tts_event"](session, "segment", 0)
+        ns["_handle_tts_event"](session, "segment", 1)
+        self.assertEqual(hl.calls, [(0, None), (1, "영어로만 쓴 줄입니다")])
+        dict.__setitem__(ns, "translation_overlay_enabled", False)       # 설정에서 끄면 노랑 형광펜만
+        ns["_handle_tts_event"](session, "segment", 1)
+        self.assertEqual(hl.calls[-1], (1, None))
+        dict.__setitem__(ns, "source_highlighter", None)
+        ns["stop_tts"]()
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+        self.assertIsNone(dict.__getitem__(ns, "_translation_lookup"))   # 읽기가 끝나면 번역 결과를 놓는다
+
+    def test_first_segment_repainted_when_translation_arrives_after_highlight(self):
+        # 2026-09-29 실사용 버그: 첫 조각은 "칠하기(segment 알림)" 가 번역보다 먼저라 노랑으로 남았다.
+        # 번역을 붙잡아 두어 그 순서를 만들고, 번역이 도착하면 같은 조각을 번역문 막으로 다시 칠하는지 본다.
+        ui = []
+        ns = self.ns = _load_glue(ui)
+        gate = threading.Event()
+
+        class FakeHL:
+            active = True
+
+            def __init__(self):
+                self.calls = []
+
+            def highlight(self, idx, caption=None):
+                self.calls.append((idx, caption))
+
+        def slow_translate(xs):
+            gate.wait(5)
+            return ["영어로만 쓴 줄입니다" for _ in xs]
+        dict.__setitem__(ns, "translate_enabled", True)
+        dict.__setitem__(ns, "gemini_translator", slow_translate)
+        ns["speak_text"](self.EN_LINE)                       # 조각 하나 = 첫 조각이 번역 대상
+        session = dict.__getitem__(ns, "tts_session")
+        hl = FakeHL()
+        dict.__setitem__(ns, "source_highlighter", hl)
+        dict.__setitem__(ns, "_source_hl_session", session)
+        dict.__setitem__(ns, "_source_hl_state", "on")
+        ns["_handle_tts_event"](session, "segment", 0)     # 번역 전 칠하기 → 번역문 없음(노랑)
+        self.assertEqual(hl.calls[-1], (0, None))
+        gate.set()                                          # 번역 도착
+        self.assertTrue(_pump(ns, lambda: hl.calls[-1] == (0, "영어로만 쓴 줄입니다")),
+                        f"번역이 도착하면 같은 조각을 번역문으로 다시 칠해야 한다: {hl.calls}")
+        dict.__setitem__(ns, "source_highlighter", None)
+        ns["stop_tts"]()
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+
+    def test_translation_failure_stops_and_notifies(self):
+        ui = []
+        ns = self.ns = _load_glue(ui)
+
+        def broken(xs):
+            raise translation.TranslationError("번역 요청 실패 (HTTP 403): 권한 없음")
+        dict.__setitem__(ns, "translate_enabled", True)
+        dict.__setitem__(ns, "gemini_translator", broken)
+        ns["speak_text"](self.EN_LINE + "\n" + self.KO_LINE)   # 첫 조각이 번역 대상 → 바로 멈춤
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+        failed = [u for u in ui if u[0] == "notify_failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0][1]["index"], 0)
+        self.assertIn("HTTP 403", failed[0][1]["message"])
+        self.assertFalse(dict.__getitem__(ns, "tts_playing"))
+        self.assertIn(("bar.hide",), ui)
+
+    def test_translation_without_translator_stops_and_notifies(self):
+        ui = []
+        ns = self.ns = _load_glue(ui)
+        dict.__setitem__(ns, "translate_enabled", True)       # gemini_translator 는 None(인증 전)
+        ns["speak_text"](self.EN_LINE)
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+        failed = [u for u in ui if u[0] == "notify_failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("번역기", failed[0][1]["message"])
 
     def test_old_session_end_cannot_clobber_new_reading(self):
         # 옛 읽기의 재생 스레드가 끝 알림에서 "내가 지금 세션인가" 를 확인한 바로 그 순간에 멈춰 세우고,

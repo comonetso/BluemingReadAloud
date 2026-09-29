@@ -292,6 +292,80 @@ messages = {
     "menu_selection_button": {
         "ko": "텍스트 선택 시 읽기 버튼",
         "en": "Read button on selected text"
+    },
+    # ── 주 언어가 아닌 문장 번역 (2026-09-29, translation.py) ──
+    # 설정 창 "일반" 체크 (whisperer.py show_tts_settings_dialog)
+    "label_translate_foreign": {
+        "ko": "주 언어가 아닌 문장은 번역해서 읽기",
+        "en": "Translate sentences not in the voice language before reading"
+    },
+    # 설정 창 "일반" 체크 — 번역된 조각은 원문 위 막에 번역문을 쓴다 (whisperer.py translation_overlay_enabled)
+    "label_translate_overlay": {
+        "ko": "번역문을 원문 위에 막으로 표시",
+        "en": "Show the translation over the original text"
+    },
+    # 번역 실패로 읽기를 멈췄을 때의 경고 창 (whisperer.py _notify_segment_failed). {0} = 실패 이유
+    "translate_failed_title": {
+        "ko": "번역 실패",
+        "en": "Translation failed"
+    },
+    "translate_failed_body": {
+        "ko": "문장을 번역하지 못해 읽기를 멈췄습니다.\n\n{0}",
+        "en": "Reading stopped because a sentence could not be translated.\n\n{0}"
+    },
+    # ── 인증 창 — API 키 두 개 (2026-09-29, whisperer.py show_api_key_dialog) ──
+    "auth_title": {
+        "ko": "Google API 키 설정",
+        "en": "Google API Keys"
+    },
+    "auth_help": {
+        "ko": ("API 키 두 개를 넣어 주세요.\n\n"
+               "· TTS 키 (필수): Cloud Text-to-Speech API 를 허용한 키\n"
+               "· Gemini 키 (번역용): Gemini API 를 허용한 키. 비워 두면 번역할 문장이 나올 때 읽기를 멈추고 알립니다.\n\n"
+               "구글 정책상 키 하나로 둘 다 쓸 수 없습니다. 키는 Google Cloud 콘솔 → API 및 서비스 → 사용자 인증 정보에서 만듭니다:\n"
+               "https://console.cloud.google.com/apis/credentials"),
+        "en": ("Enter two API keys.\n\n"
+               "· TTS key (required): a key allowed to use the Cloud Text-to-Speech API\n"
+               "· Gemini key (for translation): a key allowed to use the Gemini API. If empty, reading stops with a notice "
+               "when a sentence needs translation.\n\n"
+               "Google does not allow one key for both. Create keys in Google Cloud Console → APIs & Services → Credentials:\n"
+               "https://console.cloud.google.com/apis/credentials")
+    },
+    "auth_tts_key": {
+        "ko": "TTS 키:",
+        "en": "TTS key:"
+    },
+    "auth_gemini_key": {
+        "ko": "Gemini 키:",
+        "en": "Gemini key:"
+    },
+    "auth_show_keys": {
+        "ko": "키 보이기",
+        "en": "Show keys"
+    },
+    "auth_need_tts_key": {
+        "ko": "TTS 키를 넣어 주세요.",
+        "en": "Enter the TTS key."
+    },
+    "auth_checking": {
+        "ko": "키 확인 중…",
+        "en": "Checking keys…"
+    },
+    "auth_tts_key_failed": {
+        "ko": "TTS 키 확인 실패: {0}",
+        "en": "TTS key check failed: {0}"
+    },
+    "auth_gemini_key_failed": {
+        "ko": "Gemini 키 확인 실패: {0}",
+        "en": "Gemini key check failed: {0}"
+    },
+    "auth_error": {
+        "ko": "오류: {0}",
+        "en": "Error: {0}"
+    },
+    "auth_saved": {
+        "ko": "✓ API 키 설정이 완료되었습니다.",
+        "en": "✓ API keys saved."
     }
 }
 

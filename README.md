@@ -36,25 +36,36 @@ Click the dot or press the hotkey, and the text is read back to you.
   browser windows the red dot does not appear and the hotkey does not start a new reading (it can still stop a
   reading in progress). Toggle it with **Disable in Browsers** in the tray (on by default). Web views inside other
   apps (e.g. VS Code) are not affected.
+- **Translate foreign sentences before reading**: a sentence with no Hangul at all is translated into Korean with
+  Gemini and then read. English terms inside Korean sentences (`useState`, …) are left as they are. A translated part
+  is shown as a dark-gray caption box over the original lines (yellow highlight if the paragraph is only partly
+  visible). If a translation fails, reading stops at that sentence with a notice.
 - **System tray**: The app runs in the background with a tray icon (see the menu below).
 - **Settings window**: Choose a Korean voice (default `ko-KR-Chirp3-HD-Callirrhoe`), preview it, change the speaking
-  rate, the hotkey and the interface language (한국어 / English), set the Google Cloud credentials, open the console.
+  rate, the hotkey and the interface language (한국어 / English), turn translation and the caption box on / off,
+  set the API keys, open the console.
 - **Single instance**: A second copy of the app will not start.
 
 ## Requirements
 
 - Windows
-- A Google Cloud **service account JSON key** for a project with the Cloud Text-to-Speech API enabled
+- **Two Google Cloud API keys**
+  - **TTS key** (required): a key allowed to use the Cloud Text-to-Speech API
+  - **Gemini key** (for translation): a key allowed to use the Gemini API. Google binds Gemini keys to a service
+    account, and a bound key cannot call TTS, so one key cannot do both
 - Internet connection
 - An audio output device
 
-## Google Cloud Credentials
+## Google API Keys
 
-1. On first run (or when no valid key is found) a dialog asks for the service account JSON file.
-2. The selected file is copied into the app folder as `google_credentials.json` and used from then on.
-3. You can change it later from the tray menu → **TTS Settings…** → **Credentials** button.
+1. On first run (or when there is no TTS key) a dialog asks for the keys. Paste them and press **Save**.
+2. Each key is checked once on Save. A wrong key (including the two swapped) shows the reason and nothing is saved.
+   The Gemini key may be left empty; then reading stops with a notice when a sentence needs translation.
+3. The keys are stored in `whisperer_settings.json`. Change them later from the tray menu → **TTS Settings…** →
+   **Credentials**.
 
-Never commit or share `google_credentials.json`.
+`whisperer_settings.json` holds the keys in plain text — never commit or share it.
+(The old `google_credentials.json` is no longer used.)
 
 ## How to Use
 
@@ -70,7 +81,8 @@ Right-click the tray icon:
 - **TTS Settings…**: opens the settings window
   - voice model (with preview), speaking rate, hotkey
   - General: language (한국어 / English — applied when you press **Save**; the tray menu switches too),
-    **Credentials** (change the service account JSON key), **Open Console** (live log, for troubleshooting)
+    **Translate sentences not in the voice language** · **Show the translation over the original text** (both on by
+    default), **Credentials** (the two API keys), **Open Console** (live log, for troubleshooting)
 - **Use Reader Window** (check): show the reader window when the app cannot paint over the original text
 - **Disable in Browsers** (check): pause the red dot and the hotkey in Aside, Whale and Chrome (on by default)
 - **Read button on selected text** (check): turn the red dot on / off
@@ -98,10 +110,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 
 ## Files
 
-- `whisperer_settings.json`: settings (language, hotkey, voice, speaking rate / volume, reader window, red dot on / off,
-  disable in browsers, and `source_highlight_enabled` — the highlighter on the original text; this one is not in any
-  menu and can only be changed in the file)
-- `google_credentials.json`: Google Cloud service account key
+- `whisperer_settings.json`: settings (the two API keys, language, hotkey, voice, speaking rate / volume, reader window,
+  red dot on / off, disable in browsers, translation / caption box on / off, and `source_highlight_enabled` — the
+  highlighter on the original text; this one is not in any menu and can only be changed in the file)
 - `logs/`: log files
 
 These are created in the app's working folder.

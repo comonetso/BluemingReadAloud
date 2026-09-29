@@ -218,6 +218,89 @@ class RectTest(unittest.TestCase):
         self.assertEqual(pixel(13, 14), bytes(4))
 
 
+@unittest.skipUnless(sys.platform == "win32", "번역문 막은 Windows GDI 로 그린다")
+class CaptionBitmapTest(unittest.TestCase):
+    """번역문 막(2026-09-29): 원문 줄 자리를 덮고, 짙은 회색 바탕 + 옅은 회색 글씨 + 노랑 테두리, 넘치면 아래로 늘린다."""
+
+    RECTS = [(100, 200, 500, 220), (100, 220, 380, 240)]   # 두 줄, 줄 높이 20, 둘째 줄이 더 짧다
+
+    @staticmethod
+    def pixel(result, x, y):
+        left, top, w, h, bits = result
+        o = ((y - top) * w + (x - left)) * 4
+        b, g, r, a = bits[o:o + 4]
+        return (r, g, b, a)
+
+    def test_covers_box_with_border_and_opaque_background(self):
+        edge = sh.CAPTION_BORDER_PX + sh.CAPTION_PAD_PX
+        res = sh.build_caption_bitmap(self.RECTS, "짧은 번역문")
+        left, top, w, h, bits = res
+        # 줄마다 너비가 달라도 상자 전체(100~500 × 200~240)를 덮고, 테두리+여백만큼 바깥으로 크다
+        self.assertEqual((left, top, w, h), (100 - edge, 200 - edge, 400 + 2 * edge, 40 + 2 * edge))
+        self.assertEqual(len(bits), w * h * 4)
+        self.assertTrue(all(bits[i] == 255 for i in range(3, len(bits), 4)), "전부 불투명 — 원문이 비치지 않게")
+        self.assertEqual(self.pixel(res, left, top), sh.CAPTION_BORDER + (255,))            # 모서리 = 노랑 테두리
+        self.assertEqual(self.pixel(res, 490, 235), sh.CAPTION_BG + (255,))                # 글 없는 안쪽 = 짙은 회색
+        self.assertEqual(sh.CAPTION_BG, (0x38, 0x38, 0x38))
+        self.assertEqual(sh.CAPTION_FG, (0xCC, 0xCC, 0xCC))   # 옅은 회색(사용자 "흰색은 너무 밝다")
+
+    def test_draws_text_in_first_line(self):
+        res = sh.build_caption_bitmap(self.RECTS, "가나다라마바사")
+        # ClearType 은 가장자리에 색을 섞으므로 "바탕보다 확실히 밝은 픽셀" 을 센다
+        bright = sum(1 for y in range(200, 220) for x in range(100, 250)
+                     if sum(self.pixel(res, x, y)[:3]) > sum(sh.CAPTION_BG) + 200)
+        self.assertGreater(bright, 20, "첫 줄 자리에 글자가 있어야 한다")
+        empty = sum(1 for y in range(222, 238) for x in range(100, 250)
+                    if sum(self.pixel(res, x, y)[:3]) > sum(sh.CAPTION_BG) + 200)
+        self.assertEqual(empty, 0, "한 줄짜리 글이면 둘째 줄 자리는 비어 있다")
+
+    def test_long_text_grows_downward_only(self):
+        short = sh.build_caption_bitmap(self.RECTS, "짧다")
+        long = sh.build_caption_bitmap(self.RECTS, "아주 긴 번역문입니다 " * 12)
+        self.assertEqual(short[:3], long[:3], "위치·너비는 원문 자리 그대로")
+        self.assertGreater(long[3], short[3], "넘치면 막을 아래로 늘린다")
+        self.assertEqual((long[3] - short[3]) % 20, 0, "늘어나는 만큼은 원문 줄 높이 단위")
+
+    def test_clip_crops_after_drawing_at_original_size(self):
+        # 2026-09-29 결함: 잘린 사각형으로 글꼴을 정해 글씨가 작아졌다. 이제 원래 크기로 그리고 보이는 영역만 자른다
+        text = "번역문 줄이 여러 개가 되도록 조금 길게 씁니다 " * 3
+        full = sh.build_caption_bitmap(self.RECTS, text)
+        clip = (100, 212, 450, 236)                       # 첫 줄 일부만 보이고 오른쪽도 잘린 상황
+        cut = sh.build_caption_bitmap(self.RECTS, text, clip)
+        left, top, w, h, bits = cut
+        self.assertEqual((left, top, left + w, top + h), clip, "보이는 영역만 남는다")
+        # 잘린 그림은 원래 크기로 그린 그림의 그 부분과 픽셀까지 같다(= 글꼴·줄바꿈이 원래 크기 기준)
+        fl, ft, fw, fh, fbits = full
+        for y in (0, h // 2, h - 1):
+            row_full = fbits[((top - ft + y) * fw + (left - fl)) * 4:((top - ft + y) * fw + (left - fl) + w) * 4]
+            self.assertEqual(bits[y * w * 4:(y + 1) * w * 4], row_full)
+
+    def test_clip_outside_returns_none(self):
+        self.assertIsNone(sh.build_caption_bitmap(self.RECTS, "가나다", (0, 0, 50, 50)))
+
+    def test_font_fits_line_height(self):
+        gdi = sh._GdiText()
+        try:
+            size = gdi.fit(20)
+            self.assertLessEqual(gdi.height(), 20)
+            gdi.set_size(size + 1)
+            self.assertGreater(gdi.height(), 20, "줄 높이 안에 들어가는 가장 큰 글꼴")
+            self.assertGreater(gdi.width("가나다"), gdi.width("가"))
+        finally:
+            gdi.close()
+
+    def test_wrap_keeps_newlines_and_breaks_long_words(self):
+        measure = lambda s: 10 * len(s)      # noqa: E731 — 글자당 10px 가짜 자
+        lines = sh._wrap_caption("첫 줄\n\n" + "가" * 40 + "\n둘 셋 넷 다섯 여섯 일곱", measure, 50)
+        self.assertEqual(lines[0], "첫 줄")
+        self.assertTrue(all(measure(ln) <= 50 for ln in lines))
+        self.assertEqual("".join(lines[1:9]), "가" * 40)          # 공백 없는 긴 덩어리는 글자 단위로
+        self.assertEqual(lines[9:], ["둘 셋 넷", "다섯 여섯", "일곱"])   # 공백에서 끊는다(딱 50px 은 들어간다)
+
+    def test_emoji_length_for_gdi(self):
+        self.assertEqual(sh._u16len("가😀"), 3)
+
+
 # ════════════════════════════════════════════════════════════════════
 #  가짜 UIA — 크로미움처럼 "글자 묶음 한 칸"으로 움직이는 텍스트 범위
 # ════════════════════════════════════════════════════════════════════
@@ -555,12 +638,23 @@ class FakeEnv:
 class FakeOverlay:
     def __init__(self):
         self.shows = []
+        self.captions = []      # show 마다 받은 번역문(없으면 None) — shows 와 같은 순서
+        self.caption_srcs = []  # 번역문 막 크기 계산용 원래(잘리기 전) 사각형
+        self.clips = []         # 번역문 막을 마지막에 자를 보이는 영역
+        self.fail = False       # True 면 그리기 실패 흉내(False 를 돌려준다)
         self.visible = False
         self.destroyed = False
 
-    def show(self, rects):
+    def show(self, rects, caption=None, caption_src=None, clip=None):
         self.shows.append(list(rects))
+        self.captions.append(caption)
+        self.caption_srcs.append(list(caption_src) if caption_src else None)
+        self.clips.append(clip)
+        if self.fail:
+            self.visible = False
+            return False
         self.visible = True
+        return True
 
     def hide(self):
         self.visible = False
@@ -669,6 +763,111 @@ class HighlighterTest(unittest.TestCase):
         self.assertTrue(self.overlays[-1].visible)
         self.assertEqual(len(self.overlays), 1, "막 창은 하나")
         self.assertEqual(self.doc.forbidden, [])
+
+    def test_caption_reaches_overlay_and_changes_without_rescroll(self):
+        self.make()
+        self.begin()
+        self.hl.highlight(0, "번역문 하나")
+        s, e = self.seg_units(0)
+        want = self.doc.expected_rects(s, e)
+        self.assertTrue(wait(self.root, lambda: self.last_show() == want))
+        self.assertEqual(self.overlays[-1].captions[-1], "번역문 하나")
+        asked = self.doc.count("GetBoundingRectangles")
+        self.hl.highlight(0, "번역문 둘")                  # 같은 조각에 번역문만 바뀜 → 다시 묻지 않고 다시 그린다
+        self.assertEqual(self.overlays[-1].captions[-1], "번역문 둘")
+        self.assertEqual(self.doc.count("GetBoundingRectangles"), asked)
+        self.hl.highlight(1)                                # 번역 안 된 조각 → 노랑(번역문 없음)
+        s1, e1 = self.seg_units(1)
+        self.assertTrue(wait(self.root, lambda: self.last_show() == self.doc.expected_rects(s1, e1)))
+        self.assertIsNone(self.overlays[-1].captions[-1])
+
+    def test_caption_gets_raw_rects_and_visible_bounds(self):
+        # 번역문 막은 크기를 원래(잘리기 전) 사각형으로 정하고, 보이는 영역은 따로 넘겨 마지막에 자르게 한다
+        self.make()
+        self.begin()
+        self.hl.highlight(0, "번역문")
+        s, e = self.seg_units(0)
+        want = self.doc.expected_rects(s, e)
+        self.assertTrue(wait(self.root, lambda: self.last_show() == want))
+        ov = self.overlays[-1]
+        self.assertEqual(ov.caption_srcs[-1], want)
+        self.assertIsNotNone(ov.clips[-1])
+        self.hl.highlight(1)                                  # 번역문 없는 조각은 예전처럼 사각형만
+        s1, e1 = self.seg_units(1)
+        self.assertTrue(wait(self.root, lambda: self.last_show() == self.doc.expected_rects(s1, e1)))
+        self.assertIsNone(ov.caption_srcs[-1])
+        self.assertIsNone(ov.clips[-1])
+
+    def test_failed_draw_is_not_recorded_as_visible(self):
+        # 막 창이 그리기에 실패하면(UpdateLayeredWindow 등) "보임" 으로 기록하지 않는다 — 진단 로그가 거짓말하지 않게
+        self.make()
+        self.begin()
+        self.hl.highlight(0)
+        s, e = self.seg_units(0)
+        self.assertTrue(wait(self.root, lambda: self.last_show() == self.doc.expected_rects(s, e)))
+        self.assertTrue(self.hl._overlay_visible)
+        self.overlays[-1].fail = True
+        self.hl.highlight(1)
+        self.assertTrue(wait(self.root, lambda: len(self.overlays[-1].shows) >= 2 and not self.hl._overlay_visible))
+
+    def two_line_segment(self):
+        """두 줄짜리 조각이 있는 문서로 begin 하고, 그 조각 번호를 돌려준다(test_partly_visible_segment_scrolls 와 같은 문서)."""
+        lines = LINES[:]
+        lines[11] = "긴 줄 시작. " + "가나다라마 " * 3
+        src = "\n\n".join(lines[:11]) + "\n\n" + lines[11] + "\n" + "이어지는 둘째 줄 " * 3 + "\n\n" + "\n\n".join(lines[12:])
+        uia = "\n".join(lines[:11]) + "\n" + lines[11] + "\n" + "이어지는 둘째 줄 " * 3 + "\n" + "\n".join(lines[12:])
+        self.make(uia_text=uia.replace("  ", " "), src=src)
+        self.begin()
+        return next(i for i, sg in enumerate(self.segs) if "긴 줄 시작" in src[sg["src_start"]:sg["src_end"]])
+
+    def test_partial_paragraph_uses_yellow_instead_of_caption(self):
+        # 2026-09-29 사용자 결정: 스크롤로 문단 일부만 보이면 번역문 막 대신 노랑(보이는 줄만으로는 막 폭을 알 수 없다)
+        idx = self.two_line_segment()
+        self.hl.highlight(idx, "번역문")
+        ov = lambda: self.overlays[-1]                     # noqa: E731
+        self.assertTrue(wait(self.root, lambda: len(self.last_show() or []) == 2 and ov().captions[-1] == "번역문"),
+                        "다 보이면 번역문 막")
+        self.doc.scroll = 12                               # 첫 줄이 화면 위로 나감 → 한 줄만 보임
+        self.hl.notify_scroll()
+        self.assertTrue(wait(self.root, lambda: len(self.last_show() or []) == 1 and ov().visible and ov().captions[-1] is None),
+                        "일부만 보이면 노랑")
+        self.doc.scroll = 11                               # 다시 다 보임
+        self.hl.notify_scroll()
+        self.assertTrue(wait(self.root, lambda: len(self.last_show() or []) == 2 and ov().captions[-1] == "번역문"),
+                        "다시 다 보이면 번역문 막")
+
+    def test_overlay_kept_while_not_covered_even_without_focus(self):
+        # 2026-09-29 사용자 결정: 다른 앱이 앞 창이어도 막 자리가 가려지지 않았으면 유지, 덮이면 숨김
+        self.make()
+        self.begin()
+        self.hl.highlight(0)
+        s, e = self.seg_units(0)
+        self.assertTrue(wait(self.root, lambda: self.last_show() == self.doc.expected_rects(s, e)))
+        ov = self.overlays[-1]
+        self.env.root_at = lambda x, y: 777                # 막 자리 맨 위는 여전히 대상 창
+        self.env.fg = 555                                  # 다른 앱이 앞 창이 됨
+        wait(self.root, lambda: False, timeout=0.2)
+        self.assertTrue(ov.visible, "가려지지 않았으면 유지")
+        self.env.root_at = lambda x, y: 555                # 다른 창이 막 자리를 덮음
+        self.assertTrue(wait(self.root, lambda: not ov.visible), "덮이면 숨김")
+        self.env.root_at = lambda x, y: 777                # 덮던 창이 비킴
+        self.assertTrue(wait(self.root, lambda: ov.visible), "비키면 다시 보임")
+        self.env.iconic = True                             # 대상 창 최소화
+        self.assertTrue(wait(self.root, lambda: not ov.visible), "최소화하면 숨김")
+
+    def test_line_count_and_probe_points(self):
+        self.assertEqual(sh._line_count([(0, 0, 10, 20), (12, 0, 30, 20), (0, 20, 5, 40)]), 2)   # 같은 줄 두 사각형
+        self.assertEqual(sh._line_count([]), 0)
+        pts = sh._probe_points((100, 200, 300, 260))
+        self.assertEqual(pts[0], (200, 230))
+        self.assertTrue(all(100 <= x < 300 and 200 <= y < 260 for x, y in pts))
+
+    def test_caption_given_before_begin_result_is_kept(self):
+        self.make()
+        self.hl.begin(self.src, self.segs, lambda ok, why: self.results.append((ok, why)))
+        self.hl.highlight(0, "먼저 온 번역문")              # 결과 전에 온 highlight 는 번역문까지 기억한다
+        self.assertTrue(wait(self.root, lambda: self.overlays and self.overlays[-1].captions))
+        self.assertEqual(self.overlays[-1].captions[-1], "먼저 온 번역문")
 
     def test_segment_with_list_marker_starts_after_marker(self):
         self.make()
@@ -800,6 +999,25 @@ class HighlighterTest(unittest.TestCase):
         want = self.doc.expected_rects(s, e)
         self.assertTrue(wait(self.root, lambda: self.last_show() == want))
         self.assertEqual(want[0][1], FakeDoc.Y0 + 2 * FakeDoc.LH)
+
+    def test_scroll_hides_overlay_until_quiet_then_redraws_once(self):
+        # 2026-09-29 사용자 결정 "스크롤 중엔 숨기기": 휠이 오면 숨기고, 묻지 않다가, 조용해지면 한 번 물어 새 자리에 그린다
+        self.make()
+        self.begin()
+        self.hl.highlight(5)
+        s, e = self.seg_units(5)
+        self.assertTrue(wait(self.root, lambda: self.last_show() == self.doc.expected_rects(s, e)))
+        self.assertTrue(self.overlays[-1].visible)
+        wait(self.root, lambda: False, timeout=0.1)          # 앞 요청이 다 돌아오게
+        asked = self.doc.count("GetBoundingRectangles")
+        self.doc.scroll = 3
+        self.hl.notify_scroll()
+        self.assertTrue(wait(self.root, lambda: not self.overlays[-1].visible), "휠이 오면 막을 숨긴다")
+        self.assertEqual(self.doc.count("GetBoundingRectangles"), asked, "스크롤 중에는 묻지 않는다")
+        want = self.doc.expected_rects(s, e)
+        self.assertTrue(wait(self.root, lambda: self.overlays[-1].visible and self.last_show() == want),
+                        "멈추면 새 자리에 다시 그린다")
+        self.assertEqual(self.doc.count("GetBoundingRectangles"), asked + 1, "멈춘 뒤 한 번만 묻는다")
 
     def test_window_move_requeries(self):
         self.make()
