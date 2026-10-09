@@ -108,11 +108,20 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   "Credentials" button (`show_api_key_dialog`), "Open Console" button (`open_console_window`). "Open README" was removed.
 - **Red dot** (`selection_button.py` + `setup_selection_button()` / `setup_mouse_listener()` in whisperer.py):
   a pynput **mouse** listener feeds left press/release to `SelectionGestureDetector`; a drag (Windows `SM_CXDRAG`)
-  or a double/triple-click release puts `("selection_button", "show", x, y)` on `gui_queue`, and the Tk main thread
-  calls `SelectionButton.show_at`. Presses on the dot itself and gestures that start on our own windows are filtered.
+  or a double/triple-click release puts `("selection_button", "show", x, y)` on `gui_queue`. A keyboard selection
+  (Ctrl+A, Shift+arrows) puts `("selection_button", "keyboard")` once every modifier is released (`on_release`).
+  The Tk main thread (`_handle_selection_button_msg`) drops it for a disabled browser, the desktop / taskbar / Explorer
+  (`_no_dot_window_at`, `_no_dot_foreground`) and non-client spots such as title bars and scrollbars (`_nonclient_at`,
+  WM_NCHITTEST), then **asks the foreground app for the selection end** (`SourceHighlighter.query_selection_end` —
+  one-spot UIA calls on the highlighter thread). The dot is shown next to the last selected character only when that
+  returns a position; `"none"` (no selection) or `None` (unknown) shows nothing (user decision 2026-09-28: "only when
+  text is really selected" — a 4 px drag guess also fired on click jitter at 140 % scaling). A keyboard selection whose
+  end is off-screen falls back to the cursor. Drag guessing alone is used only when UIA is unavailable (module missing
+  or `source_highlight_enabled` off). Presses on the dot itself and gestures that start on our own windows are filtered.
   Wheel, keys and other buttons hide it. Clicking the dot → `read_selected_text(from_selection_button=True)`.
   Tray off = hide the dot and stop the mouse hook (setting `selection_button_enabled`, default on like the extension).
-  Position (`selection_button.dot_position`): right of the release point + GAP, clamped into the monitor work area;
+  Position (`selection_button.dot_position`): right of the given point (selection end, or the release point in the
+  fallback) + GAP, clamped into the monitor work area;
   if the clamped dot would cover the cursor pixel (e.g. after dragging a maximized window's scrollbar at the right
   screen edge) it goes to the cursor's left (`x - GAP - size`).
 - **Global hotkey**: pynput. Default TTS hotkey Ctrl+Alt+D (user setting may differ).
@@ -186,11 +195,14 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   whole-range APIs: `GetVisibleRanges`, `GetText` / `GetBoundingRectangles` on the whole `DocumentRange`,
   `FindAll(TreeScope_Descendants)` over a window or document. If a single call takes over 1 s, stop painting on the
   original text for the rest of that reading. `whisperer.py` itself never calls UIA.
-- **The red dot is a guess from mouse gestures.** Windows gives no "text selected" signal for other apps, and
-  UI Automation is not used for the dot. Known limits: dragging a window title bar also shows the dot
-  (clicking it sends Ctrl+C to that window like the hotkey does — it reads text still selected there, otherwise
-  nothing); keyboard / Shift+click selections show no dot (the hotkey still works);
-  the dot also appears while selecting inside input fields.
+- **The red dot needs the app to expose a UIA TextPattern.** Windows gives no "text selected" signal for other apps,
+  so the dot asks the foreground app through UI Automation (see Red dot above). Apps without a TextPattern on the
+  selected text never show the dot and cannot be highlighted on the original either (`no_text_pattern` → reader
+  window). Measured 2026-10-10: **Telegram Desktop** (Qt) exposes messages as ListItems with the whole text in `Name`
+  and no TextPattern; only its input box has one (right after a drag the focus may still be there → "no selection").
+  User decision 2026-10-10: Telegram uses the hotkey only (the Ctrl+C path works) — do not bring drag guessing back
+  for it or for "unknown" apps in general. Neither "unknown" nor "none" is logged, so a missing dot leaves no trace in
+  the log (only the browser case is logged, at debug level). The dot also appears while selecting inside input fields.
 - **Judge "is TTS playing" with `tts_playing`.** `is_speaking` is a dead variable.
 - **Never reuse or `clear()` a session's stop event** (`TtsSession._stop_event`). A producer blocked in synthesis
   would come back to life as a zombie thread. Every reading creates a new `TtsSession` (tts_engine.py header).
