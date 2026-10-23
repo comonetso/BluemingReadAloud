@@ -27,7 +27,8 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 - `*.spec` is git-ignored (`.gitignore`), so `BluemingReadAloud.spec` is a local file only.
   The old specs (`Yeogiaen_WhisperTyper.spec`, `Yeogiaen_STT_Typer*.spec`) are kept on disk until the user decides to remove them.
 - Unit tests: `python -m unittest discover -s tests` (engine, text splitting, whisperer glue extracted by AST —
-  the tests never import `whisperer.py`). Verification order used in this project:
+  the tests never import `whisperer.py`; `tests/test_whisperer_selection.py` extracts the mouse hook and the
+  browser / Telegram checks the same way). Verification order used in this project:
   edit → `py_compile` → unit tests → dev run → user checks it for real → build (only after the user says it passed).
 - Check build success by the output file timestamp too, not only the exit code
   (`cmd > log 2>&1; echo ...` returns the exit code of `echo`).
@@ -45,7 +46,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   (UI Automation on its own thread + a click-through overlay). Optional: if it fails to import, the app falls back
   to the reader window. Contract: `SourceHighlighter(root)`, `begin(source_text, segments, on_result)`,
   `highlight(idx, caption=None)` (caption = translated text → drawn as a caption box instead of yellow),
-  `notify_scroll()`, `end()`, `destroy()`, `active`.
+  `notify_scroll()`, `end()`, `destroy()`, `active`, and one-shot queries answered later on the Tk main thread:
+  `query_selection_end(on_done)`, `query_page_scheme(on_done)` (`"https"`, `"chrome-extension"`, … or `None`),
+  `query_telegram_selected(x, y, on_done)` (`True` / `"menu"` / `False`, `None` on failure).
 - **tts_engine.py** / **readaloud_text.py** — playback engine and text splitting (tests in `tests/`).
 - **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
   client are in its header. Voices are Korean only, so "primary language" = Hangul.
@@ -58,9 +61,15 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 1. **Entry points** — global hotkey (pynput listener `on_press`), red dot click (`_on_selection_button_click`).
    The floating icon was removed on 2026-09-28 (user decision); the red dot replaces it. The tray has no play/stop item.
    **Browsers**: when "Disable in Browsers" is on (default) and the foreground window belongs to `Aside.exe`,
-   `whale.exe` or `chrome.exe` (case-insensitive), the red dot is not shown and the hotkey starts no new reading
-   (the Chrome extension handles those browsers). The hotkey still stops a reading in progress there (no Ctrl+C is sent).
-   `msedgewebview2.exe` (web views inside other apps) is not a browser. The check (`_foreground_disabled_browser`:
+   `whale.exe` or `chrome.exe` (case-insensitive), the app asks the page's URL scheme (`_unless_web_page` →
+   `SourceHighlighter.query_page_scheme`: from the focus up to the first Document element, whose Value is the page URL in
+   Chromium — measured 2026-10-23; a focused link's own Value is the link target, so only the Document's Value counts).
+   On a normal web page (`http`/`https`) the red dot is not shown and the hotkey starts no new reading (the Chrome
+   extension handles it); the hotkey still stops a reading in progress there (no Ctrl+C is sent). Pages the extension
+   cannot run on (new tab = `chrome-extension`, settings, local files) and an **unknown** scheme (slow call, focus outside
+   the page such as the tab strip, no UIA) behave like any other app (user decision 2026-10-23). Only the scheme is kept or
+   logged, never the host. Aside sometimes takes ~2.4 s on one call → the 1 s limit gives "unknown" → the app acts.
+   `msedgewebview2.exe` (web views inside other apps) is not a browser. The exe check (`_foreground_exe_name`:
    GetForegroundWindow → GetWindowThreadProcessId → OpenProcess(QUERY_LIMITED) → QueryFullProcessImageNameW) runs on
    the Tk main thread only (`_handle_selection_button_msg`, start of `read_selected_text`), never in a hook callback.
 2. **`read_selected_text()`** — releases modifier keys, backs up the clipboard, **clears it**,
@@ -108,9 +117,18 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   "Credentials" button (`show_api_key_dialog`), "Open Console" button (`open_console_window`). "Open README" was removed.
 - **Red dot** (`selection_button.py` + `setup_selection_button()` / `setup_mouse_listener()` in whisperer.py):
   a pynput **mouse** listener feeds left press/release to `SelectionGestureDetector`; a drag (Windows `SM_CXDRAG`)
-  or a double/triple-click release puts `("selection_button", "show", x, y)` on `gui_queue`. A keyboard selection
+  or a double/triple-click release puts `("selection_button", "show", x, y)` on `gui_queue`; a single-click release puts
+  `("selection_button", "click", x, y)` (used only for Telegram, dropped for every other app). A keyboard selection
   (Ctrl+A, Shift+arrows) puts `("selection_button", "keyboard")` once every modifier is released (`on_release`).
-  The Tk main thread (`_handle_selection_button_msg`) drops it for a disabled browser, the desktop / taskbar / Explorer
+  **Telegram** (`Telegram.exe`, user decision 2026-10-23): instead of the selection end, the app asks whether a message
+  is selected via the right-click menu "선택" (`_show_dot_if_telegram_selected` → `query_telegram_selected`: focus and
+  the element under the release point, up to a ListItem whose parent class contains `HistoryInner`, then
+  SelectionItem.IsSelected — the chat list on the left is also "selected", so it is excluded). Dot = next to the release
+  point, on "선택" and on every further click that selects another message. Right after "선택" the menu may still be
+  closing (focus = `Ui::PopupMenu`) → result `"menu"` → ask again every 0.1 s up to 1 s (`TELEGRAM_MENU_RETRY_*`, user
+  decision; measured: selected after 0.23 s). Clicking the dot reads via Ctrl+C — Telegram copies the selected message
+  text (measured, no name/time header). Diagnostic `[텔레그램]` log lines are written per check (file log only).
+  The Tk main thread (`_handle_selection_button_msg`) drops it for a web page in a disabled browser, the desktop / taskbar / Explorer
   (`_no_dot_window_at`, `_no_dot_foreground`) and non-client spots such as title bars and scrollbars (`_nonclient_at`,
   WM_NCHITTEST), then **asks the foreground app for the selection end** (`SourceHighlighter.query_selection_end` —
   one-spot UIA calls on the highlighter thread). The dot is shown next to the last selected character only when that
@@ -200,9 +218,12 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   selected text never show the dot and cannot be highlighted on the original either (`no_text_pattern` → reader
   window). Measured 2026-10-10: **Telegram Desktop** (Qt) exposes messages as ListItems with the whole text in `Name`
   and no TextPattern; only its input box has one (right after a drag the focus may still be there → "no selection").
-  User decision 2026-10-10: Telegram uses the hotkey only (the Ctrl+C path works) — do not bring drag guessing back
-  for it or for "unknown" apps in general. Neither "unknown" nor "none" is logged, so a missing dot leaves no trace in
-  the log (only the browser case is logged, at debug level). The dot also appears while selecting inside input fields.
+  So text dragged inside a Telegram message still shows no dot and is never highlighted on the original; since
+  2026-10-23 the dot appears for messages selected with the right-click menu "선택" (see Red dot above — this replaced
+  the 2026-10-10 decision "Telegram uses the hotkey only"). Do not bring drag guessing back for Telegram or for
+  "unknown" apps in general (rejected by the user on 2026-10-10). Neither "unknown" nor "none" is logged for other apps,
+  so a missing dot leaves no trace in the log (only the web-page case is logged, at debug level). The dot also appears
+  while selecting inside input fields.
 - **Judge "is TTS playing" with `tts_playing`.** `is_speaking` is a dead variable.
 - **Never reuse or `clear()` a session's stop event** (`TtsSession._stop_event`). A producer blocked in synthesis
   would come back to life as a zombie thread. Every reading creates a new `TtsSession` (tts_engine.py header).

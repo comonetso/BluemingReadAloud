@@ -80,6 +80,7 @@ import logging
 import math
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -88,7 +89,8 @@ import unicodedata
 log = logging.getLogger(__name__)
 
 __all__ = ["SourceHighlighter", "align_source_to_uia", "TextAlignment", "grapheme_counts",
-           "build_overlay_bitmap", "build_caption_bitmap", "rects_from_uia", "clip_rects", "uia_on_screen"]
+           "build_overlay_bitmap", "build_caption_bitmap", "rects_from_uia", "clip_rects", "uia_on_screen",
+           "url_scheme"]
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -98,6 +100,11 @@ HIGHLIGHT_RGBA = (255, 226, 0, 0.3)   # 확장 js/events.js:374 ::highlight(read
 SLOW_CALL_S = 1.0                     # 오케스트레이터 지시: 한 호출이 1초를 넘으면 그 읽기 동안 원문 위 칠하기 중단
 UIA_TIMEOUT_MS = 1000                 # 위와 같은 1초를 UIA 자체 제한 시간으로도 건다(멈춘 앱에 20초씩 묶이지 않게)
 MAX_ANCESTOR_STEPS = 8                # 오케스트레이터 지시(VS Code 채팅은 포커스에서 4단계 위가 Document — 실측)
+UIA_DOCUMENT_TYPE = 50030             # UIA_DocumentControlTypeId — 크로미움 웹 문서. 값(Value)에 페이지 주소(2026-10-23 Aside 실측)
+UIA_LIST_ITEM_TYPE = 50007            # UIA_ListItemControlTypeId — 텔레그램 메시지 하나(2026-10-10 실측)
+UIA_MENU_TYPES = (50009, 50011)       # Menu·MenuItem — 텔레그램 우클릭 메뉴가 떠 있는 동안 포커스는 Ui::PopupMenu(50009, 실측)
+TELEGRAM_HISTORY_CLASS = "HistoryInner"   # 텔레그램 메시지 목록의 ClassName("class HistoryInner" 로 온다 — 실측).
+                                          # 왼쪽 대화 목록(Dialogs::InnerWidget)의 항목도 "선택됨"이 되므로 이 목록 안만 본다
 
 WATCH_MS = 50            # [임의] Tk 틱 주기: 결과 받기·전경/창 위치 확인·휠 알림 처리·1초 감시
 SETTLE_TICKS = 6         # [임의] 휠·창 이동·자동 스크롤 뒤 사각형을 틱마다 다시 받는 횟수(≈0.3초, 부드러운 스크롤이 끝날 때까지)
@@ -653,6 +660,25 @@ def build_caption_bitmap(rects, text, clip=None):
         gdi.close()
 
 
+_URL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]+):")   # 두 글자 이상 — "C:\…" 드라이브 경로를 주소로 보지 않게
+
+
+def url_scheme(value):
+    """주소 글의 종류(스킴)만 소문자로 돌려준다 — "https://a.b/c" → "https", "chrome-extension://…" → "chrome-extension",
+    "about:blank" → "about". 주소 모양이 아니면(None·빈 값·공백이 든 글·스킴 없음) None.
+
+    쓰임: "브라우저에서 비활성화" 가 일반 웹페이지(http·https)만 쉬게 하려고 크로미움 문서 요소의 값(= 페이지 주소)을 본다
+    (2026-10-23 사용자 결정). 호스트·경로는 방문 기록이라 돌려주지도 로그에 남기지도 않는다.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or any(c.isspace() for c in s):
+        return None
+    m = _URL_SCHEME_RE.match(s)
+    return m.group(1).lower() if m else None
+
+
 # ════════════════════════════════════════════════════════════════════
 #  UIA 전용 스레드
 # ════════════════════════════════════════════════════════════════════
@@ -737,8 +763,11 @@ class _UiaWorker:
     """UIA 호출을 도맡는 스레드 하나. 요청 큐를 하나씩 처리하고 결과를 post(튜플)로 돌려준다.
 
     요청: ("begin", gen, source_text, spans, target_pid, own_pid) / ("rects", gen, idx, reveal) / ("end", gen) / ("quit",)
+          한 번짜리 조회(읽기 세션과 무관, 토큰 = Tk 쪽 요청 번호): ("caret", 토큰) / ("page_scheme", 토큰)
+          / ("tg_selected", 토큰, x, y)
     결과: ("begin_ok", gen, info) / ("begin_fail", gen, reason) / ("rects", gen, idx, rects, doc_rect, scrolled)
           / ("slow", gen, 설명) / ("lost", gen, 설명) / ("error", gen, 설명)
+          / ("caret", 토큰, 결과) — 한 번짜리 조회 세 가지가 모두 이 모양으로 돌려준다
     - current_gen 보다 오래된 요청은 건너뛴다(Tk 쪽이 end·새 begin 으로 무효로 만든 것).
     - call_since: 지금 진행 중인 UIA 호출이 시작된 시각(없으면 None). Tk 틱이 읽어 "1초 넘게 안 돌아옴"을 잡는다.
     """
@@ -785,6 +814,12 @@ class _UiaWorker:
                 continue
             if kind == "caret":
                 self._caret(req[1])          # 읽기 세션과 무관한 한 번짜리 조회(req[1] = 토큰) — 세대 검사 없음
+                continue
+            if kind == "page_scheme":
+                self._one_shot(req[1], "페이지 주소 종류", self._page_scheme)
+                continue
+            if kind == "tg_selected":
+                self._one_shot(req[1], "텔레그램 메시지 선택", self._telegram_selected, req[2], req[3])
                 continue
             gen = req[1]
             if gen < self.current_gen:
@@ -884,12 +919,20 @@ class _UiaWorker:
         ⚠️ 끝 글자 하나짜리 범위만 묻는다 — 선택 전체의 글·사각형은 묻지 않는다(Ctrl+A 면 문서 전체라 VS Code 가 얼 수 있다).
         어떤 예외든(느린 호출 포함) 이 조회만 포기한다 — 원문 형광펜 세션(_sess)은 건드리지 않는다. 결과는 항상 돌려준다.
         """
+        self._one_shot(token, "선택 끝 위치", self._selection_end_point)
+
+    def _one_shot(self, token, label, fn, *args):
+        """(UIA 스레드) 읽기 세션과 무관한 한 번짜리 조회 fn(*args) 를 하고 ("caret", 토큰, 결과) 를 돌려준다.
+
+        어떤 예외든(느린 호출·요소 사라짐 포함) 그 조회만 포기하고 결과 None — 원문 형광펜 세션(_sess)은 건드리지 않는다.
+        결과는 항상 돌려준다(Tk 쪽은 토큰으로 on_done 을 찾아 부른다 — 안 돌려주면 on_done 이 영영 안 불린다).
+        """
         result = None
         try:
             if self._get_uia() is not None:
-                result = self._selection_end_point()
+                result = fn(*args)
         except Exception as exc:
-            log.debug("선택 끝 위치 조회 실패: %r", exc)
+            log.debug("%s 조회 실패: %r", label, exc)
             result = None
         finally:
             self.call_since = None
@@ -934,6 +977,103 @@ class _UiaWorker:
                 break
             el = parent
         return None
+
+    def _page_scheme(self):
+        """포커스부터 위로 걸어 처음 만나는 문서(Document) 요소의 값 = 페이지 주소에서 주소 종류(url_scheme)만. 모르면 None.
+
+        2026-10-23 Aside 실측: 웹 글을 고르면 포커스가 곧 문서 요소이고 값이 "https://…", 새 탭은 "chrome-extension://…".
+        ⚠️ 링크·썸네일에 포커스가 있으면 그 요소의 값도 주소다(링크가 가리키는 곳 — 실측) → 문서 요소의 값만 쓴다.
+        탭 줄·주소창처럼 웹 문서 밖이면 문서를 못 만나 None(부르는 쪽: 모르면 동작 — 사용자 결정).
+        한계: iframe 안에 포커스가 있으면 그 iframe 문서의 주소를 본다(더 바깥 문서까지 걷지 않는다 — 호출 수를 늘리지 않으려고).
+        호출 수: 단계마다 1~2번(종류 + 부모), 문서에서 값 1번.
+        """
+        U = self._U
+        call = self._call
+        el = call("GetFocusedElement", self._uia.GetFocusedElement)
+        if not el:
+            return None
+        walker = call("ControlViewWalker", lambda: self._uia.ControlViewWalker)
+        for step in range(MAX_ANCESTOR_STEPS + 1):
+            if call("ControlType", el.GetCurrentPropertyValue, U.UIA_ControlTypePropertyId) == UIA_DOCUMENT_TYPE:
+                return url_scheme(call("Value", el.GetCurrentPropertyValue, U.UIA_ValueValuePropertyId))
+            if step == MAX_ANCESTOR_STEPS:
+                break
+            parent = call("GetParentElement", walker.GetParentElement, el)
+            if not parent:
+                break
+            el = parent
+        return None
+
+    def _telegram_selected(self, x, y):
+        """텔레그램: 포커스 요소와 (x, y) 아래 요소에서 위로 걸어, 메시지 목록 안 메시지가 "선택됨"인지 본다.
+
+        결과: True 선택됨 / "menu" 아직 우클릭 메뉴가 떠 있다(포커스가 메뉴 — 부르는 쪽이 잠깐 뒤 다시 묻는다) / False
+        왜: 텔레그램(Qt)은 글 위치 기능(TextPattern)이 없어 선택 끝을 못 묻는다. 대신 우클릭 메뉴 "선택" 으로 고른 메시지는
+            목록 항목의 선택 상태(SelectionItem.IsSelected)가 켜진다(2026-10-23 실측 — 두 개 골라도 각각 켜지고 Esc 로 꺼짐).
+        두 요소를 다 보는 까닭(실측): "선택" 을 누른 직후엔 포커스는 다른 메시지·마우스 아래가 고른 메시지였고, 선택 상태에서
+            다른 메시지를 더 누르면 그 반대였다.
+        "menu" 를 두는 까닭(2026-10-23 개발 모드 시험 — "처음엔 안 뜨고 다음엔 뜬다"): "선택" 을 누르고 뗀 순간엔 메뉴가
+            닫히는 중이라 포커스·마우스 아래가 다 메뉴일 수 있다(측정에서도 메뉴가 떠 있는 동안은 메뉴만 잡혔다).
+        (x, y) 아래 요소 조회는 관리자 창·작업 표시줄 위에서 "액세스 거부"가 난다(실측) → 그 요소만 건너뛴다.
+        진단 로그(원인 확정 전까지 — 사용자 결정): 조회마다 본 요소의 종류·클래스 이름·결과·걸린 시간. 글·이름은 남기지 않는다.
+        """
+        U = self._U
+        call = self._call
+        t0 = self._clock()
+        candidates = []
+        focused = call("GetFocusedElement", self._uia.GetFocusedElement)
+        if focused:
+            candidates.append(("포커스", focused))
+        if x is not None and y is not None:
+            try:
+                under = call("ElementFromPoint", self._uia.ElementFromPoint, U.tagPOINT(int(x), int(y)))
+            except (_SlowCall, _Lost):
+                raise
+            except Exception as exc:
+                log.debug("텔레그램: 마우스 아래 요소 조회 실패(건너뜀): %r", exc)
+                under = None
+            if under:
+                candidates.append(("마우스 아래", under))
+        seen = []
+        focus_type = None
+        for name, el in candidates:
+            ct = call("ControlType", el.GetCurrentPropertyValue, U.UIA_ControlTypePropertyId)
+            cls = str(call("ClassName", el.GetCurrentPropertyValue, U.UIA_ClassNamePropertyId) or "")
+            seen.append("%s %s/%s" % (name, ct, cls.replace("class ", "")[:30]))
+            if name == "포커스":
+                focus_type = ct
+        if any(self._telegram_item_selected(el) for _, el in candidates):
+            result = True
+        elif focus_type in UIA_MENU_TYPES:
+            result = "menu"
+        else:
+            result = False
+        log.info("[텔레그램] 선택 확인 %s · %s · %.0fms", result, " · ".join(seen) or "요소 없음",
+                 (self._clock() - t0) * 1000)
+        return result
+
+    def _telegram_item_selected(self, el):
+        """el 부터 위로 걸어 처음 만나는 목록 항목(ListItem)이 메시지 목록(HistoryInner) 안에 있고 선택됐는가.
+
+        목록 항목을 만났는데 부모가 메시지 목록이 아니면(왼쪽 대화 목록 등) 거기서 False — 더 올라가지 않는다.
+        """
+        U = self._U
+        call = self._call
+        walker = call("ControlViewWalker", lambda: self._uia.ControlViewWalker)
+        for step in range(MAX_ANCESTOR_STEPS + 1):
+            is_item = call("ControlType", el.GetCurrentPropertyValue, U.UIA_ControlTypePropertyId) == UIA_LIST_ITEM_TYPE
+            parent = call("GetParentElement", walker.GetParentElement, el) if (is_item or step < MAX_ANCESTOR_STEPS) else None
+            if is_item:
+                if not parent:
+                    return False
+                cls = call("ClassName", parent.GetCurrentPropertyValue, U.UIA_ClassNamePropertyId)
+                if TELEGRAM_HISTORY_CLASS not in str(cls or ""):
+                    return False
+                return bool(call("IsSelected", el.GetCurrentPropertyValue, U.UIA_SelectionItemIsSelectedPropertyId))
+            if not parent:
+                break
+            el = parent
+        return False
 
     def _release_selection(self, doc, sel):
         """선택을 푼다 — 확장 releaseSelection(js/page-ui.js:412-427) 과 같은 규칙.
@@ -1649,13 +1789,35 @@ class SourceHighlighter:
         앞 호출이 1초 넘게 안 돌아와 워커가 막혀 있으면 묻지 않고 곧바로 None(VS Code 가 느릴 때 더 쌓지 않는다).
         """
         self._check_thread("query_selection_end")
+        self._one_shot_query("caret", (), on_done)
+
+    def query_page_scheme(self, on_done):
+        """(Tk 메인) 지금 포커스가 든 웹 문서의 주소 종류를 묻는다 — "https"·"chrome-extension"·"file" 등, 모르면 None.
+
+        쓰임: "브라우저에서 비활성화" 가 일반 웹페이지(http·https)에서만 쉬고 새 탭·확장·설정·내 PC 파일에선 동작하게
+        (2026-10-23 사용자 결정). 결과는 나중에 Tk 메인에서 on_done(scheme). 막혀 있거나 실패하면 None.
+        """
+        self._check_thread("query_page_scheme")
+        self._one_shot_query("page_scheme", (), on_done)
+
+    def query_telegram_selected(self, x, y, on_done):
+        """(Tk 메인) 텔레그램에서 (x, y) 를 뗀 뒤 메시지가 "선택"(우클릭 메뉴 → 선택) 상태인지 묻는다.
+
+        결과는 나중에 Tk 메인에서 on_done(True / "menu" / False). "menu" = 우클릭 메뉴가 아직 떠 있다(잠깐 뒤 다시 물을 것).
+        막혀 있거나 실패하면 None(= 점을 띄우지 않는다).
+        """
+        self._check_thread("query_telegram_selected")
+        self._one_shot_query("tg_selected", (x, y), on_done)
+
+    def _one_shot_query(self, kind, args, on_done):
+        """(Tk 메인) 한 번짜리 조회 요청을 워커에 넣고 on_done 을 요청 번호로 맡겨 둔다(결과는 _handle 의 "caret")."""
         if self._destroyed or self._worker is None or self._worker.stuck(self._clock()):
-            self._root.after(0, on_done, None)
+            self._root.after(0, lambda: on_done(None))
             return
         self._caret_token += 1
         token = self._caret_token
         self._caret_waiting[token] = on_done
-        self._worker.submit(("caret", token))
+        self._worker.submit((kind, token) + tuple(args))
         self._schedule_tick()
 
     def end(self):
@@ -1752,13 +1914,13 @@ class SourceHighlighter:
 
     def _handle(self, msg):
         kind, gen = msg[0], msg[1]
-        if kind == "caret":                      # query_selection_end 결과 — 읽기 세대와 무관(msg[1] = 요청 번호)
-            cb = self._caret_waiting.pop(gen, None)
+        if kind == "caret":                      # 한 번짜리 조회 결과(선택 끝·페이지 주소 종류·텔레그램 선택) — 읽기 세대와
+            cb = self._caret_waiting.pop(gen, None)   # 무관(msg[1] = 요청 번호)
             if cb is not None:
                 try:
                     cb(msg[2])
                 except Exception:
-                    log.exception("선택 끝 위치 on_done 실패")
+                    log.exception("한 번짜리 조회 on_done 실패")
             return
         if kind == "rects" and gen == self._gen:
             self._inflight = False

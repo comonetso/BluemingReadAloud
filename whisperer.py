@@ -195,6 +195,11 @@ _selection_key_hook = None       # 키보드 훅이 키 누름마다 부르는 "
 # ⚠️ msedgewebview2.exe(다른 앱 안의 웹 화면)는 브라우저가 아니다 — 대상 아님. Edge(msedge.exe)도 목록에 없다(사용자 지정 목록).
 disable_in_browsers = True       # 트레이 "브라우저에서 비활성화" 체크. 기본 켬(사용자 확정)
 _BROWSER_EXES = frozenset({"aside.exe", "whale.exe", "chrome.exe"})   # 소문자로 비교(대소문자 무시)
+_TELEGRAM_EXES = frozenset({"telegram.exe"})   # 텔레그램 데스크톱 — 빨간 점은 "선택한 메시지"로 판단(2026-10-23 사용자 결정)
+# 우클릭 메뉴 "선택" 을 뗀 순간 메뉴가 아직 떠 있으면 이 간격으로 다시 묻고 상한까지 기다린다(2026-10-23 사용자 확정).
+# 근거: 개발 모드 실측 — 첫 확인은 메뉴(Ui::PopupMenu)만 잡혔고 0.1초 뒤 두 번째 확인에서 "선택됨"(처음 물은 뒤 0.23초).
+TELEGRAM_MENU_RETRY_MS = 100
+TELEGRAM_MENU_RETRY_MAX_S = 1.0
 
 # 원문 위 형광펜 (source_highlight.py) — 전부 Tk 메인 스레드에서만 읽고 쓴다
 source_highlight_enabled = True  # 설정 키만 있다. 트레이·설정 창에는 넣지 않는다(사용자가 트레이 목록을 정했다)
@@ -1423,7 +1428,9 @@ def _make_selection_hook(detector, contains, is_own_window, post, is_enabled, cl
       - 점을 누른 것: 누른 좌표가 점 위면 그 누름·뗌을 detector 에 넘기지 않는다. 넘기면 누름이 "숨김" 을 내서
         점이 클릭을 받기도 전에 사라진다. 점 클릭 자체는 SelectionButton 이 on_click 으로 알려 준다.
       - 우리 앱 창 위에서 시작한 동작: 리더 창 머리 막대 끌기·하단 바 버튼·설정 창 글 고르기 등은 "다른 앱의 글 선택"
-        이 아니다 → 누를 때 판별해 두고 그 뗌의 "보이기" 는 버린다. 누름의 "숨기기" 는 그대로 한다(다른 곳을 누르면 점은 사라진다).
+        이 아니다 → 누를 때 판별해 두고 그 뗌의 "보이기"·"클릭" 은 버린다. 누름의 "숨기기" 는 그대로 한다(다른 곳을 누르면 점은 사라진다).
+    넘기는 것: 끌기·더블클릭의 뗌 → ("selection_button", "show", x, y), 한 번 클릭의 뗌 → ("selection_button", "click", x, y)
+      (텔레그램 메시지 "선택" 용 — Tk 메인이 텔레그램이 앞 창일 때만 쓰고 나머지는 버린다, 2026-10-23).
     "숨김" 중복 줄이기: 키를 칠 때마다·휠을 굴릴 때마다 "숨김" 을 넣으면 큐만 붐빈다 → 마지막으로 "보이기" 를 넣은 뒤
       아직 "숨김" 을 안 넣었을 때만 넣는다(shown_hint). Tk 메인이 따로 숨긴 경우(점 클릭·읽기 시작)엔 hint 가 남아
       다음 입력 때 "숨김" 이 한 번 더 갈 뿐이다(이미 숨은 점을 또 숨김 — 해 없음).
@@ -1467,9 +1474,17 @@ def _make_selection_hook(detector, contains, is_own_window, post, is_enabled, cl
                         state["skip_release"] = False
                         return
                     result = detector.on_release(x, y, now)
-                    if result and result[0] == "show" and not state["own_window"]:
+                    if state["own_window"]:
+                        return
+                    if result and result[0] == "show":
                         state["shown_hint"] = True
                         post(("selection_button", "show", result[1], result[2]))
+                    elif result is None:
+                        # 한 번 클릭의 뗌 — 텔레그램 "선택"(우클릭 메뉴)·선택 상태에서 메시지 더 고르기가 한 번 클릭이다
+                        # (2026-10-23). 어느 앱인지는 여기서 못 본다(프로세스 조회 금지) → 넘기기만 하고 Tk 메인이 텔레그램일
+                        # 때만 쓴다. 점이 뜰 수 있으니 hint 를 세워 다음 입력 때 "숨김" 이 가게 한다.
+                        state["shown_hint"] = True
+                        post(("selection_button", "click", x, y))
         except Exception:
             pass   # 훅 콜백 — 로그도 남기지 않는다(파일 I/O 가 훅 시간 제한을 넘길 수 있다)
 
@@ -1877,19 +1892,24 @@ def _handle_selection_button_msg(action, *args):
 
     ("show", x, y): (x, y) = 마우스를 뗀 화면 좌표. 점은 SelectionButton.show_at 이 그 오른쪽(GAP)에 띄운다.
                     꺼져 있으면(큐에 들어간 뒤 사용자가 끈 경우) 버린다.
-                    "브라우저에서 비활성화" 가 켜져 있고 지금 전경 창이 Aside·웨일·크롬이면 버린다(확장이 자기 점을 띄운다).
+                    "브라우저에서 비활성화" 가 켜져 있고 지금 전경 창이 Aside·웨일·크롬이면 지금 페이지 주소 종류를 물어
+                    일반 웹페이지(http·https)일 때만 버린다(확장이 자기 점을 띄운다). 새 탭·확장 페이지·브라우저 설정·
+                    내 PC 파일, 또는 주소를 모르면(느림 포함) 다른 앱과 똑같이 띄운다(2026-10-23 사용자 결정, _unless_web_page).
+                    텔레그램이면 선택 끝 대신 "선택한 메시지"를 묻는다(_show_dot_if_telegram_selected).
                     ⚠️ 그 판별(전경 창 → 프로세스 → 실행 파일 이름)은 여기, Tk 메인에서 한다. 마우스 훅 콜백에서 하면
                        OpenProcess 등이 훅을 느리게 만들어 윈도우가 훅을 떼어 낼 수 있다(훅 콜백 규칙).
+    ("click", x, y): 한 번 클릭의 뗌. 텔레그램이 앞 창일 때만 "선택한 메시지"를 묻고(우클릭 메뉴 "선택"·선택 상태에서
+                    메시지 더 고르기), 다른 앱이면 버린다(2026-10-23).
     ("hide",)     : 숨긴다.
     ("keyboard",) : 키보드로 골랐다(Ctrl+A, Shift+화살표 등 — 키보드 훅 on_release). 자리 = 선택 끝 글자 옆(원문 형광펜의
                     UIA 스레드에 끝 글자 하나만 물음), 못 얻거나 끝이 화면 밖이면 마우스 옆, 고른 글이 없으면 안 띄움
-                    (2026-09-28 사용자 확정 "선택 끝, 안 되면 마우스 옆").
+                    (2026-09-28 사용자 확정 "선택 끝, 안 되면 마우스 옆"). 브라우저면 위 "show" 와 같은 주소 확인을 먼저 한다.
     """
     global _dot_query_gen
     if action == "keyboard":
-        if (not selection_button_enabled or selection_button is None or _foreground_disabled_browser()
-                or _no_dot_foreground()):
+        if not selection_button_enabled or selection_button is None or _no_dot_foreground():
             return
+        browser = _foreground_disabled_browser()
 
         def place(pos):
             if pos == "none":
@@ -1899,50 +1919,124 @@ def _handle_selection_button_msg(action, *args):
             if pos:
                 _handle_selection_button_msg("show", pos[0], pos[1])
 
-        hl = _ensure_source_highlighter() if source_highlight_enabled else None
-        if hl is not None and hasattr(hl, "query_selection_end"):
-            _safe_ui("선택 끝 위치", hl.query_selection_end, place)
-        else:
-            place(None)
+        def ask_end(_scheme=None):
+            hl = _ensure_source_highlighter() if source_highlight_enabled else None
+            if hl is not None and hasattr(hl, "query_selection_end"):
+                _safe_ui("선택 끝 위치", hl.query_selection_end, place)
+            else:
+                place(None)
+
+        _unless_web_page(browser, ask_end,
+                         lambda scheme: logging.debug(f"[빨간 점] {browser} 웹페이지({scheme})에서는 띄우지 않음"))
         return
     if action == "hide":
         _dot_query_gen += 1        # 기다리던 "선택 확인" 결과가 늦게 와도 점을 띄우지 않게
         _hide_selection_button()
-    elif action == "show" and len(args) >= 2:
+    elif action in ("show", "click") and len(args) >= 2:
         if not selection_button_enabled or selection_button is None:
             return
-        browser = _foreground_disabled_browser()
-        if browser:
-            # 드래그할 때마다 남기면 콘솔이 넘치므로 파일 로그(debug)에만 남긴다
-            logging.debug(f"[빨간 점] 브라우저({browser})에서는 띄우지 않음")
+        x, y = args[0], args[1]
+        exe = _foreground_exe_name()
+        if _is_telegram_exe(exe):
+            # 텔레그램: 글 위치 기능이 없어 선택 끝을 못 묻는다 → "선택한 메시지"로 판단(끌기·한 번 클릭 둘 다)
+            if not _nonclient_at(x, y):
+                _show_dot_if_telegram_selected(x, y)
             return
-        if _no_dot_window_at(args[0], args[1]) or _no_dot_foreground():
+        if action == "click":
+            return                                   # 한 번 클릭은 텔레그램 "선택" 용 — 다른 앱에선 글을 고른 게 아니다
+        if _no_dot_window_at(x, y) or _no_dot_foreground():
             # 바탕화면·작업 표시줄·탐색기 — 글이 아니라 아이콘·파일을 끌어 고른 것. 뗀 자리 판정이 빗나가도(2026-09-28
             # 사용자 보고 "바탕화면에서 여전히 뜬다") 바탕화면을 누르면 바탕화면이 앞 창이 되므로 앞 창으로도 한 번 더 본다
             return
-        if _nonclient_at(args[0], args[1]):
+        if _nonclient_at(x, y):
             return                                   # 제목 표시줄(창 옮기기)·가장자리(크기 조절)·스크롤바 — 글 영역 밖
-        # ── 실제로 글이 선택됐을 때만 띄운다(2026-09-28 사용자 보고 "글자도 없는데 클릭만 해도 나타난다") ──
-        # 드래그 "추정"(4px 이상 움직임)만으로는 배율 140% 화면에서 클릭할 때 손 떨림도 드래그가 됐다. 그래서 확장처럼
-        # "선택이 있을 때만"(selection-button.js selectedRange) — 앞 앱의 선택 끝 글자 위치를 UIA 로 한 자리만 묻고
-        # (원문 형광펜의 UIA 스레드, 1~20ms), 얻었으면 그 옆(확장과 같은 자리)에 띄운다. 고른 글이 없거나("none")
-        # 글 문서가 아니거나 조회가 안 되면(None) 띄우지 않는다. 대가: UIA 글 기능이 없는 드문 앱에선 점이 안 뜬다(Shift+X).
-        hl = _ensure_source_highlighter() if source_highlight_enabled else None
-        if hl is not None and hasattr(hl, "query_selection_end"):
-            _dot_query_gen += 1
-            gen = _dot_query_gen
+        browser = exe if (disable_in_browsers and _is_disabled_browser_exe(exe)) else None
+        _dot_query_gen += 1
+        gen = _dot_query_gen
 
-            def place(pos):
-                # 결과를 기다리는 사이 다시 누르거나 키를 쳤으면(hide 가 세대를 올림) 옛 결과는 버린다
-                if gen != _dot_query_gen or not isinstance(pos, tuple):
-                    return
-                if selection_button is not None and selection_button_enabled:
-                    _safe_ui("빨간 점 표시", selection_button.show_at, pos[0], pos[1])
+        def show_if_selected(_scheme=None):
+            if gen != _dot_query_gen:
+                return                               # 주소를 묻는 사이 다시 누르거나 키를 쳤다
+            _show_dot_where_selected(x, y)
 
-            _safe_ui("선택 확인", hl.query_selection_end, place)
+        # 브라우저면 일반 웹페이지(http·https)에서만 쉰다 — 크롬 확장이 자기 점을 띄운다. 드래그할 때마다 남기면 콘솔이
+        # 넘치므로 파일 로그(debug)에만 남긴다. 새 탭·확장·설정·내 PC 파일·주소 모름이면 다른 앱과 같이(2026-10-23 사용자 결정)
+        _unless_web_page(browser, show_if_selected,
+                         lambda scheme: logging.debug(f"[빨간 점] {browser} 웹페이지({scheme})에서는 띄우지 않음"))
+
+
+def _show_dot_where_selected(x, y):
+    """(Tk 메인) 실제로 글이 선택됐을 때만 빨간 점을 띄운다 — 앞 앱에 선택 끝 글자 위치를 묻고 얻었으면 그 옆.
+
+    2026-09-28 사용자 보고 "글자도 없는데 클릭만 해도 나타난다": 드래그 "추정"(4px 이상 움직임)만으로는 배율 140% 화면에서
+    클릭할 때 손 떨림도 드래그가 됐다. 그래서 확장처럼 "선택이 있을 때만"(selection-button.js selectedRange) — 앞 앱의
+    선택 끝 글자 위치를 UIA 로 한 자리만 묻고(원문 형광펜의 UIA 스레드, 1~20ms), 얻었으면 그 옆(확장과 같은 자리)에 띄운다.
+    고른 글이 없거나("none") 글 문서가 아니거나 조회가 안 되면(None) 띄우지 않는다. 대가: UIA 글 기능이 없는 앱에선
+    점이 안 뜬다(단축키로 읽는다 — 텔레그램은 _show_dot_if_telegram_selected 로 따로 본다).
+    """
+    global _dot_query_gen
+    if selection_button is None or not selection_button_enabled:
+        return
+    hl = _ensure_source_highlighter() if source_highlight_enabled else None
+    if hl is not None and hasattr(hl, "query_selection_end"):
+        _dot_query_gen += 1
+        gen = _dot_query_gen
+
+        def place(pos):
+            # 결과를 기다리는 사이 다시 누르거나 키를 쳤으면(hide 가 세대를 올림) 옛 결과는 버린다
+            if gen != _dot_query_gen or not isinstance(pos, tuple):
+                return
+            if selection_button is not None and selection_button_enabled:
+                _safe_ui("빨간 점 표시", selection_button.show_at, pos[0], pos[1])
+
+        _safe_ui("선택 확인", hl.query_selection_end, place)
+        return
+    # UIA 를 못 쓰는 환경(모듈 없음·원문 형광펜 꺼짐)에서만 예전처럼 드래그 추정으로 띄운다
+    _safe_ui("빨간 점 표시", selection_button.show_at, x, y)
+
+
+def _show_dot_if_telegram_selected(x, y):
+    """(Tk 메인) 텔레그램: 마우스를 뗀 뒤 메시지가 "선택"(우클릭 메뉴 → 선택) 상태면 뗀 자리 옆에 빨간 점.
+
+    2026-10-23 사용자 결정: 텔레그램은 글 위치 기능이 없어(10-10 실측) 선택 끝을 못 묻는다 → "선택한 메시지"로 판단한다.
+      자리 = 마우스를 뗀 자리 옆(메시지 칸은 창 너비로 잡힐 수 있어 메시지 끝 옆은 엉뚱해진다).
+      때 = "선택" 을 누를 때와, 선택 상태에서 메시지를 더 누를 때마다. 선택이 다 풀렸으면 띄우지 않는다.
+    점을 누르면 단축키와 같은 Ctrl+C 로 읽는다 — 텔레그램은 선택한 메시지 글을 복사해 준다(2026-10-23 실측, 머리말 없음).
+    "선택한 메시지"를 묻는 일은 원문 형광펜 켬/끔과 무관하다(점 판단용 UIA 조회만 빌려 쓴다).
+    우클릭 메뉴가 아직 떠 있으면(결과 "menu") TELEGRAM_MENU_RETRY_MS 뒤 다시 묻고, TELEGRAM_MENU_RETRY_MAX_S 를 넘으면 그만둔다
+    (2026-10-23 개발 모드 시험 "처음엔 안 뜨고 다음엔 뜬다" — 뗀 순간 메뉴가 닫히는 중이었다, 로그로 확인). 그사이 다른 곳을
+    누르거나 키를 치면(hide 가 세대를 올림) 그만둔다.
+    """
+    global _dot_query_gen
+    hl = _ensure_source_highlighter()
+    if hl is None or not hasattr(hl, "query_telegram_selected"):
+        return
+    _dot_query_gen += 1
+    gen = _dot_query_gen
+    started = time.monotonic()
+    tries = [0]
+
+    def ask():
+        if gen != _dot_query_gen:
             return
-        # UIA 를 못 쓰는 환경(모듈 없음·원문 형광펜 꺼짐)에서만 예전처럼 드래그 추정으로 띄운다
-        _safe_ui("빨간 점 표시", selection_button.show_at, args[0], args[1])
+        tries[0] += 1
+        _safe_ui("텔레그램 선택 확인", hl.query_telegram_selected, x, y, place)
+
+    def place(selected):
+        if gen != _dot_query_gen:
+            return
+        waited = time.monotonic() - started
+        # 진단 로그(원인 확정 전까지 — 사용자 결정): 몇 번째 확인에서 무엇이 나왔고 처음 물은 뒤 몇 ms 였는지
+        logging.info(f"[텔레그램] 빨간 점 {tries[0]}번째 확인: {selected} (처음 물은 뒤 {waited * 1000:.0f}ms)")
+        if selected == "menu" and waited < TELEGRAM_MENU_RETRY_MAX_S and root is not None:
+            root.after(TELEGRAM_MENU_RETRY_MS, ask)
+            return
+        if selected is not True:
+            return
+        if selection_button is not None and selection_button_enabled:
+            _safe_ui("빨간 점 표시", selection_button.show_at, x, y)
+
+    ask()
 
 
 def _on_selection_button_click():
@@ -1983,9 +2077,11 @@ def toggle_selection_button():
         pass
 
 
-# ── 브라우저에서 비활성화 (2026-09-28 사용자 확정) ─────────────────────────────────────────────
+# ── 브라우저에서 비활성화 (2026-09-28 사용자 확정, 2026-10-23 웹페이지만으로 좁힘) ──────────────────
 # Aside·웨일·크롬에는 크롬 확장 read-aloud-hrg 가 깔려 있어 확장이 빨간 점·읽기를 맡는다.
-# 그 브라우저가 전경이면 이 앱은 빨간 점을 띄우지 않고 단축키로 새 읽기를 시작하지 않는다(둘이 겹쳐 읽지 않게).
+# 그 브라우저가 전경이고 지금 페이지가 일반 웹페이지(http·https)면 이 앱은 빨간 점을 띄우지 않고 단축키로 새 읽기를
+# 시작하지 않는다(둘이 겹쳐 읽지 않게). 확장이 못 도는 페이지(새 탭·확장 페이지·브라우저 설정·내 PC 파일)와 주소를
+# 모를 때(느림·문서 밖)는 이 앱이 다른 앱과 똑같이 동작한다(2026-10-23 사용자 결정). 주소는 _unless_web_page 가 묻는다.
 
 def _foreground_exe_name():
     """(Tk 메인) 지금 전경 창을 만든 프로세스의 실행 파일 이름(예 "chrome.exe"). 모르면 None.
@@ -2049,6 +2145,51 @@ def _foreground_exe_name():
 def _is_disabled_browser_exe(exe_name):
     """실행 파일 이름이 "쉬어야 할 브라우저"(Aside·웨일·크롬)인가. 대소문자 무시. 순수 함수(테스트용으로 따로 뺐다)."""
     return bool(exe_name) and str(exe_name).lower() in _BROWSER_EXES
+
+
+def _is_telegram_exe(exe_name):
+    """실행 파일 이름이 텔레그램 데스크톱인가. 대소문자 무시. 순수 함수(테스트용)."""
+    return bool(exe_name) and str(exe_name).lower() in _TELEGRAM_EXES
+
+
+def _is_web_scheme(scheme):
+    """주소 종류(source_highlight.url_scheme 결과)가 일반 웹페이지(http·https)인가. 순수 함수(테스트용).
+
+    그 밖(chrome-extension·chrome·aside·about·file 등)과 None(모름)은 False — 이 앱이 동작한다(2026-10-23 사용자 결정).
+    """
+    return bool(scheme) and str(scheme).lower() in ("http", "https")
+
+
+def _unless_web_page(browser, proceed, on_web=None):
+    """(Tk 메인) 브라우저면 지금 페이지가 일반 웹페이지인지 묻고, 아니면 proceed(scheme) 를 부른다.
+
+    browser : _foreground_disabled_browser() 결과(브라우저 실행 파일 이름 또는 None).
+      None → 묻지 않고 곧바로 proceed(None).
+      브라우저 → 원문 형광펜의 UIA 스레드에 주소 종류를 묻는다(query_page_scheme — 포커스에서 위로 문서 요소 하나, 한 자리 호출).
+        일반 웹페이지(http·https) → on_web(scheme) (크롬 확장 몫이라 쉰다).
+        그 밖(새 탭·확장 페이지·브라우저 설정·내 PC 파일) 또는 모름(느림·문서 밖·UIA 없음) → proceed(scheme).
+    결과는 Tk 메인에서 나중에 온다(보통 수 ms, 느리면 1초 제한 — 2026-10-23 Aside 실측 2~130ms, 가끔 2초 넘게 걸려 모름).
+    """
+    if not browser:
+        proceed(None)
+        return
+    hl = _ensure_source_highlighter()
+    if hl is None or not hasattr(hl, "query_page_scheme"):
+        proceed(None)                       # 주소를 물을 수 없다 → 모름 → 동작(사용자 결정)
+        return
+
+    def done(scheme):
+        if _is_web_scheme(scheme):
+            if on_web is not None:
+                on_web(scheme)
+        else:
+            proceed(scheme)
+
+    try:
+        hl.query_page_scheme(done)
+    except Exception as e:
+        logging.debug(f"페이지 주소 확인 요청 실패(모름 → 동작): {e}")
+        proceed(None)
 
 
 def _foreground_disabled_browser():
@@ -3276,7 +3417,7 @@ def toggle_reader_window():
     except Exception:
         pass
 
-def read_selected_text(from_selection_button=False):
+def read_selected_text(from_selection_button=False, _page_checked=False):
     """선택된 텍스트를 읽어옵니다. (Ctrl+C 트릭 사용)
 
     ⚠️ Tk 메인 스레드에서 부른다(단축키·빨간 점 클릭이 root.after 로 부름).
@@ -3293,24 +3434,34 @@ def read_selected_text(from_selection_button=False):
     ⚠️ time.sleep 합계 약 0.8초 동안 Tk 메인이 멈춘다(하단 바·리더 창·빨간 점도 그동안 멈춤).
        단축키로 멈출 때의 이 지연은 설계상 감수하기로 한 것이다. 이 사이 재생이 스스로 끝나면 tts_playing 이
        False 가 되어 2) 대신 3)(아무것도 안 함) 으로 갈 수 있다(드묾 — 어차피 끝난 읽기라 결과는 같다).
-    브라우저에서 비활성화 (2026-09-28 사용자 확정, 켜져 있고 전경 창이 Aside·웨일·크롬일 때) — 맨 처음에 판별한다:
+    브라우저에서 비활성화 (2026-09-28 사용자 확정, 켜져 있고 전경 창이 Aside·웨일·크롬일 때) — 맨 처음에 판별한다.
+      2026-10-23 부터 일반 웹페이지(http·https)에서만 쉰다 — 주소 종류를 먼저 묻고(_unless_web_page) 답이 오면
+      _page_checked=True 로 이 함수를 다시 부른다. 새 탭·확장 페이지·브라우저 설정·내 PC 파일, 주소 모름(느림 포함)이면
+      다른 앱과 똑같이 읽는다(사용자 결정). 웹페이지일 때:
       - 새 읽기를 시작하지 않는다(그 브라우저는 크롬 확장이 읽는다). Ctrl+C 도 보내지 않는다(클립보드도 안 건드림).
       - 단축키 + 이 앱이 읽는 중 → 멈춘다(멈추는 것은 막지 않는다 — 사용자 확정). 브라우저에 글이 선택돼 있어도 멈춘다:
         새 글을 읽지 않으니 "선택 있음 → 새로 읽기" 로 갈 수 없고, 그대로 읽게 두면 확장이 그 글을 읽을 때 둘이 겹친다.
-      - 빨간 점 경로(from_selection_button)는 브라우저에서는 점이 안 뜨므로 보통 오지 않는다. 와도 아무것도 안 한다.
+      - 빨간 점 경로(from_selection_button)는 웹페이지에서는 점이 안 뜨므로 보통 오지 않는다. 와도 아무것도 안 한다.
       ⚠️ 판별(OpenProcess 등)은 여기(Tk 메인)에서 한다. 키보드 훅 콜백(on_press)에서 하면 훅이 느려진다.
     """
     global Controller, Key, pyperclip, ctrl_pressed, alt_pressed, shift_pressed
 
-    browser = _foreground_disabled_browser()
+    browser = None if _page_checked else _foreground_disabled_browser()
     if browser:
-        if from_selection_button:
-            log_to_console(f"[브라우저] {browser} 에서는 읽지 않습니다(크롬 확장이 읽습니다)")
-        elif tts_playing:
-            log_to_console(f"[브라우저] {browser} 에서 단축키 → 읽던 것 중지 (새 읽기는 크롬 확장 몫)")
-            stop_tts()
-        else:
-            log_to_console(f"[브라우저] {browser} 에서는 단축키로 읽지 않습니다(크롬 확장이 읽습니다)")
+        def on_web(scheme):
+            if from_selection_button:
+                log_to_console(f"[브라우저] {browser} 웹페이지에서는 읽지 않습니다(크롬 확장이 읽습니다)")
+            elif tts_playing:
+                log_to_console(f"[브라우저] {browser} 웹페이지에서 단축키 → 읽던 것 중지 (새 읽기는 크롬 확장 몫)")
+                stop_tts()
+            else:
+                log_to_console(f"[브라우저] {browser} 웹페이지에서는 단축키로 읽지 않습니다(크롬 확장이 읽습니다)")
+
+        def proceed(scheme):
+            log_to_console(f"[브라우저] {browser} — 웹페이지가 아님({scheme or '주소 모름'}) → 이 앱이 읽습니다")
+            read_selected_text(from_selection_button, _page_checked=True)
+
+        _unless_web_page(browser, proceed, on_web)
         return
 
     if not Controller:

@@ -1172,5 +1172,216 @@ class HighlighterTest(unittest.TestCase):
         self.assertEqual(self.doc.forbidden, [])
 
 
+# ════════════════════════════════════════════════════════════════════
+#  한 번짜리 조회 — 페이지 주소 종류(브라우저)·텔레그램 메시지 선택 (2026-10-23)
+# ════════════════════════════════════════════════════════════════════
+class UrlSchemeTest(unittest.TestCase):
+    def test_schemes(self):
+        cases = {
+            "https://example.com/a?b#c": "https", "HTTP://x": "http", "chrome-extension://abc/newtab.html": "chrome-extension",
+            "chrome://settings": "chrome", "file:///C:/a.txt": "file", "about:blank": "about", "aside://newtab": "aside",
+        }
+        for value, want in cases.items():
+            self.assertEqual(sh.url_scheme(value), want, value)
+
+    def test_not_urls(self):
+        for value in (None, "", "   ", "hello world", "그냥 글", "C:\\Users\\a.txt", "no-scheme-here", ":nothing"):
+            self.assertIsNone(sh.url_scheme(value), repr(value))
+
+    def test_never_returns_host(self):
+        self.assertEqual(sh.url_scheme("https://secret.example.com/path"), "https")
+
+
+# 크로미움·텔레그램 실측 모양을 흉내 내는 요소: ControlType·ClassName·Value·SelectionItem.IsSelected 만 대답한다
+UP = types.SimpleNamespace(**vars(U), UIA_ControlTypePropertyId=30003, UIA_ClassNamePropertyId=30012,
+                           UIA_ValueValuePropertyId=30045, UIA_SelectionItemIsSelectedPropertyId=30079,
+                           tagPOINT=lambda x, y: ("pt", x, y))
+DOC, LINK, PANE, EDIT, LIST, ITEM, TEXT = 50030, 50005, 50033, 50004, 50008, 50007, 50020
+ACCESS_DENIED = -2147024891
+
+
+class PropElement:
+    def __init__(self, uia, ct, parent=None, cls="", value="", selected=False):
+        self.uia, self.ct, self.parent, self.cls, self.value, self.selected = uia, ct, parent, cls, value, selected
+
+    def GetCurrentPropertyValue(self, pid):
+        self.uia.note("prop")
+        return {UP.UIA_ControlTypePropertyId: self.ct, UP.UIA_ClassNamePropertyId: self.cls,
+                UP.UIA_ValueValuePropertyId: self.value,
+                UP.UIA_SelectionItemIsSelectedPropertyId: self.selected}[pid]
+
+    def FindAll(self, *a):
+        self.uia.forbidden.append("FindAll")
+
+    def FindFirst(self, *a):
+        self.uia.forbidden.append("FindFirst")
+
+
+class PropUIA:
+    def __init__(self):
+        self.focused = None
+        self.under = None
+        self.under_error = None
+        self.points = []
+        self.calls = []
+        self.forbidden = []
+        self.hook = None
+        self.ControlViewWalker = self
+
+    def note(self, name):
+        self.calls.append(name)
+        if self.hook:
+            self.hook(name)
+
+    def el(self, ct, parent=None, **kw):
+        return PropElement(self, ct, parent, **kw)
+
+    def GetParentElement(self, el):
+        self.note("parent")
+        return el.parent
+
+    def GetFocusedElement(self):
+        self.note("focus")
+        return self.focused
+
+    def ElementFromPoint(self, pt):
+        self.note("point")
+        self.points.append(pt)
+        if self.under_error is not None:
+            raise FakeCOMError(self.under_error)
+        return self.under
+
+
+class OneShotQueryTest(unittest.TestCase):
+    """query_page_scheme / query_telegram_selected — 결과는 Tk 메인(테스트 스레드)에서 on_done 으로."""
+
+    def make(self):
+        self.uia = PropUIA()
+        self.root = FakeRoot()
+        self.clock = FakeClock()
+        self.hl = SourceHighlighter(self.root, uia_factory=lambda: (self.uia, UP),
+                                    overlay_factory=lambda root: FakeOverlay(), win_env=FakeEnv(), clock=self.clock)
+        self.addCleanup(self.hl.destroy)
+        return self.uia
+
+    def ask(self, method, *args):
+        got = []
+        getattr(self.hl, method)(*args, lambda r: got.append((r, threading.current_thread())))
+        self.assertTrue(wait(self.root, lambda: got), "on_done 이 와야 한다")
+        self.assertIs(got[0][1], threading.current_thread(), "on_done 은 Tk 메인(테스트 스레드)에서")
+        self.assertEqual(self.uia.forbidden, [])
+        return got[0][0]
+
+    # ── 페이지 주소 종류 ──
+    def test_focus_is_web_document(self):
+        u = self.make()
+        u.focused = u.el(DOC, u.el(PANE), value="https://example.com/watch?v=1")
+        self.assertEqual(self.ask("query_page_scheme"), "https")
+
+    def test_new_tab_is_extension_page(self):
+        u = self.make()
+        u.focused = u.el(DOC, value="chrome-extension://abcdef/newtab.html")
+        self.assertEqual(self.ask("query_page_scheme"), "chrome-extension")
+
+    def test_link_value_is_ignored_document_value_wins(self):
+        # 링크(썸네일)에 포커스 — 링크 값도 https 지만(실측) 그건 링크가 가리키는 곳. 문서 값을 봐야 한다
+        u = self.make()
+        doc = u.el(DOC, value="chrome-extension://abc/page.html")
+        u.focused = u.el(LINK, u.el(LINK, u.el(50026, doc)), value="https://elsewhere.example/")
+        self.assertEqual(self.ask("query_page_scheme"), "chrome-extension")
+
+    def test_browser_frame_without_document_is_unknown(self):
+        # 탭 줄·주소창 쪽(Pane 들) — 문서를 못 만난다(실측 Chrome_WidgetWin_1 …) → None(모름)
+        u = self.make()
+        el = None
+        for _ in range(12):
+            el = u.el(PANE, el)
+        u.focused = el
+        self.assertIsNone(self.ask("query_page_scheme"))
+        self.assertLessEqual(u.calls.count("parent"), sh.MAX_ANCESTOR_STEPS, "위로 걷기는 MAX_ANCESTOR_STEPS 까지만")
+
+    def test_document_without_value_is_unknown(self):
+        u = self.make()
+        u.focused = u.el(DOC, value="")
+        self.assertIsNone(self.ask("query_page_scheme"))
+
+    def test_slow_call_gives_unknown(self):
+        u = self.make()
+        u.focused = u.el(DOC, value="https://x/")
+        u.hook = lambda name: self.clock.advance(2.0) if name == "focus" else None
+        self.assertIsNone(self.ask("query_page_scheme"))
+
+    # ── 텔레그램 메시지 선택 ──
+    def tg_history(self, u):
+        return u.el(LIST, u.el(50026, cls="class Ui::ElasticScroll"), cls="class HistoryInner")
+
+    def test_selected_message_in_focus(self):
+        u = self.make()
+        u.focused = u.el(ITEM, self.tg_history(u), selected=True)
+        self.assertIs(self.ask("query_telegram_selected", 10, 20), True)
+        self.assertEqual(u.points, [("pt", 10, 20)])
+
+    def test_selected_message_under_mouse_only(self):
+        # "선택" 직후 실측: 포커스는 다른 메시지(선택 안 됨), 마우스 아래가 고른 메시지
+        u = self.make()
+        hist = self.tg_history(u)
+        u.focused = u.el(ITEM, hist, selected=False)
+        u.under = u.el(ITEM, hist, selected=True)
+        self.assertIs(self.ask("query_telegram_selected", 5, 6), True)
+
+    def test_inner_element_walks_up_to_message(self):
+        u = self.make()
+        u.focused = u.el(EDIT, cls="class Ui::InputField::Inner")
+        u.under = u.el(TEXT, u.el(ITEM, self.tg_history(u), selected=True))
+        self.assertIs(self.ask("query_telegram_selected", 1, 2), True)
+
+    def test_not_selected(self):
+        u = self.make()
+        hist = self.tg_history(u)
+        u.focused = u.el(EDIT, cls="class Ui::InputField::Inner")
+        u.under = u.el(ITEM, hist, selected=False)
+        self.assertIs(self.ask("query_telegram_selected", 1, 2), False)
+
+    def test_chat_list_item_is_not_a_message(self):
+        # 왼쪽 대화 목록의 열린 대화도 "선택됨"이다(실측) — 메시지가 아니므로 False
+        u = self.make()
+        u.focused = u.el(50026, cls="class Dialogs::Widget")
+        u.under = u.el(ITEM, u.el(LIST, cls="class Dialogs::InnerWidget"), selected=True)
+        self.assertIs(self.ask("query_telegram_selected", 1, 2), False)
+
+    def test_menu_still_open_gives_menu(self):
+        # "선택" 을 뗀 순간: 포커스는 Ui::PopupMenu(50009), 마우스 아래는 메뉴 항목(50011) — 실측 모양
+        u = self.make()
+        hist = self.tg_history(u)
+        u.focused = u.el(50009, hist, cls="class Ui::PopupMenu")
+        u.under = u.el(50011, u.el(50026, cls="class Ui::Menu::Menu"), cls="class Ui::Menu::Action")
+        self.assertEqual(self.ask("query_telegram_selected", 1, 2), "menu")
+
+    def test_selected_wins_over_menu(self):
+        u = self.make()
+        u.focused = u.el(50009, cls="class Ui::PopupMenu")
+        u.under = u.el(ITEM, self.tg_history(u), selected=True)
+        self.assertIs(self.ask("query_telegram_selected", 1, 2), True)
+
+    def test_point_access_denied_is_skipped(self):
+        u = self.make()
+        u.focused = u.el(ITEM, self.tg_history(u), selected=True)
+        u.under_error = ACCESS_DENIED
+        self.assertIs(self.ask("query_telegram_selected", 1, 2), True)
+
+    def test_point_access_denied_and_nothing_selected(self):
+        u = self.make()
+        u.focused = u.el(EDIT, cls="class Ui::InputField::Inner")
+        u.under_error = ACCESS_DENIED
+        self.assertIs(self.ask("query_telegram_selected", 1, 2), False)
+
+    def test_selection_end_still_works_through_one_shot(self):
+        # 기존 query_selection_end 도 같은 길(_one_shot)로 간다 — 글 기능 없는 요소면 None
+        u = self.make()
+        u.focused = u.el(EDIT)
+        u.focused.GetCurrentPropertyValue = lambda pid: False if pid == UP.UIA_IsTextPatternAvailablePropertyId else 0
+        self.assertIsNone(self.ask("query_selection_end"))
+
+
 if __name__ == "__main__":
     unittest.main()
