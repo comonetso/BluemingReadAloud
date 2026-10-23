@@ -111,6 +111,7 @@ import readaloud_text
 __all__ = [
     "SAMPLE_RATE", "BLOCK_SAMPLES", "PREFETCH_AHEAD", "SYNTH_CACHE_SIZE", "MOVE_DELAY", "RESTART_AFTER", "LOADING_DELAY",
     "STATE_TICK", "DRAIN_SECONDS", "PRODUCER_JOIN_TIMEOUT", "RATE_MIN", "RATE_MAX", "VOLUME_MIN", "VOLUME_MAX",
+    "RATE_STEPS", "DEFAULT_RATE_STEP", "normalize_rate_step", "rate_choices", "snap_rate", "format_rate",
     "TtsSession", "SegmentFailed", "make_google_synthesize", "sounddevice_stream_factory", "play_start_beep",
     "voice_lang_of", "voice_type_of", "clamp_rate", "clamp_volume", "is_silent_segment", "count_spoken_chars",
     "apply_gain", "pcm_from_linear16",
@@ -139,6 +140,10 @@ SYNTH_CACHE_SIZE = 2         # tts-engines.js:407 prefetched ... .slice(0, 2) �
 #    라고 적혀 있다. 실측과 다르다. 나중에 서버가 2.0 을 넘는 값을 거절하기 시작하면 여기를 2.0 으로 내려라
 #    (거절되면 그 조각은 합성 실패로 건너뛰어진다).
 RATE_MIN, RATE_MAX = 0.25, 4.0
+# 속도 목록: 간격 → (가장 느린 값, 가장 빠른 값). 2026-10-24 사용자 결정 — 막대 대신 하단 바 닫기 옆 목록에서 고르고,
+#   간격(0.1 은 0.7~2.0배, 0.25 는 0.5~3.0배, 처음 0.1)은 설정 창에서 정한다. 목록에 없는 속도는 snap_rate 로 맞춘다.
+RATE_STEPS = {0.1: (0.7, 2.0), 0.25: (0.5, 3.0)}
+DEFAULT_RATE_STEP = 0.1
 # 재생 블록에 곱하는 게인. 1 을 넘기면 int16 이 깨지므로(클리핑) 0~1. 하단 바 슬라이더는 0.2~1(page-ui.js).
 VOLUME_MIN, VOLUME_MAX = 0.0, 1.0
 
@@ -187,6 +192,50 @@ def clamp_rate(rate):
     if r != r:  # NaN
         return 1.0
     return min(RATE_MAX, max(RATE_MIN, r))
+
+
+def normalize_rate_step(step):
+    """속도 간격을 RATE_STEPS 의 열쇠(0.1 / 0.25) 중 하나로. 모르는 값이면 DEFAULT_RATE_STEP."""
+    try:
+        s = float(step)
+    except (TypeError, ValueError):
+        return DEFAULT_RATE_STEP
+    for known in RATE_STEPS:
+        if abs(s - known) < 1e-9:
+            return known
+    return DEFAULT_RATE_STEP
+
+
+def rate_choices(step):
+    """간격에 맞는 속도 목록(느린 것부터). 0.1 → 0.7~2.0(14개), 0.25 → 0.5~3.0(11개)."""
+    step = normalize_rate_step(step)
+    lo, hi = RATE_STEPS[step]
+    n = int(round((hi - lo) / step))
+    return [round(lo + i * step, 2) for i in range(n + 1)]
+
+
+def snap_rate(rate, step):
+    """속도를 그 간격 목록의 가장 가까운 값으로. 정확히 가운데면 빠른 쪽. 숫자가 아니면 1.0 에 맞춘다.
+
+    빠른 쪽인 까닭: 하단 바 슬라이더가 쓰던 눈금 맞춤(bottom_bar._snap — 브라우저 range 입력처럼 동점이면 큰 쪽)과 같게.
+    """
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        r = 1.0
+    if r != r:  # NaN
+        r = 1.0
+    best, best_d = None, None
+    for c in rate_choices(step):
+        d = abs(c - r)
+        if best is None or d < best_d - 1e-9 or (abs(d - best_d) <= 1e-9 and c > best):
+            best, best_d = c, d
+    return best
+
+
+def format_rate(rate, step):
+    """목록에 보일 글자. 간격 0.1 → "1.3x", 간격 0.25 → "1.25x"."""
+    return ("%.1fx" if normalize_rate_step(step) == 0.1 else "%.2fx") % float(rate)
 
 
 def clamp_volume(volume):

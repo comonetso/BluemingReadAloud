@@ -97,6 +97,12 @@ SLIDER_TRACK_H = 4       # 크롬 range 트랙 두께(추정)
 FILL_FRAME_MS = 50       # 진행선 1초 전환 애니메이션의 한 프레임 간격
 SPIN_FRAMES = 20         # 스피너 한 바퀴(0.8초)를 몇 장으로 나눌지 → 40ms 마다 18도
 OUTSIDE_POLL_MS = 50     # 패널이 열려 있는 동안 Esc·바깥 클릭을 살피는 간격
+# 속도 버튼·목록 — 2026-10-24 사용자 결정: 닫기 버튼 옆에서 목록으로 속도를 고른다. 확장에 없는 모양이라 크기는 [임의]
+RATE_BTN_W = 56          # [임의] 속도 글자 버튼 폭("1.25x" + 좌우 여백). 높이는 BTN_D
+RATE_ITEM_H = 26         # [임의] 목록 한 줄 높이
+RATE_MENU_W = 76         # [임의] 목록 창 폭
+RATE_MENU_PAD_Y = 6      # [임의] 목록 위아래 여백
+RATE_RADIUS = 8          # [임의] 속도 버튼 배경·목록 창 모서리 둥글기
 KEEP_ALIVE_MS = 3000     # 맨 위 다시 올리기 주기 — whisperer.py update_state 의 3초(500ms×6)와 같게
 
 
@@ -129,6 +135,7 @@ PANEL_BG = "#383838"                        # .panel rgba(56,56,56,.97) (page-ui
 PANEL_ALPHA = 0.97
 NAME_FG = _blend(WHITE, PANEL_BG, 0.85)     # .row .name rgba(255,255,255,0.85) (page-ui.js:955)
 ACCENT = "#4d8dff"                          # .row input accent-color #4d8dff (page-ui.js:961)
+RATE_ITEM_HOVER_BG = _blend(WHITE, PANEL_BG, 0.12)   # [임의] 속도 목록에서 마우스가 올라간 줄 바탕
 SLIDER_TRACK_BG = "#efefef"                 # 크롬 기본 range 의 빈 트랙 색(추정)
 # 말풍선(title 툴팁) — 확장은 브라우저 기본 툴팁을 쓴다. 윈도우 기본 툴팁 모양을 흉내 낸 값(추정).
 TIP_BG = "#ffffff"
@@ -480,13 +487,14 @@ def _auto_scale(root) -> float:
 
 
 class _Button:
-    """바 위의 동그란 버튼 하나의 상태(그리기는 BottomBar 가 한다)."""
+    """바 위의 동그란 버튼 하나의 상태(그리기는 BottomBar 가 한다). w 가 있으면 폭 w·높이 d 의 둥근 사각형 버튼."""
 
-    __slots__ = ("key", "d", "cx", "cy", "visible", "enabled", "disc", "icon")
+    __slots__ = ("key", "d", "w", "cx", "cy", "visible", "enabled", "disc", "icon")
 
-    def __init__(self, key, d):
+    def __init__(self, key, d, w=None):
         self.key = key
-        self.d = d              # 지름(실제 픽셀)
+        self.d = d              # 지름(실제 픽셀). 사각형 버튼이면 높이
+        self.w = w              # 사각형 버튼의 폭(실제 픽셀). 동그란 버튼은 None
         self.cx = self.cy = 0   # 중심 좌표(캔버스 안)
         self.visible = True
         self.enabled = True
@@ -519,11 +527,14 @@ class BottomBar:
     """
 
     # ─────────────────────────────── 생성 ───────────────────────────────
-    def __init__(self, root, on_command, get_msg, scale=None):
+    def __init__(self, root, on_command, get_msg, scale=None, show_settings=True):
         """root: 앱 tk 루트(숨겨져 있어도 됨). on_command(cmd[, value]). get_msg(key, *args).
 
         scale: CSS 픽셀 → 실제 픽셀 배율. None 이면 화면 DPI 로 자동(_auto_scale).
                (약속 밖의 선택 인자. 안 넘기면 된다)
+        show_settings: False 면 오른쪽 설정(톱니) 버튼을 늘 숨긴다 → 속도·볼륨 패널도 열리지 않는다.
+               앱(whisperer.py)은 False 로 만든다(2026-10-24 사용자 결정: 속도는 설정 창 목록에서만, 볼륨은 늘 1.0).
+               패널 코드(_build_panel 이하)는 지우지 않았다 — 기본값 True 는 확장 그대로의 모양(dev_demo_ui.py 가 쓴다).
 
         ⚠ 여기서 창 3개를 만들고 "투명도 0 으로 한 번 띄웠다가" 바로 숨긴다(_make_popup).
           처음 띄울 때 Win32 스타일(포커스 안 뺏기)을 미리 걸어 두기 위해서다.
@@ -543,6 +554,7 @@ class BottomBar:
         self._hover = None                   # 마우스가 올라가 있는 버튼 key
         self._pressed = None                 # 눌린 채인 버튼 key (뗄 때 같은 버튼이면 클릭)
         self._panel_open = False
+        self._show_settings = bool(show_settings)
         self._settings_enabled = False
         self._muted = False
         self._layout_key = None
@@ -556,6 +568,11 @@ class BottomBar:
         # 설정 패널
         self._slider_vals = {k: _snap(p, p["to_slider"](1.0)) for k, p in _PARAMS.items()}
         self._editing = {k: False for k in _PARAMS}
+        # 속도 버튼·목록(2026-10-24): set_rate_choices 로 받은 [(배속, 글자)] — 비어 있으면 버튼을 숨긴다
+        self._rate_items = []
+        self._rate_value = None              # 버튼에 보일 지금 속도(update 의 rate, 목록에서 고르면 바로 그 값)
+        self._rate_menu_open = False
+        self._rmenu_hover = None             # 목록에서 마우스가 올라간 줄 번호
         self._drag = None                    # (key, 누르기 시작할 때 값)
         self._poll_prev = None               # 바깥 클릭 감시: 직전 (esc, mouse) 눌림 상태
         self._panel_fg = None                # 패널을 열 때의 전경 창(바뀌면 닫는다 = 확장 blur)
@@ -573,6 +590,7 @@ class BottomBar:
         self._make_images()
         self._build_bar()
         self._build_panel()
+        self._build_rate_menu()
         self._build_tip()
         self._render()
 
@@ -639,6 +657,13 @@ class BottomBar:
         ImageDraw.Draw(big).ellipse((0, 0, d * ss - 1, d * ss - 1), fill=fill)
         return ImageTk.PhotoImage(big.resize((d, d), Image.LANCZOS), master=self._root)
 
+    def _pill_image(self, w, h, r, fill, bg):
+        """폭 w·높이 h·모서리 반지름 r 의 매끄러운 둥근 사각형 이미지(바탕 bg). _disc_image 처럼 4배로 그려 줄인다."""
+        ss = 4
+        big = Image.new("RGB", (w * ss, h * ss), bg)
+        ImageDraw.Draw(big).rounded_rectangle((0, 0, w * ss - 1, h * ss - 1), radius=r * ss, fill=fill)
+        return ImageTk.PhotoImage(big.resize((w, h), Image.LANCZOS), master=self._root)
+
     def _spinner_frames(self, disc_fill):
         """로딩 스피너 한 바퀴 분의 이미지들 (확장 .spinner, page-ui.js:975-986).
 
@@ -674,6 +699,7 @@ class BottomBar:
             "play": self._disc_image(pd, PLAY_BG, BAR_BG),
             "play_hover": self._disc_image(pd, PLAY_HOVER_BG, BAR_BG),
             "thumb": self._disc_image(self._px(SLIDER_THUMB_D), ACCENT, PANEL_BG),
+            "rate_hover": self._pill_image(self._px(RATE_BTN_W), bd, self._px(RATE_RADIUS), HOVER_BG, BAR_BG),
         }
         self._spin = {False: self._spinner_frames(PLAY_BG), True: self._spinner_frames(PLAY_HOVER_BG)}
 
@@ -691,12 +717,15 @@ class BottomBar:
         # 시간 텍스트 — 경과(흰색) + " / 약 00:01:23"(흰색 70%)
         self._time_el = c.create_text(0, 0, text="00:00:00", fill=BAR_FG, font=self._font, anchor="e")
         self._time_tot = c.create_text(0, 0, text="", fill=TOTAL_FG, font=self._font, anchor="e")
-        # 버튼들 — 가운데 4개 + 오른쪽 끝 2개
+        # 버튼들 — 가운데 4개 + 오른쪽 끝 3개([설정] [속도] [닫기] — 속도는 2026-10-24 추가, 목록을 받기 전엔 숨김)
         self._buttons = {}
-        for key in ("prev", "play", "next", "mute", "settings", "close"):
-            b = _Button(key, self._px(PLAY_D if key == "play" else BTN_D))
+        for key in ("prev", "play", "next", "mute", "settings", "rate", "close"):
+            b = _Button(key, self._px(PLAY_D if key == "play" else BTN_D),
+                        w=self._px(RATE_BTN_W) if key == "rate" else None)
             if key == "play":
                 b.disc = c.create_image(0, 0, image=self._img["play"])
+            elif key == "rate":
+                b.disc = c.create_image(0, 0, image=self._img["rate_hover"], state="hidden")
             else:
                 b.disc = c.create_image(0, 0, image=self._img["hover"], state="hidden")
             b.icon = c.create_text(0, 0, text="", fill=BAR_FG, anchor="center")
@@ -705,6 +734,8 @@ class BottomBar:
         # 확장 초기 상태: 음소거 숨김, 설정 비활성, 재생 버튼은 스피너 (page-ui.js:595-605)
         self._buttons["mute"].visible = False
         self._buttons["settings"].enabled = False
+        self._buttons["settings"].visible = self._show_settings    # 숨긴 버튼은 그리지도(_redraw_buttons) 누르지도(_hit) 않는다
+        self._buttons["rate"].visible = False                       # set_rate_choices 가 목록을 주면 보인다
 
         c.bind("<Motion>", self._on_bar_motion)
         c.bind("<Leave>", self._on_bar_leave)
@@ -750,6 +781,21 @@ class BottomBar:
         pc.bind("<ButtonRelease-1>", self._on_panel_release)
         pc.bind("<Motion>", self._on_panel_motion)
 
+    def _build_rate_menu(self):
+        """속도 목록 창(2026-10-24 — 닫기 옆 속도 버튼을 누르면 바 위에 뜬다). 크기·줄은 열 때 _draw_rate_menu 가 정한다.
+
+        패널과 같은 포커스 안 뺏는 창이라 고른 뒤에도 글을 고른 앱의 포커스가 그대로다.
+        """
+        self._rmenu, self._rmenu_hwnd = self._make_popup(PANEL_BG, PANEL_ALPHA)
+        rc = self._rmenu_canvas = tk.Canvas(self._rmenu, width=1, height=1, bg=PANEL_BG,
+                                            bd=0, highlightthickness=0, **_no_autostyle(tk.Canvas))
+        rc.pack(fill="both", expand=True)
+        self._rmw = self._rmh = 1
+        self._rmenu_rows = []                 # 줄마다 바탕 사각형 id
+        rc.bind("<Motion>", self._on_rate_menu_motion)
+        rc.bind("<Leave>", lambda _e: self._set_rate_menu_hover(None))
+        rc.bind("<ButtonRelease-1>", self._on_rate_menu_release)
+
     def _build_tip(self):
         """버튼 이름 말풍선 창(확장의 title 툴팁 대신)."""
         self._tip, self._tip_hwnd = self._make_popup(TIP_BORDER, 1.0)
@@ -786,9 +832,10 @@ class BottomBar:
             self._layout_key = None
         self._win.geometry("%dx%d+%d+%d" % (w, self._h, left, bottom - self._h))
         if was_visible:
-            # 앞 읽기가 끝나기 전에 새 읽기가 왔다 → 앞 읽기의 흔적(상태·패널·말풍선)을 지운다
+            # 앞 읽기가 끝나기 전에 새 읽기가 왔다 → 앞 읽기의 흔적(상태·패널·속도 목록·말풍선)을 지운다
             self._last = None
             self._set_panel_open(False)
+            self._set_rate_menu_open(False)
             self._hide_tip()
         self._cancel("fill")
         self._fill_drawn = self._fill_from = 0.0
@@ -803,8 +850,26 @@ class BottomBar:
         if self._panel_open:
             self._place_panel()
 
+    def set_rate_choices(self, items):
+        """닫기 옆 속도 버튼의 목록 [(배속, 표시 글자), ...] 을 정한다(2026-10-24 — 간격 0.1·0.25 목록은 앱이 만들어 준다).
+
+        빈 목록이면 속도 버튼을 숨긴다. 목록이 열려 있으면 새 목록으로 다시 그린다. 고르면 on_command("setRate", 배속).
+        """
+        if self._destroyed:
+            return
+        self._rate_items = [(float(v), str(t)) for v, t in items]
+        self._buttons["rate"].visible = bool(self._rate_items)
+        self._layout_key = None              # 버튼이 보이고 숨는 것에 맞춰 다음 그리기 때 다시 배치
+        if self._rate_menu_open:
+            if self._rate_items:
+                self._draw_rate_menu()
+            else:
+                self._set_rate_menu_open(False)
+        if self._visible:
+            self._render()
+
     def hide(self):
-        """바·패널·말풍선을 숨기고 타이머를 모두 멈춘다. 읽기가 끝나거나 멈출 때 부른다.
+        """바·패널·속도 목록·말풍선을 숨기고 타이머를 모두 멈춘다. 읽기가 끝나거나 멈출 때 부른다.
 
         ⚠ 마지막 상태(_last)도 비운다. 다음 show() 는 새 읽기로 보고 "불러오는 중" 모양에서 시작한다.
         """
@@ -812,6 +877,7 @@ class BottomBar:
             return
         self._visible = False
         self._set_panel_open(False)
+        self._set_rate_menu_open(False)
         self._hide_tip()
         for name in list(self._jobs):
             self._cancel(name)
@@ -832,7 +898,7 @@ class BottomBar:
         except Exception:
             pass
         self._destroyed = True
-        for w in (self._tip, self._panel, self._win):
+        for w in (self._tip, self._panel, self._rmenu, self._win):
             try:
                 w.destroy()
             except Exception:
@@ -899,10 +965,12 @@ class BottomBar:
         b["mute"].visible = bool(st.get("can_mute"))
         self._muted = bool(st.get("muted"))
         # 설정: 값(rate/volume)이 없으면 비활성(page-ui.js:706)
-        self._settings_enabled = st.get("rate") is not None or st.get("volume") is not None
+        self._settings_enabled = self._show_settings and (st.get("rate") is not None or st.get("volume") is not None)
         b["settings"].enabled = self._settings_enabled
         if self._panel_open and not self._settings_enabled:
             self._set_panel_open(False)
+        if st.get("rate") is not None:
+            self._rate_value = st.get("rate")      # 속도 버튼 글자(엔진이 알려 준 지금 속도)
         self._render_params(st)
         self._render_time()
         self._redraw_buttons()
@@ -938,7 +1006,8 @@ class BottomBar:
         """
         tw = max(self._px(TIME_MIN_W), el_w + tot_w)
         mute_vis = self._buttons["mute"].visible
-        key = (self._w, tw, el_w, tot_w, mute_vis)
+        end_keys = [k for k in ("settings", "rate") if self._buttons[k].visible]   # 닫기 왼쪽에 놓일 것들
+        key = (self._w, tw, el_w, tot_w, mute_vis, tuple(end_keys))
         if key == self._layout_key:
             return
         self._layout_key = key
@@ -948,7 +1017,9 @@ class BottomBar:
         gap = p(CENTER_GAP)
         center = ["prev", "play", "next"] + (["mute"] if mute_vis else [])
         center_w = tw + p(TIME_MARGIN_R) + sum(gap + self._buttons[k].d for k in center)
-        end_w = p(BTN_D) * 2 + p(END_GAP)
+        # 오른쪽 무리 폭 = 닫기 + 보이는 [설정]·[속도] (설정을 숨기면 닫기 하나, 속도가 있으면 그 폭만큼 더)
+        end_w = self._buttons["close"].d + sum(p(END_GAP) + (self._buttons[k].w or self._buttons[k].d)
+                                               for k in end_keys)
         avail = W - 2 * p(BAR_PAD_X)
         side = (avail - center_w) / 2.0
         if side < end_w:                              # 오른쪽 칸이 설정·닫기보다 좁아지면
@@ -964,10 +1035,16 @@ class BottomBar:
             x += gap
             bt.cx, bt.cy = x + bt.d / 2.0, cy
             x += bt.d
-        # 오른쪽 끝: [설정] 4px [닫기], 오른쪽 여백 12px
-        close, sett = self._buttons["close"], self._buttons["settings"]
+        # 오른쪽 끝: [설정] 4px [속도] 4px [닫기], 오른쪽 여백 12px — 숨긴 것은 자리를 차지하지 않는다
+        close = self._buttons["close"]
         close.cx, close.cy = W - p(BAR_PAD_X) - close.d / 2.0, cy
-        sett.cx, sett.cy = close.cx - close.d / 2.0 - p(END_GAP) - sett.d / 2.0, cy
+        edge = close.cx - close.d / 2.0
+        for k in ("rate", "settings"):
+            bt = self._buttons[k]
+            bw = bt.w or bt.d
+            bt.cx, bt.cy = edge - p(END_GAP) - bw / 2.0, cy
+            if bt.visible:
+                edge = bt.cx - bw / 2.0
         for bt in self._buttons.values():
             c.coords(bt.disc, bt.cx, bt.cy)
             c.coords(bt.icon, bt.cx, bt.cy)
@@ -991,6 +1068,12 @@ class BottomBar:
                 c.itemconfigure(bt.icon, text=glyph, font=self._icon_font(size), fill=PLAY_FG,
                                 state="hidden" if loading else "normal")
                 c.itemconfigure(self._spinner, state="normal" if loading else "hidden")
+                continue
+            if key == "rate":
+                # 속도 버튼: 지금 속도 글자. 바탕은 마우스가 올라가 있거나 목록이 열려 있는 동안
+                on = self._hover == "rate" or self._rate_menu_open
+                c.itemconfigure(bt.disc, state="normal" if on else "hidden")
+                c.itemconfigure(bt.icon, text=self._rate_text(), font=self._font, fill=BAR_FG, state="normal")
                 continue
             # 호버 배경: 활성 버튼에 마우스가 올라가 있을 때. 설정은 패널이 열려 있는 동안에도
             # (button.settings[aria-expanded="true"], page-ui.js:932-934)
@@ -1086,9 +1169,14 @@ class BottomBar:
 
     # ──────────────────────────── 마우스(바) ────────────────────────────
     def _hit(self, x, y):
-        """(x, y) 에 있는 보이는 버튼의 key. 동그라미 안쪽만 버튼으로 친다."""
+        """(x, y) 에 있는 보이는 버튼의 key. 동그라미 안쪽만 버튼으로 친다(사각형 버튼은 사각형 안쪽)."""
         for key, bt in self._buttons.items():
-            if bt.visible and (x - bt.cx) ** 2 + (y - bt.cy) ** 2 <= (bt.d / 2.0) ** 2:
+            if not bt.visible:
+                continue
+            if bt.w:
+                if abs(x - bt.cx) <= bt.w / 2.0 and abs(y - bt.cy) <= bt.d / 2.0:
+                    return key
+            elif (x - bt.cx) ** 2 + (y - bt.cy) ** 2 <= (bt.d / 2.0) ** 2:
                 return key
         return None
 
@@ -1129,6 +1217,8 @@ class BottomBar:
             self._send("unmute" if self._muted else "mute")
         elif key == "settings":
             self._set_panel_open(not self._panel_open)
+        elif key == "rate":
+            self._set_rate_menu_open(not self._rate_menu_open)
         elif key == "close":
             # 확장: stop 을 보내고 곧바로 바를 숨긴다(page-ui.js:583-586)
             self._send("stop")
@@ -1151,7 +1241,7 @@ class BottomBar:
                 self._play_state, "pagebar_pause"))
         if key == "mute":
             return self._t("pagebar_unmute" if self._muted else "pagebar_mute")
-        return self._t({"prev": "pagebar_prev", "next": "pagebar_next",
+        return self._t({"prev": "pagebar_prev", "next": "pagebar_next", "rate": "pagebar_rate",
                         "settings": "pagebar_settings", "close": "pagebar_stop"}[key])
 
     def _schedule_tip(self, key):
@@ -1267,6 +1357,134 @@ class BottomBar:
         except tk.TclError:
             return False
         return px <= x < px + self._pw and py <= y < py + self._ph
+
+    # ─────────────────────── 속도 목록(2026-10-24) ───────────────────────
+    def _rate_index(self):
+        """목록에서 지금 속도에 가장 가까운 줄 번호(없으면 None)."""
+        if self._rate_value is None or not self._rate_items:
+            return None
+        try:
+            v = float(self._rate_value)
+        except (TypeError, ValueError):
+            return None
+        return min(range(len(self._rate_items)), key=lambda i: abs(self._rate_items[i][0] - v))
+
+    def _rate_text(self):
+        """속도 버튼 글자 — 목록에 같은 값이 있으면 그 글자, 없으면 "1.32x" 꼴."""
+        i = self._rate_index()
+        if i is None:
+            return ""
+        value, text = self._rate_items[i]
+        return text if abs(value - float(self._rate_value)) < 1e-6 else "%.2fx" % float(self._rate_value)
+
+    def _set_rate_menu_open(self, open_):
+        """속도 목록 열기/닫기. 열려 있는 동안 _poll_rate_outside 가 Esc·바깥 클릭·전경 창 바뀜을 살핀다(패널과 같다)."""
+        if open_ and (self._destroyed or not self._visible or not self._rate_items):
+            return
+        if open_ == self._rate_menu_open:
+            return
+        self._rate_menu_open = open_
+        if open_:
+            self._set_panel_open(False)
+            self._hide_tip()
+            self._draw_rate_menu()
+            self._rmenu.deiconify()
+            self._rmenu_hwnd = _make_tool_window(self._rmenu) or self._rmenu_hwnd
+            _round_corners(self._rmenu_hwnd, self._rmw, self._rmh, self._px(RATE_RADIUS))
+            self._rmenu_fg = _foreground_hwnd()
+            self._rpoll_prev = self._poll_state()
+            self._after("rpoll", OUTSIDE_POLL_MS, self._poll_rate_outside)
+        else:
+            self._cancel("rpoll")
+            self._rmenu_hover = None
+            try:
+                self._rmenu.withdraw()
+            except tk.TclError:
+                pass
+        self._redraw_buttons()
+
+    def _draw_rate_menu(self):
+        """목록 줄을 다시 그리고(지금 속도는 강조색) 창을 속도 버튼 바로 위(바 위 PANEL_GAP)에 놓는다."""
+        rc = self._rmenu_canvas
+        n = len(self._rate_items)
+        w, ih, pad = self._px(RATE_MENU_W), self._px(RATE_ITEM_H), self._px(RATE_MENU_PAD_Y)
+        h = pad * 2 + ih * n
+        self._rmw, self._rmh = w, h
+        rc.delete("all")
+        rc.configure(width=w, height=h)
+        cur = self._rate_index()
+        self._rmenu_rows = []
+        for i, (_value, text) in enumerate(self._rate_items):
+            y0 = pad + ih * i
+            self._rmenu_rows.append(rc.create_rectangle(0, y0, w, y0 + ih, fill=RATE_ITEM_HOVER_BG, width=0,
+                                                        state="normal" if i == self._rmenu_hover else "hidden"))
+            rc.create_text(w / 2.0, y0 + ih / 2.0, text=text, font=self._font_small,
+                           fill=ACCENT if i == cur else BAR_FG)
+        left, top, right, bottom = self._work_area
+        bt = self._buttons["rate"]
+        x = int(left + bt.cx - w / 2.0)
+        x = max(left, min(x, left + self._w - self._px(BAR_PAD_X) - w))     # 바 오른쪽 끝을 넘지 않게
+        y = max(top, int(bottom - self._h - self._px(PANEL_GAP) - h))
+        self._rmenu.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        if self._rate_menu_open:
+            _round_corners(self._rmenu_hwnd, w, h, self._px(RATE_RADIUS))
+
+    def _rate_row_at(self, y):
+        i = int((y - self._px(RATE_MENU_PAD_Y)) // self._px(RATE_ITEM_H))
+        return i if 0 <= i < len(self._rate_items) and y >= self._px(RATE_MENU_PAD_Y) else None
+
+    def _set_rate_menu_hover(self, i):
+        if i == self._rmenu_hover:
+            return
+        for j in (self._rmenu_hover, i):
+            if j is not None and j < len(self._rmenu_rows):
+                self._rmenu_canvas.itemconfigure(self._rmenu_rows[j], state="normal" if j == i else "hidden")
+        self._rmenu_hover = i
+        self._rmenu_canvas.configure(cursor="hand2" if i is not None else "")
+
+    def _on_rate_menu_motion(self, e):
+        self._set_rate_menu_hover(self._rate_row_at(e.y))
+
+    def _on_rate_menu_release(self, e):
+        """줄 위에서 떼면 그 속도를 고른다 → 목록 닫기, 버튼 글자 바로 바꾸기, on_command("setRate", 배속)."""
+        i = self._rate_row_at(e.y)
+        if i is None:
+            return
+        value = self._rate_items[i][0]
+        self._set_rate_menu_open(False)
+        self._rate_value = value
+        self._redraw_buttons()
+        self._send("setRate", value)
+
+    def _inside_rate_menu(self, x, y):
+        try:
+            mx, my = self._rmenu.winfo_rootx(), self._rmenu.winfo_rooty()
+        except tk.TclError:
+            return False
+        return mx <= x < mx + self._rmw and my <= y < my + self._rmh
+
+    def _poll_rate_outside(self):
+        """목록이 열려 있는 동안 Esc·바·목록 밖 클릭·전경 창 바뀜이면 닫는다(_poll_outside 와 같은 규칙).
+
+        바 안 클릭은 바깥으로 치지 않는다 — 속도 버튼을 다시 누르면 _activate 가 닫는다.
+        """
+        self._jobs.pop("rpoll", None)
+        if self._destroyed or not self._rate_menu_open:
+            return
+        esc, mouse = self._poll_state()
+        prev_esc, prev_mouse = self._rpoll_prev or (False, False)
+        self._rpoll_prev = (esc, mouse)
+        close = esc and not prev_esc
+        if not close and mouse and not prev_mouse:
+            pos = _cursor_pos()
+            if pos and not (self._inside_bar(*pos) or self._inside_rate_menu(*pos)):
+                close = True
+        if not close and _IS_WIN and _foreground_hwnd() != self._rmenu_fg:
+            close = True
+        if close:
+            self._set_rate_menu_open(False)
+        else:
+            self._after("rpoll", OUTSIDE_POLL_MS, self._poll_rate_outside)
 
     def _render_params(self, st):
         """update 로 받은 rate/volume 을 슬라이더에 반영한다. 끌고 있는 슬라이더는 건드리지 않는다

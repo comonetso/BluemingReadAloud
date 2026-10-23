@@ -528,6 +528,35 @@ class TestRateVolume(EngineTestBase):
         s = TtsSession("", [], lambda t, r: None, lambda: None, rate=9)
         self.assertEqual(s.rate, 4.0)
 
+    def test_rate_choices_by_step(self):
+        # 2026-10-24 사용자 결정: 간격 0.1 → 0.7~2.0배, 간격 0.25 → 0.5~3.0배
+        c1 = tts_engine.rate_choices(0.1)
+        self.assertEqual((c1[0], c1[-1], len(c1)), (0.7, 2.0, 14))
+        self.assertIn(1.3, c1)
+        c2 = tts_engine.rate_choices(0.25)
+        self.assertEqual(c2, [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0])
+        self.assertEqual(tts_engine.rate_choices("이상한 값"), c1)      # 모르는 간격 → 처음 간격 0.1
+        self.assertEqual(tts_engine.normalize_rate_step("0.25"), 0.25)
+        self.assertEqual(tts_engine.normalize_rate_step(0.5), tts_engine.DEFAULT_RATE_STEP)
+
+    def test_snap_rate_nearest_and_faster_on_tie(self):
+        snap = tts_engine.snap_rate
+        self.assertEqual(snap(1.37, 0.1), 1.4)
+        self.assertEqual(snap(1.3, 0.25), 1.25)
+        self.assertEqual(snap(0.33, 0.1), 0.7)     # 확장 하단 바 최저값(0.33배) → 목록 맨 아래
+        self.assertEqual(snap(4.0, 0.25), 3.0)
+        self.assertEqual(snap(1.25, 0.1), 1.3)     # 1.2 와 1.3 의 정확히 가운데 → 빠른 쪽
+        self.assertEqual(snap(1.75, 0.1), 1.8)
+        self.assertEqual(snap(1.125, 0.25), 1.25)  # 1.0 과 1.25 의 가운데 → 빠른 쪽
+        self.assertEqual(snap(1.0, 0.1), 1.0)
+        self.assertEqual(snap("x", 0.25), 1.0)
+        self.assertEqual(snap(float("nan"), 0.1), 1.0)
+
+    def test_format_rate(self):
+        self.assertEqual(tts_engine.format_rate(1.3, 0.1), "1.3x")
+        self.assertEqual(tts_engine.format_rate(1.25, 0.25), "1.25x")
+        self.assertEqual(tts_engine.format_rate(1.0, 0.25), "1.00x")
+
     def test_volume_and_mute_gain(self):
         def audio_of(idx, rate, sec):
             return np.full(int(sec * SR), 10000, dtype=np.int16)
@@ -1164,7 +1193,9 @@ _GLUE_FUNCS = ["stop_current_playback", "_make_tts_event_handler", "speak_text",
                "_ensure_source_highlighter", "_source_highlight_active", "_source_highlight_blocks_reader",
                "_begin_source_highlight", "_on_source_highlight_result", "_end_source_highlight",
                # 번역문 막(2026-09-29) — _handle_tts_event 가 부른다
-               "_caption_for"]
+               "_caption_for",
+               # 하단 바 속도 목록(2026-10-24) — _ensure_reading_ui 가 부른다
+               "_rate_menu_items", "_refresh_bar_rate_choices", "_step_rate"]
 _GLUE_VARS = ["_tts_state_lock"]
 
 
@@ -1197,8 +1228,13 @@ def _load_glue(ui_log):
     class Bar:
         height = 48
 
-        def __init__(self, root, on_command, get_msg):
+        def __init__(self, root, on_command, get_msg, **kw):
             ui_log.append(("bar.init",))
+            self.init_kw = kw          # 앱이 넘긴 선택 인자(show_settings=False — 2026-10-24 설정 버튼 제거)
+            self.rate_choices = None
+
+        def set_rate_choices(self, items):
+            self.rate_choices = list(items)   # 닫기 옆 속도 목록(2026-10-24)
 
         def show(self, work_area):
             ui_log.append(("bar.show",))
@@ -1255,7 +1291,8 @@ def _load_glue(ui_log):
         "update_tray_menu": lambda: None, "root": object(), "get_msg": lambda k, *a: k,
         "BottomBar": Bar, "ReaderWindow": Reader, "bottom_bar": None, "reader_window": None,
         "google_tts": object(), "google_tts_client": object(), "tts_voice_name": "ko-KR-Chirp3-HD-Callirrhoe",
-        "tts_speaking_rate": 1.0, "tts_volume": 1.0, "reader_window_enabled": True, "reader_window_geometry": None,
+        "tts_speaking_rate": 1.0, "tts_volume": 1.0, "tts_rate_step": 0.1,
+        "reader_window_enabled": True, "reader_window_geometry": None,
         "_reading_work_area": None, "_reading_segment_idx": None, "_get_english_words": lambda: None,
         "_current_work_area": lambda: (0, 0, 1920, 1040),
         "tts_playing": False, "tts_paused": False, "tts_stop_event": threading.Event(), "tts_session": None,
@@ -1555,6 +1592,59 @@ class TestWhispererGlue(EngineTestBase):
         self.assertTrue(session.join(3))
         self.assertFalse(dict.__getitem__(ns, "tts_playing"))
         self.assertEqual(ui[-2:], [("bar.hide",), ("reader.end",)])
+
+    def test_bar_rate_menu_sets_rate_and_saves(self):
+        # 2026-10-24 사용자 결정: 하단 바에 설정(톱니) 버튼 없음, 닫기 옆 속도 목록에서 고른다. 볼륨은 늘 1.0
+        ui = []
+        saved = []
+        ns = self.ns = _load_glue(ui)
+        dict.__setitem__(ns, "save_settings", lambda: saved.append(dict.__getitem__(ns, "tts_speaking_rate")))
+        ns["speak_text"]("글입니다.\n둘째 줄.")
+        self.assertTrue(_pump(ns, lambda: ("bar.show",) in ui))
+        bar = dict.__getitem__(ns, "bottom_bar")
+        self.assertEqual(bar.init_kw, {"show_settings": False})
+        self.assertEqual((bar.rate_choices[0], bar.rate_choices[-1], len(bar.rate_choices)),
+                         ((0.7, "0.7x"), (2.0, "2.0x"), 14))       # 간격 0.1 목록
+        session = dict.__getitem__(ns, "tts_session")
+        self.assertEqual(session.volume, 1.0)
+        ns["_on_bar_command"]("setRate", 1.3)          # 목록에서 1.3x 를 골랐다 → 바로 반영·저장
+        self.assertEqual(session.rate, 1.3)
+        self.assertEqual(saved, [1.3])
+        ns["_on_bar_command"]("setRate", 2.5)          # 목록 밖 값 → 지금 간격 목록으로 맞춘다
+        self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 2.0)
+        ns["stop_tts"]()
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+        self.assertTrue(session.join(3))
+
+    def test_rate_hotkey_steps_one_and_stops_at_ends(self):
+        # 2026-10-24 사용자 결정: 읽는 동안 Ctrl+← 한 단계 느리게 / Ctrl+→ 한 단계 빠르게, 목록 끝에서 멈춤
+        ui = []
+        saved = []
+        ns = self.ns = _load_glue(ui)
+        dict.__setitem__(ns, "save_settings", lambda: saved.append(dict.__getitem__(ns, "tts_speaking_rate")))
+        ns["_step_rate"](1)                            # 읽지 않을 때는 아무것도 안 한다
+        self.assertEqual((dict.__getitem__(ns, "tts_speaking_rate"), saved), (1.0, []))
+        ns["speak_text"]("글입니다.\n둘째 줄.")
+        self.assertTrue(_pump(ns, lambda: ("bar.show",) in ui))
+        session = dict.__getitem__(ns, "tts_session")
+        ns["_step_rate"](1)
+        self.assertEqual((session.rate, dict.__getitem__(ns, "tts_speaking_rate")), (1.1, 1.1))
+        ns["_step_rate"](-1)
+        ns["_step_rate"](-1)
+        self.assertEqual(session.rate, 0.9)
+        for _ in range(5):
+            ns["_step_rate"](-1)                       # 0.7 에서 멈춘다
+        self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 0.7)
+        self.assertEqual(saved, [1.1, 1.0, 0.9, 0.8, 0.7])   # 끝에서 더 누른 것은 저장도 안 한다
+        dict.__setitem__(ns, "tts_rate_step", 0.25)
+        dict.__setitem__(ns, "tts_speaking_rate", 3.0)
+        ns["_step_rate"](1)                            # 3.0 에서 멈춘다
+        self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 3.0)
+        ns["_step_rate"](-1)
+        self.assertEqual(session.rate, 2.75)
+        ns["stop_tts"]()
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+        self.assertTrue(session.join(3))
 
 
 class TestEnglishWordsData(unittest.TestCase):

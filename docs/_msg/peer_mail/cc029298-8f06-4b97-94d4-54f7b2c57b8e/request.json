@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "cc029298-8f06-4b97-94d4-54f7b2c57b8e",
+  "conversation_id": "067b400c-18ac-4e56-bbfb-3b8a27a8334c",
+  "intent": "change_request",
+  "body": "[데스크톱 앱 BluemingReadAloud 대화에서 보냄 — 리규형님 지시 전달]\n\n리규형님 지시: 아래 작업을 질문 없이 바로 진행하세요. 결과 회신(답변)은 필요 없습니다.\n리규형님이 이 대화에 따로 지시하실 작업이 더 있습니다.\n\n## 배경\n데스크톱 앱(BluemingReadAloud, F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud)도 오늘 같은 변경을 합니다.\n읽기 속도를 막대(슬라이더) 대신 정해진 단계 목록에서 고르게 합니다(2026-10-24 리규형님 결정).\n\n## 할 일 (read-aloud-hrg)\n1. 설정 페이지(options.html)의 읽기 속도\n   - 지금: 속도 막대(#rate, data-min=-1 data-max=1 data-pow=3) + 직접 입력 칸(#rate-input) + 편집 버튼(#rate-edit-button)\n   - 바꿀 것: \"속도 간격\" 선택 칸 + \"속도\" 목록 선택 상자\n     - 간격 0.1  → 0.7, 0.8, 0.9 … 2.0배 (14개)\n     - 간격 0.25 → 0.5, 0.75, 1.0 … 3.0배 (11개)\n     - 처음(기본) 간격은 0.1\n   - 간격을 바꾸면 목록이 바로 바뀌고, 고른 속도는 새 목록의 가장 가까운 값으로 맞춘다. 정확히 가운데면 빠른 쪽.\n     (예: 간격 0.25 에서 1.25배 → 간격 0.1 로 바꾸면 1.3배)\n   - 이미 저장된 속도가 목록에 없으면(예: 0.33배, 1.37배) 같은 규칙으로 가장 가까운 값으로 맞춘다.\n   - 간격 값도 설정으로 저장한다.\n2. 웹페이지 아래 재생 바(페이지 UI 의 음성 설정 패널)에서 속도 막대를 뺀다. 속도는 설정 페이지에서만 바꾼다.\n   - 볼륨 막대는 이번 요청 범위가 아니다(그대로 둔다).",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-10-23T15:49:51.227Z"
+}

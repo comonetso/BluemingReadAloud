@@ -17,8 +17,9 @@ sys.path.insert(0, APP_DIR)
 
 from selection_button import SelectionGestureDetector  # noqa: E402
 
-_FUNCS = ["_make_selection_hook", "_is_disabled_browser_exe", "_is_telegram_exe", "_is_web_scheme", "_unless_web_page"]
-_VARS = ["_BROWSER_EXES", "_TELEGRAM_EXES"]
+_FUNCS = ["_make_selection_hook", "_is_disabled_browser_exe", "_is_telegram_exe", "_is_web_scheme", "_unless_web_page",
+           "_show_dot_if_telegram_selected"]
+_VARS = ["_BROWSER_EXES", "_TELEGRAM_EXES", "TELEGRAM_MENU_RETRY_MS", "TELEGRAM_MENU_RETRY_MAX_S"]
 
 
 def _load(extra=None):
@@ -118,6 +119,13 @@ class HookTest(unittest.TestCase):
         self.click(10, 20, button=RIGHT)
         self.assertNotIn("click", [p[1] for p in self.posts])
 
+    def test_right_press_posts_spot(self):
+        # 2026-10-24: 우클릭 누름은 자리를 넘긴다(텔레그램 "선택" 뒤 그 자리 메시지를 보려고). 가운데 버튼은 안 넘긴다
+        self.make()
+        self.click(10, 20, button=RIGHT)
+        self.click(50, 60, button=types.SimpleNamespace(name="middle"))
+        self.assertEqual([p for p in self.posts if p[1] == "rpress"], [("selection_button", "rpress", 10, 20)])
+
 
 class PureTest(unittest.TestCase):
     def setUp(self):
@@ -186,6 +194,78 @@ class UnlessWebPageTest(unittest.TestCase):
 
     def test_query_error_proceeds(self):
         self.assertEqual(self.run_case("Aside.exe", FakeHL(error=RuntimeError("x"))), [("proceed", None)])
+
+
+class FakeTG:
+    """query_telegram_selected 에 차례로 답한다(답이 떨어지면 마지막 답을 되풀이)."""
+
+    def __init__(self, answers):
+        self.answers, self.asked, self.right_clicks = list(answers), 0, []
+
+    def query_telegram_selected(self, x, y, on_done, right_click=None):
+        self.asked += 1
+        self.right_clicks.append(right_click)
+        on_done(self.answers[min(self.asked, len(self.answers)) - 1])
+
+
+class FakeRoot:
+    def __init__(self):
+        self.pending = []
+
+    def after(self, ms, fn):
+        self.pending.append((ms, fn))
+
+
+class TelegramDotTest(unittest.TestCase):
+    """_show_dot_if_telegram_selected: "menu" 가 한 번 나오면 그 뒤 False 도 한도까지 다시 묻는다(2026-10-24)."""
+
+    def run_case(self, answers, right_click=None):
+        hl = self.hl = FakeTG(answers)
+        clock_ms = [100000]
+        root = FakeRoot()
+        shown = []
+        ns = _load({
+            "_ensure_source_highlighter": lambda: hl,
+            "time": types.SimpleNamespace(monotonic=lambda: clock_ms[0] / 1000.0),
+            "logging": types.SimpleNamespace(debug=lambda *a, **k: None, info=lambda *a, **k: None),
+            "_dot_query_gen": 0,
+            "_safe_ui": lambda label, fn, *a: fn(*a),
+            "root": root,
+            "selection_button": types.SimpleNamespace(show_at=lambda x, y: shown.append((x, y))),
+            "selection_button_enabled": True,
+        })
+        ns["_show_dot_if_telegram_selected"](10, 20, right_click)
+        while root.pending:
+            ms, fn = root.pending.pop(0)
+            clock_ms[0] += ms
+            fn()
+        return hl.asked, shown
+
+    def test_menu_then_false_then_selected_shows_dot(self):
+        # 10-23 설치본 로그 모양: 메뉴를 누른 뒤 포커스는 메시지로 돌아왔지만 선택 표시가 아직 → 한 번 더 물어 선택됨
+        self.assertEqual(self.run_case(["menu", False, True]), (3, [(10, 20)]))
+
+    def test_plain_false_does_not_retry(self):
+        # 메뉴와 무관한 클릭(그냥 메시지 누름)은 다시 묻지 않는다
+        self.assertEqual(self.run_case([False]), (1, []))
+
+    def test_menu_then_false_stops_at_limit(self):
+        asked, shown = self.run_case(["menu", False])
+        self.assertEqual(shown, [])
+        self.assertLessEqual(asked, 12, "TELEGRAM_MENU_RETRY_MAX_S(1초) 를 넘겨 묻지 않는다")
+        self.assertGreaterEqual(asked, 9)
+
+    def test_menu_then_unknown_stops(self):
+        # None = 느림·실패 → 그만(다른 앱을 얼리지 않는 규칙)
+        self.assertEqual(self.run_case(["menu", None]), (2, []))
+
+    def test_selected_at_once(self):
+        self.assertEqual(self.run_case([True]), (1, [(10, 20)]))
+
+    def test_right_click_spot_passed_on_every_try(self):
+        # 2026-10-24: 우클릭 자리는 다시 물을 때마다 같이 넘긴다. 점 자리는 그대로 뗀 자리
+        self.assertEqual(self.run_case(["menu", False, True], right_click=(3, 4)), (3, [(10, 20)]))
+        self.assertEqual(self.hl.right_clicks, [(3, 4)] * 3)
 
 
 if __name__ == "__main__":

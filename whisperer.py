@@ -243,8 +243,9 @@ gemini_translator = None   # translation.GeminiTranslator(키가 없거나 못 �
 tts_hotkey_modifiers = {"ctrl": True, "shift": False, "alt": True} # 기본 TTS 단축키: Ctrl+Alt+D
 tts_hotkey_key = "D"
 tts_voice_name = "ko-KR-Chirp3-HD-Callirrhoe"  # 기본 음성 모델
-tts_speaking_rate = 1.0   # 재생 속도 (0.25 ~ 4.0, 기본 1.0). 합성 때 tts_engine.clamp_rate 로 이 범위에 잘린다
-tts_volume = 1.0          # 재생 볼륨 0~1 (하단 바 설정에서 바꾼다. 확장처럼 저장해서 다음 읽기에도 쓴다 — 확장 defaults.js:36 기본 1.0)
+tts_speaking_rate = 1.0   # 재생 속도(기본 1.0). 설정 창 목록에서 고른다 — 늘 tts_rate_step 목록의 값(tts_engine.snap_rate)
+tts_rate_step = tts_engine.DEFAULT_RATE_STEP   # 속도 목록 간격 0.1(0.7~2.0배) / 0.25(0.5~3.0배) — 2026-10-24 사용자 결정
+tts_volume = 1.0          # 재생 볼륨 — 늘 1.0(2026-10-24 사용자 결정: 볼륨 막대 제거, 소리 크기는 윈도우 볼륨으로). 저장·읽기 안 함
 # ※ TTS 재생 중 판정은 tts_playing(아래 TTS 재생 상태 변수)으로 한다
 
 # 하단 바·리더 창 설정 (whisperer_settings.json 에 저장)
@@ -700,10 +701,14 @@ def load_modules():
 # 키보드 리스너 설정
 # 단축키 글자 키를 "삼키는 중"인지 — 누름을 삼켰으면 짝이 되는 뗌도 삼킨다(누르고 있는 동안의 자동 반복 포함)
 _hotkey_swallowing = False
+# 속도 단축키(Ctrl+←/→)로 삼킨 방향키의 vk — 짝이 되는 뗌도 삼킨다(2026-10-24). 삼키는 중이 아니면 None
+_rate_key_swallowing = None
 # 키보드로 글을 골랐는지(Ctrl+A, Shift+화살표·Home·End·PgUp·PgDn) — 수정자 키를 모두 뗄 때 빨간 점을 띄운다(2026-09-28 사용자 요청)
 _kbd_select_pending = False
 # 빨간 점 "선택 확인" 세대 — 확인 결과를 기다리는 사이 hide(누름·키 입력)가 오면 올려서 늦은 결과를 버린다
 _dot_query_gen = 0
+# 마지막 우클릭 자리 (x, y) — 다음 "show"/"click" 처리 한 번에만 쓰고 지운다(텔레그램 메뉴 "선택" 용, 2026-10-24)
+_tg_right_click = None
 
 
 def _hotkey_vk(key_str):
@@ -866,6 +871,7 @@ def setup_keyboard_listener():
 
     WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0100, 0x0101, 0x0104, 0x0105
     LLKHF_INJECTED = 0x10
+    VK_LEFT, VK_RIGHT = 0x25, 0x27
 
     def win32_filter(msg, data):
         """(훅 스레드) 단축키 글자 키를 다른 앱에 넘기지 않고 삼킨다 — 2026-09-28 메모장 사고 수정.
@@ -881,8 +887,11 @@ def setup_keyboard_listener():
         ⚠️ 앱이 흉내 낸 입력(LLKHF_INJECTED — read_selected_text 의 Ctrl+C)은 건드리지 않는다.
         ⚠️ suppress_event() 는 예외를 던져 pynput 에 "이 이벤트 막음" 을 알리는 방식이라 try 밖에서 불러야 한다.
         ⚠️ 훅 콜백이라 가볍게: 변수 확인·root.after 한 번뿐. 로그·파일 I/O 금지(윈도우가 느린 훅을 떼어 낸다).
+        속도 단축키(2026-10-24 사용자 결정): 읽는 동안(tts_session 이 있는 동안 — 일시정지 포함) Ctrl+← 한 단계 느리게,
+            Ctrl+→ 한 단계 빠르게(_step_rate). Ctrl 만 눌렸을 때만 — Ctrl+Shift+←/→(단어 선택)·AltGr 는 넘긴다.
+            그 누름은 삼켜서 앞 창의 커서가 단어 단위로 움직이지 않게 하고, 짝이 되는 뗌도 삼킨다. 읽지 않을 땐 원래대로 넘긴다.
         """
-        global _hotkey_swallowing
+        global _hotkey_swallowing, _rate_key_swallowing
         suppress = False
         try:
             vk = _hotkey_vk(tts_hotkey_key)
@@ -905,6 +914,17 @@ def setup_keyboard_listener():
                             root.after(10, read_selected_text)
                 elif msg in (WM_KEYUP, WM_SYSKEYUP) and _hotkey_swallowing:
                     _hotkey_swallowing = False
+                    suppress = True
+            elif data.vkCode in (VK_LEFT, VK_RIGHT) and not (data.flags & LLKHF_INJECTED):
+                if msg in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                    if ctrl_pressed and not shift_pressed and not alt_pressed and tts_session is not None:
+                        _rate_key_swallowing = data.vkCode
+                        suppress = True
+                        if root:
+                            direction = -1 if data.vkCode == VK_LEFT else 1
+                            root.after(0, lambda d=direction: _step_rate(d))   # 누르고 있으면 자동 반복마다 한 칸
+                elif msg in (WM_KEYUP, WM_SYSKEYUP) and _rate_key_swallowing == data.vkCode:
+                    _rate_key_swallowing = None
                     suppress = True
         except Exception:
             suppress = False                                  # 판정이 깨지면 예전처럼 흘려보낸다(on_press 가 처리)
@@ -964,7 +984,7 @@ def save_settings():
     (옛 구조 그대로 — 설정 저장은 사람 손으로 드물게 일어난다).
     ⚠️ 파일은 "지금 작업 폴더" 기준 상대 경로다. 사용자 데이터이므로 키 이름을 바꾸면 옛 설정을 못 읽는다
        → 키를 바꿀 땐 load_settings 에 옛 키 읽기를 남길 것.
-    키 목록: language, google_tts_api_key, gemini_api_key, tts_hotkey{modifiers,key}, tts_settings{voice_name,speaking_rate,volume},
+    키 목록: language, google_tts_api_key, gemini_api_key, tts_hotkey{modifiers,key}, tts_settings{voice_name,speaking_rate,rate_step},
             reader_window_enabled, reader_window_geometry, bottom_bar_monitor, selection_button_enabled,
             disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled
     """
@@ -973,6 +993,7 @@ def save_settings():
         #   google_settings, whisper_settings)는 로드 시 무시되고, 첫 저장 때 파일에서 빠진다.
         #   옛 플로팅 아이콘 키(controller_position, controller_hidden)도 같다(2026-09-28 플로팅 아이콘 제거).
         #   옛 인증 파일 경로 키(google_credentials_path)도 같다(2026-09-29 API 키 방식으로 바꿈).
+        #   볼륨(tts_settings.volume)도 같다(2026-10-24 볼륨 막대 제거 — 늘 1.0).
         # ⚠️ API 키가 평문으로 들어간다 — 이 파일은 .gitignore 에 있다(공개 저장소). 설치 파일에도 넣지 않는다.
         settings = {
             "language": current_language,
@@ -985,7 +1006,8 @@ def save_settings():
             "tts_settings": {
                 "voice_name": tts_voice_name,
                 "speaking_rate": tts_speaking_rate,
-                "volume": tts_volume
+                # 속도 목록 간격 (2026-10-24 추가, 설정 창 "속도 간격")
+                "rate_step": tts_rate_step
             },
             # 하단 바·리더 창 (2026-09-28 추가)
             "reader_window_enabled": reader_window_enabled,
@@ -1019,16 +1041,18 @@ def load_settings():
 
     부르는 곳: main() 시작 때, setup_keyboard_listener() 안(단축키를 다시 읽으려고).
     - 파일이 깨졌으면(JSON 오류) 로그만 남기고 기본값으로 계속 간다 — 설정 때문에 앱이 안 뜨면 안 된다.
-    - 새 키(reader_window_*, bottom_bar_monitor, tts_settings.volume, selection_button_enabled,
+    - 새 키(reader_window_*, bottom_bar_monitor, selection_button_enabled,
       disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled)는 값 모양이 이상하면 무시한다
       (true/false 가 아니면 기본값 유지).
     - 옛 플로팅 아이콘 키(controller_position, controller_hidden)는 남아 있어도 읽지 않는다(플로팅 아이콘 제거).
     - 옛 인증 파일 경로(google_credentials_path)도 읽지 않는다(2026-09-29 API 키 방식). 키가 없으면 main 이 필수 인증 창을 띄운다.
       앱 폴더의 google_credentials.json 을 찾아 쓰던 폴백도 없앴다. .env 도 읽지 않는다(사용자 결정: 인증 창에 입력).
-    ⚠️ 여기서 읽은 tts_speaking_rate 는 범위를 자르지 않는다 — 합성할 때 tts_engine.clamp_rate 가 자른다.
+    - 볼륨(tts_settings.volume)은 읽지 않는다 — 늘 1.0(2026-10-24 사용자 결정). 다음 저장 때 파일에서 빠진다.
+    - 속도는 간격(rate_step, 없거나 이상하면 0.1) 목록의 가장 가까운 값으로 맞춰 읽는다(2026-10-24 사용자 결정 —
+      예전 막대로 고른 0.33배·1.37배 같은 값도 목록 값이 된다).
     """
     global current_language, google_tts_api_key, gemini_api_key
-    global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, tts_volume
+    global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, tts_rate_step
     global reader_window_enabled, reader_window_geometry, bottom_bar_monitor, selection_button_enabled
     global disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled
     try:
@@ -1052,10 +1076,10 @@ def load_settings():
                 if "tts_settings" in settings:
                     if "voice_name" in settings["tts_settings"]:
                         tts_voice_name = settings["tts_settings"]["voice_name"]
+                    tts_rate_step = tts_engine.normalize_rate_step(
+                        settings["tts_settings"].get("rate_step", tts_engine.DEFAULT_RATE_STEP))
                     if "speaking_rate" in settings["tts_settings"]:
-                        tts_speaking_rate = settings["tts_settings"]["speaking_rate"]
-                    if "volume" in settings["tts_settings"]:
-                        tts_volume = tts_engine.clamp_volume(settings["tts_settings"]["volume"])
+                        tts_speaking_rate = tts_engine.snap_rate(settings["tts_settings"]["speaking_rate"], tts_rate_step)
 
                 # 하단 바·리더 창 설정 (없으면 기본값 유지). 값이 이상하면 무시한다
                 if isinstance(settings.get("reader_window_enabled"), bool):
@@ -1430,7 +1454,8 @@ def _make_selection_hook(detector, contains, is_own_window, post, is_enabled, cl
       - 우리 앱 창 위에서 시작한 동작: 리더 창 머리 막대 끌기·하단 바 버튼·설정 창 글 고르기 등은 "다른 앱의 글 선택"
         이 아니다 → 누를 때 판별해 두고 그 뗌의 "보이기"·"클릭" 은 버린다. 누름의 "숨기기" 는 그대로 한다(다른 곳을 누르면 점은 사라진다).
     넘기는 것: 끌기·더블클릭의 뗌 → ("selection_button", "show", x, y), 한 번 클릭의 뗌 → ("selection_button", "click", x, y)
-      (텔레그램 메시지 "선택" 용 — Tk 메인이 텔레그램이 앞 창일 때만 쓰고 나머지는 버린다, 2026-10-23).
+      (텔레그램 메시지 "선택" 용 — Tk 메인이 텔레그램이 앞 창일 때만 쓰고 나머지는 버린다, 2026-10-23),
+      우클릭 누름 → ("selection_button", "rpress", x, y) (텔레그램 메뉴 "선택" 뒤 우클릭한 메시지를 보려고, 2026-10-24).
     "숨김" 중복 줄이기: 키를 칠 때마다·휠을 굴릴 때마다 "숨김" 을 넣으면 큐만 붐빈다 → 마지막으로 "보이기" 를 넣은 뒤
       아직 "숨김" 을 안 넣었을 때만 넣는다(shown_hint). Tk 메인이 따로 숨긴 경우(점 클릭·읽기 시작)엔 hint 가 남아
       다음 입력 때 "숨김" 이 한 번 더 갈 뿐이다(이미 숨은 점을 또 숨김 — 해 없음).
@@ -1458,6 +1483,9 @@ def _make_selection_hook(detector, contains, is_own_window, post, is_enabled, cl
                     if pressed:
                         detector.on_other_input()
                         _hide_locked()
+                        if getattr(button, "name", None) == "right":
+                            # 우클릭 자리 — 텔레그램 메뉴 "선택" 뒤 그 자리 메시지를 보려고(2026-10-24). 넘기기만 한다
+                            post(("selection_button", "rpress", x, y))
                     return
                 if pressed:
                     if contains(x, y):
@@ -1901,11 +1929,16 @@ def _handle_selection_button_msg(action, *args):
     ("click", x, y): 한 번 클릭의 뗌. 텔레그램이 앞 창일 때만 "선택한 메시지"를 묻고(우클릭 메뉴 "선택"·선택 상태에서
                     메시지 더 고르기), 다른 앱이면 버린다(2026-10-23).
     ("hide",)     : 숨긴다.
+    ("rpress", x, y): 우클릭 누름. 자리를 _tg_right_click 에 기억만 한다 — 다음 "show"/"click" 처리 한 번에만 쓰고 지운다
+                    (텔레그램이면 그 자리 메시지도 "선택됨"인지 본다, 2026-10-24 사용자 결정. 시간 제한 없음 — 한 번 쓰면 끝).
     ("keyboard",) : 키보드로 골랐다(Ctrl+A, Shift+화살표 등 — 키보드 훅 on_release). 자리 = 선택 끝 글자 옆(원문 형광펜의
                     UIA 스레드에 끝 글자 하나만 물음), 못 얻거나 끝이 화면 밖이면 마우스 옆, 고른 글이 없으면 안 띄움
                     (2026-09-28 사용자 확정 "선택 끝, 안 되면 마우스 옆"). 브라우저면 위 "show" 와 같은 주소 확인을 먼저 한다.
     """
-    global _dot_query_gen
+    global _dot_query_gen, _tg_right_click
+    if action == "rpress" and len(args) >= 2:
+        _tg_right_click = (args[0], args[1])
+        return
     if action == "keyboard":
         if not selection_button_enabled or selection_button is None or _no_dot_foreground():
             return
@@ -1933,6 +1966,7 @@ def _handle_selection_button_msg(action, *args):
         _dot_query_gen += 1        # 기다리던 "선택 확인" 결과가 늦게 와도 점을 띄우지 않게
         _hide_selection_button()
     elif action in ("show", "click") and len(args) >= 2:
+        right_click, _tg_right_click = _tg_right_click, None      # 우클릭 자리는 이 한 번에만 쓴다
         if not selection_button_enabled or selection_button is None:
             return
         x, y = args[0], args[1]
@@ -1940,7 +1974,7 @@ def _handle_selection_button_msg(action, *args):
         if _is_telegram_exe(exe):
             # 텔레그램: 글 위치 기능이 없어 선택 끝을 못 묻는다 → "선택한 메시지"로 판단(끌기·한 번 클릭 둘 다)
             if not _nonclient_at(x, y):
-                _show_dot_if_telegram_selected(x, y)
+                _show_dot_if_telegram_selected(x, y, right_click)
             return
         if action == "click":
             return                                   # 한 번 클릭은 텔레그램 "선택" 용 — 다른 앱에선 글을 고른 게 아니다
@@ -1995,7 +2029,7 @@ def _show_dot_where_selected(x, y):
     _safe_ui("빨간 점 표시", selection_button.show_at, x, y)
 
 
-def _show_dot_if_telegram_selected(x, y):
+def _show_dot_if_telegram_selected(x, y, right_click=None):
     """(Tk 메인) 텔레그램: 마우스를 뗀 뒤 메시지가 "선택"(우클릭 메뉴 → 선택) 상태면 뗀 자리 옆에 빨간 점.
 
     2026-10-23 사용자 결정: 텔레그램은 글 위치 기능이 없어(10-10 실측) 선택 끝을 못 묻는다 → "선택한 메시지"로 판단한다.
@@ -2006,6 +2040,8 @@ def _show_dot_if_telegram_selected(x, y):
     우클릭 메뉴가 아직 떠 있으면(결과 "menu") TELEGRAM_MENU_RETRY_MS 뒤 다시 묻고, TELEGRAM_MENU_RETRY_MAX_S 를 넘으면 그만둔다
     (2026-10-23 개발 모드 시험 "처음엔 안 뜨고 다음엔 뜬다" — 뗀 순간 메뉴가 닫히는 중이었다, 로그로 확인). 그사이 다른 곳을
     누르거나 키를 치면(hide 가 세대를 올림) 그만둔다.
+    한 번이라도 "menu" 가 나왔으면 그 뒤 False 도 한도까지 다시 묻는다(2026-10-24 — 10-23 설치본 로그: 메뉴를 누른 뒤 포커스는
+    메시지로 돌아왔는데 선택 표시가 아직 안 켜져 False 로 끝난 경우가 있었다). None(느림·실패)은 바로 그만둔다.
     """
     global _dot_query_gen
     hl = _ensure_source_highlighter()
@@ -2015,12 +2051,13 @@ def _show_dot_if_telegram_selected(x, y):
     gen = _dot_query_gen
     started = time.monotonic()
     tries = [0]
+    from_menu = [False]      # 한 번이라도 "menu" 가 나왔는가(메뉴 항목을 누른 뒤의 확인)
 
     def ask():
         if gen != _dot_query_gen:
             return
         tries[0] += 1
-        _safe_ui("텔레그램 선택 확인", hl.query_telegram_selected, x, y, place)
+        _safe_ui("텔레그램 선택 확인", hl.query_telegram_selected, x, y, place, right_click)
 
     def place(selected):
         if gen != _dot_query_gen:
@@ -2028,7 +2065,10 @@ def _show_dot_if_telegram_selected(x, y):
         waited = time.monotonic() - started
         # 진단 로그(원인 확정 전까지 — 사용자 결정): 몇 번째 확인에서 무엇이 나왔고 처음 물은 뒤 몇 ms 였는지
         logging.info(f"[텔레그램] 빨간 점 {tries[0]}번째 확인: {selected} (처음 물은 뒤 {waited * 1000:.0f}ms)")
-        if selected == "menu" and waited < TELEGRAM_MENU_RETRY_MAX_S and root is not None:
+        if selected == "menu":
+            from_menu[0] = True
+        if (selected == "menu" or (from_menu[0] and selected is False)) \
+                and waited < TELEGRAM_MENU_RETRY_MAX_S and root is not None:
             root.after(TELEGRAM_MENU_RETRY_MS, ask)
             return
         if selected is not True:
@@ -2540,14 +2580,14 @@ def show_tts_settings_dialog():
         """
         selected_disp = voice_var.get()
         sel_voice_id = voice_map.get(selected_disp, "ko-KR-Wavenet-A")
-        # 현재 화면의 속도값 가져오기 (rate_var가 아직 정의 전이거나 아래에 있으므로 주의. 함수 호출 시점엔 정의됨)
-        sel_rate = rate_var.get()
+        # 속도는 지금 저장된 값(하단 바 목록에서 고른 값 — 2026-10-24 설정 창에서 속도 칸을 뺐다)
+        sel_rate = tts_speaking_rate
 
         text = "안녕하세요. TTS 목소리 미리듣기입니다."
 
         def _preview():
             # (별도 스레드) 네트워크 요청이 Tk 메인을 멈추지 않게 따로 돈다. 여기서는 Tk 를 만지지 않는다.
-            # 속도는 슬라이더 값 그대로(0.25~4.0 — 슬라이더 범위가 곧 제한), 언어 코드는 ko-KR 고정(한국어 음성 목록뿐).
+            # 속도는 목록에서 고른 값 그대로(0.5~3.0 — Cloud TTS 허용 0.25~4.0 안), 언어 코드는 ko-KR 고정(한국어 음성 목록뿐).
             try:
                 if not google_tts_client:
                     log_to_console("TTS 클라이언트 미초기화")
@@ -2573,28 +2613,29 @@ def show_tts_settings_dialog():
     ttk.Button(voice_selection_row, text=get_msg("btn_preview"), command=preview_tts, bootstyle="info-outline").pack(side="right")
 
 
-    # 2. 재생 속도 설정
+    # 2. 재생 속도 — 속도 간격만 (2026-10-24 사용자 결정: 속도는 하단 바 닫기 버튼 옆 목록에서 고른다.
+    #    여기서는 그 목록의 간격만 정한다 — 0.1 → 0.7~2.0배, 0.25 → 0.5~3.0배, 처음 0.1)
     rate_frame = ttk.Labelframe(dialog, text=get_msg("label_speaking_rate"), padding=15)
     rate_frame.pack(fill="x", **padding)
 
-    rate_var = tk.DoubleVar(value=tts_speaking_rate)
+    rate_row = ttk.Frame(rate_frame)
+    rate_row.pack(fill="x", pady=5)
 
-    rate_container = ttk.Frame(rate_frame)
-    rate_container.pack(fill="x", pady=5)
+    ttk.Label(rate_row, text=get_msg("label_rate_step")).pack(side="left", padx=5)
 
-    # 표시는 하단 바와 같은 소수 두 자리(확장 "1.00x" 형식) — 하단 바에서 1.25 로 바꿨는데 여기서 "1.2x" 로 보이지 않게
-    rate_label = ttk.Label(rate_container, text=f"{tts_speaking_rate:.2f}x", bootstyle="primary")
-    rate_label.pack(side="right", padx=10)
-    # 하단 바에서 속도를 바꾸면 열려 있는 이 창의 슬라이더도 맞춘다(_sync_settings_dialog_rate 가 이 둘을 쓴다)
-    show_tts_settings_dialog.rate_var = rate_var
-    show_tts_settings_dialog.rate_label = rate_label
+    def _step_text(step):
+        # "0.1  (0.7x ~ 2.0x)" — 간격과 그 목록의 범위를 같이 보인다
+        ch = tts_engine.rate_choices(step)
+        return f"{step:g}  ({tts_engine.format_rate(ch[0], step)} ~ {tts_engine.format_rate(ch[-1], step)})"
 
-    def update_rate_label(val):
-        rate_label.config(text=f"{float(val):.2f}x")
+    step_by_text = {_step_text(step): step for step in tts_engine.RATE_STEPS}
+    step_var = tk.StringVar(value=_step_text(tts_engine.normalize_rate_step(tts_rate_step)))
+    step_combo = ttk.Combobox(rate_row, textvariable=step_var, values=list(step_by_text),
+                              state="readonly", width=22)
+    step_combo.pack(side="left", padx=5)
 
-    # ttk.Scale은 command 인자 지원이 tk와 다를 수 있음. 보통 command=func 인데, 값 변경시 호출됨.
-    rate_scale = ttk.Scale(rate_container, from_=0.25, to=4.0, variable=rate_var, command=update_rate_label, bootstyle="success")
-    rate_scale.pack(side="left", fill="x", expand=True, padx=10)
+    def current_step():
+        return step_by_text.get(step_var.get(), tts_engine.DEFAULT_RATE_STEP)
 
     # 3. 단축키 설정
     hotkey_frame = ttk.Labelframe(dialog, text=get_msg("group_hotkey"), padding=15)
@@ -2672,7 +2713,7 @@ def show_tts_settings_dialog():
         언어가 바뀌었으면 _apply_language 가 전역 언어를 바꾸고 트레이 문구를 새 언어로 다시 만든다. 저장은 아래 한 번.
         """
         global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, translate_enabled
-        global translation_overlay_enabled
+        global translation_overlay_enabled, tts_rate_step
 
         tts_hotkey_modifiers["ctrl"] = ctrl_var.get()
         tts_hotkey_modifiers["shift"] = shift_var.get()
@@ -2682,15 +2723,18 @@ def show_tts_settings_dialog():
 
         selected_disp = voice_var.get()
         tts_voice_name = voice_map.get(selected_disp, "ko-KR-Wavenet-A")
-        tts_speaking_rate = rate_var.get()
-        # 읽는 중이면 속도를 바로 반영한다 — 하단 바에서 바꾼 것과 같은 효과(2026-09-28 사용자 요청 "진행바에서 설정한 것은
-        # 설정창에서 저장한 것과 동일한 효과"). 음성은 읽기마다 정해지므로 다음 읽기부터 바뀐다.
-        if tts_session is not None:
-            try:
-                tts_session.set_rate(tts_speaking_rate)
-                tts_speaking_rate = tts_session.rate          # 허용 범위로 잘린 값
-            except Exception:
-                pass
+        # 간격이 바뀌면 지금 속도를 새 목록의 가장 가까운 값으로 맞추고(가운데면 빠른 쪽) 하단 바 목록도 바꾼다(2026-10-24).
+        # 읽는 중이면 맞춘 속도를 바로 반영한다. 음성은 읽기마다 정해지므로 다음 읽기부터 바뀐다.
+        tts_rate_step = current_step()
+        snapped = tts_engine.snap_rate(tts_speaking_rate, tts_rate_step)
+        if snapped != tts_speaking_rate:
+            tts_speaking_rate = snapped
+            if tts_session is not None:
+                try:
+                    tts_session.set_rate(tts_speaking_rate)
+                except Exception:
+                    pass
+        _refresh_bar_rate_choices()
 
         _apply_language(lang_var.get())
         # 번역은 읽기를 시작할 때 정해지므로 다음 읽기부터 적용된다(읽는 중인 세션은 그대로)
@@ -3060,7 +3104,9 @@ def _ensure_reading_ui():
     global bottom_bar, reader_window, BottomBar, ReaderWindow
     if bottom_bar is None and BottomBar is not None and root is not None:
         try:
-            bottom_bar = BottomBar(root, _on_bar_command, get_msg)
+            # 설정(톱니) 버튼 없이, 닫기 옆에 속도 목록 버튼 — 볼륨은 늘 1.0(2026-10-24 사용자 결정)
+            bottom_bar = BottomBar(root, _on_bar_command, get_msg, show_settings=False)
+            _refresh_bar_rate_choices()
         except Exception as e:
             BottomBar = None
             logging.error(f"하단 바 생성 실패: {e}")
@@ -3073,52 +3119,59 @@ def _ensure_reading_ui():
             logging.error(f"리더 창 생성 실패: {e}")
             log_to_console(f"[UI] 리더 창을 만들지 못했습니다(형광펜 없이 읽기만 합니다): {e}")
 
+def _rate_menu_items():
+    """하단 바 속도 목록 [(배속, 글자), ...] — 지금 간격(tts_rate_step)의 목록. 0.1 → 0.7x~2.0x, 0.25 → 0.50x~3.00x."""
+    return [(c, tts_engine.format_rate(c, tts_rate_step)) for c in tts_engine.rate_choices(tts_rate_step)]
+
+def _refresh_bar_rate_choices():
+    """(Tk 메인) 하단 바에 지금 간격의 속도 목록을 넘긴다 — 바를 만든 직후, 설정 창에서 간격을 저장한 뒤."""
+    if bottom_bar is not None and hasattr(bottom_bar, "set_rate_choices"):
+        _safe_ui("하단 바 속도 목록", bottom_bar.set_rate_choices, _rate_menu_items())
+
+def _step_rate(direction):
+    """(Tk 메인) 속도 단축키 — 지금 간격 목록에서 한 칸 느리게(-1, Ctrl+←)·빠르게(+1, Ctrl+→).
+
+    2026-10-24 사용자 결정: 읽는 동안에만, 목록 끝에서는 멈춘다(돌아가지 않는다). 바꾸는 길은 하단 바 목록에서 고른 것과
+    같다(_on_bar_command "setRate" — 바로 반영·저장, 하단 바 글자는 엔진 상태 알림으로 바뀐다).
+    """
+    if tts_session is None:
+        return
+    choices = tts_engine.rate_choices(tts_rate_step)
+    cur = tts_engine.snap_rate(tts_speaking_rate, tts_rate_step)
+    i = min(range(len(choices)), key=lambda k: abs(choices[k] - cur))
+    j = max(0, min(len(choices) - 1, i + direction))
+    if j == i:
+        return
+    logging.info(f"[속도] 단축키 {'느리게' if direction < 0 else '빠르게'}: {choices[i]} → {choices[j]}")
+    _on_bar_command("setRate", choices[j])
+
 def _on_bar_command(cmd, value=None):
     """(Tk 메인) 하단 바 버튼 → 재생 엔진 명령. BottomBar(on_command) 가 부른다.
 
-    cmd: "togglePause" | "stop" | "forward" | "rewind" | "mute" | "unmute" | "setRate"(value=배속) | "setVolume"(value=0.2~1)
+    cmd: "togglePause" | "stop" | "forward" | "rewind" | "mute" | "unmute" | "setRate"(value=배속)
     닫기(X) = "stop": 읽기 중지 + 바를 곧바로 숨김(확장 page-ui.js:582-585 도 바를 먼저 숨기고 stop 을 보낸다).
-    속도·볼륨은 확장처럼 설정에 저장해 다음 읽기에도 쓴다(page-ui-host.js:193-203).
+    "setRate" = 닫기 옆 속도 목록에서 골랐다(2026-10-24 사용자 결정 — 속도는 여기서만 고른다). 지금 간격 목록 값으로 맞춰
+        바로 반영하고 저장한다(설정 창 저장과 같은 효과, 2026-09-28 결정). 볼륨 명령(setVolume)은 없앴다 — 늘 1.0.
     """
-    global tts_speaking_rate, tts_volume
+    global tts_speaking_rate
     if cmd == "stop":
         if bottom_bar is not None:
             _safe_ui("하단 바 숨김", bottom_bar.hide)
         stop_tts()
         return
     session = tts_session
+    if cmd == "setRate":
+        tts_speaking_rate = tts_engine.snap_rate(value, tts_rate_step)
+        if session is not None:
+            session.set_rate(tts_speaking_rate)     # 즉시 반영(다음 0.1초 블록부터 — tts_engine 모듈 설명 "속도 즉시 반영")
+        save_settings()
+        return
     if session is None:
         return
     if cmd in ("togglePause", "forward", "rewind", "mute", "unmute"):
         session.command(cmd)
-    elif cmd == "setRate":
-        session.set_rate(value)             # 즉시 반영(다음 0.1초 블록부터 — tts_engine 모듈 설명 "속도 즉시 반영")
-        tts_speaking_rate = session.rate    # 허용 범위로 잘린 값
-        _sync_settings_dialog_rate()        # 설정 창이 열려 있으면 그 슬라이더도 같은 값으로
-        save_settings()                     # 영구 저장 — 설정 창 "저장" 과 같은 효과(2026-09-28 사용자 요청)
-    elif cmd == "setVolume":
-        session.set_volume(value)
-        tts_volume = session.volume
-        save_settings()
     else:
         log_to_console(f"[UI] 알 수 없는 하단 바 명령: {cmd}")
-
-def _sync_settings_dialog_rate():
-    """(Tk 메인) 설정 창이 열려 있으면 속도 슬라이더·표시를 지금 값(tts_speaking_rate)으로 맞춘다.
-
-    왜: 하단 바와 설정 창이 같은 값을 보게 한다. 안 맞추면 설정 창을 열어 둔 채 하단 바에서 속도를 바꾼 뒤
-        설정 창 "저장" 을 누를 때 설정 창의 옛 값으로 되돌아간다(2026-09-28 사용자 요청 "진행바 설정 = 설정창 저장").
-    """
-    try:
-        d = getattr(show_tts_settings_dialog, "dialog", None)
-        var = getattr(show_tts_settings_dialog, "rate_var", None)
-        if d is not None and var is not None and d.winfo_exists():
-            var.set(tts_speaking_rate)
-            lbl = getattr(show_tts_settings_dialog, "rate_label", None)
-            if lbl is not None:
-                lbl.config(text=f"{tts_speaking_rate:.2f}x")
-    except Exception:
-        pass
 
 
 def _on_reader_geometry_changed(geom):

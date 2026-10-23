@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "7f08c738-977a-4fca-8117-213a5cfd944d",
+  "conversation_id": "3272f3f9-2543-4f7a-91ea-2c103d117bdb",
+  "intent": "change_request",
+  "body": "[데스크톱 앱 BluemingReadAloud 대화에서 보냄 — 리규형님 지시 전달 · 앞 작업(f2869e5e) 후속]\n\n리규형님 지시: 아래 두 가지를 질문 없이 바로 진행하세요. 단축키가 확장에서 되는지, 무엇을 했는지는 완료 회신에 적어 주세요.\n데스크톱 앱(BluemingReadAloud)도 같은 사양으로 지금 구현합니다(2026-10-24 리규형님 결정).\n\n## 1. 설정 페이지에서 속도 간격을 바꾸면 즉시 반영\n- 앞 작업에서 \"읽는 중에 간격을 바꾸면 재생 바 목록·소리는 다음 읽기부터\"로 하셨던 것을 바꿉니다(리규형님 결정 변경).\n- 읽는 중에 간격을 바꾸면 바로:\n  - 재생 바의 속도 목록을 새 간격 목록으로 바꾸고\n  - 지금 속도를 새 목록의 가장 가까운 값(가운데면 빠른 쪽)으로 맞춰 소리에 바로 반영하고 저장한다.\n\n## 2. 속도 단축키 — Ctrl+← 한 단계 느리게 / Ctrl+→ 한 단계 빠르게\n- \"한 단계\" = 지금 간격 목록에서 한 칸(간격 0.1 이면 1.3x → 1.2x / 1.4x).\n- 목록 끝(가장 느림·가장 빠름)에서는 더 가지 않고 멈춘다(돌아가지 않는다).\n- 바꾼 속도는 재생 바에서 고른 것과 같게 소리에 바로 반영하고 저장하며, 재생 바 표시도 바뀐다.\n- **확장이 읽는 동안에만** 동작한다. 그때는 키를 가로채서 페이지에 넘기지 않는다(커서가 단어 단위로 움직이지 않게).\n  읽지 않을 때는 Ctrl+←/→ 가 원래 기능(단어 이동) 그대로다.\n- Ctrl 만 눌렀을 때다. Ctrl+Shift+←/→(단어 단위 선택)는 건드리지 않는다.\n- 🔴 먼저 확장에서 되는지 확인해 주세요(예: 페이지 keydown 을 콘텐츠 스크립트에서 잡기, chrome.commands 등 —\n  방법은 그쪽 판단). 안 되거나 일부만 되면(예: 페이지에 포커스가 있을 때만) 그 이유와 대안을 회신에 적어 주세요.",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-10-23T16:27:27.006Z"
+}

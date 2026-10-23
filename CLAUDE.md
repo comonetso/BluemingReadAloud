@@ -48,7 +48,8 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   `highlight(idx, caption=None)` (caption = translated text → drawn as a caption box instead of yellow),
   `notify_scroll()`, `end()`, `destroy()`, `active`, and one-shot queries answered later on the Tk main thread:
   `query_selection_end(on_done)`, `query_page_scheme(on_done)` (`"https"`, `"chrome-extension"`, … or `None`),
-  `query_telegram_selected(x, y, on_done)` (`True` / `"menu"` / `False`, `None` on failure).
+  `query_telegram_selected(x, y, on_done, right_click=None)` (`True` / `"menu"` / `False`, `None` on failure;
+  `right_click` = last right-click spot `(rx, ry)`, also checked).
 - **tts_engine.py** / **readaloud_text.py** — playback engine and text splitting (tests in `tests/`).
 - **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
   client are in its header. Voices are Korean only, so "primary language" = Hangul.
@@ -89,9 +90,18 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    TTS. Timeout 3 s (user decision; measured 0.87–1.55 s). A failed translation raises `tts_engine.SegmentFailed` →
    reading **stops at that segment's turn** and a warning box appears (`segment_failed` event → `_notify_segment_failed`).
 4. **`tts_engine.TtsSession`** — one object per reading. Thread `tts-producer` synthesizes up to 2 segments ahead
-   (`PREFETCH_AHEAD`) with Google Cloud TTS v1 (`make_google_synthesize`, LINEAR16 24 kHz, `speaking_rate`);
-   thread `tts-player` writes 0.1 s blocks to one `sd.OutputStream` (gapless). Recent results are reused
-   (2-entry cache, like the extension's `js/tts-engines.js:385-407`).
+   (`PREFETCH_AHEAD`) with Google Cloud TTS v1 (`make_google_synthesize`, LINEAR16 24 kHz, synthesized at 1.0);
+   thread `tts-player` writes 0.1 s blocks to one `sd.OutputStream` (gapless) and applies the speed while playing
+   (WSOLA — `set_rate` takes effect from the next block). Recent results are reused
+   (2-entry cache, like the extension's `js/tts-engines.js:385-407`). Volume is always 1.0 (user decision 2026-10-24 —
+   the volume slider was removed; loudness is the Windows volume).
+   **Speed** (user decisions 2026-10-24): picked from a list, not a slider. The list step is chosen in the settings dialog
+   (`tts_rate_step`: 0.1 → 0.7–2.0×, 0.25 → 0.5–3.0×, default 0.1 — `tts_engine.RATE_STEPS` / `rate_choices`); a stored
+   speed that is not in the list is snapped to the nearest entry, the faster one on a tie (`tts_engine.snap_rate`).
+   The speed itself is picked in the bottom bar (button next to Close → list) or with **Ctrl+← one step slower /
+   Ctrl+→ one step faster** (`_step_rate`, stops at the ends). Both go through `_on_bar_command("setRate")`: applied at
+   once and saved. Changing the step in the settings dialog while reading re-snaps the speed and refreshes the bar list
+   at once (user decision; the Chrome extension applies it from the next reading instead).
 5. **Events** — the engine's `on_event(kind, data)` → `gui_queue` → `check_gui_queue()` → `_handle_tts_event()`
    → bottom bar + highlighter. Highlighter rule (user decision 2026-09-28): `on_result(ok=True)` → paint on the
    original text (`SourceHighlighter.highlight(idx)` per `segment` event), **no reader window**;
@@ -112,7 +122,13 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   when `update_tray_menu()` is called. Items (user decision 2026-09-28, exactly these five): "TTS Settings…",
   "Use Reader Window" (check), "Disable in Browsers" (check), "Read button on selected text" (check), "Exit".
   Check items go through `gui_queue` to the Tk main thread.
-- **Settings dialog** (`show_tts_settings_dialog`): voice + preview, speaking rate, hotkey, and a "General" group moved
+- **Bottom bar** (`bottom_bar.py`, created with `show_settings=False`): the extension's gear button (speed/volume panel)
+  is hidden — its code is kept (`_build_panel` …, the default `show_settings=True` is used by `dev_demo_ui.py`).
+  Right end = [speed] [close]: `set_rate_choices([(rate, text), ...])` shows the speed button ("1.3x"); clicking it opens
+  a non-activating list window above the bar (current speed in the accent color; Esc / outside click / foreground change
+  closes it, like the panel) → `on_command("setRate", rate)`. Widths in `RATE_*` constants are arbitrary.
+- **Settings dialog** (`show_tts_settings_dialog`): voice + preview, speed step (0.1 / 0.25 — the speed itself is in the
+  bottom bar), hotkey, and a "General" group moved
   from the tray: language (한국어 / English — applied on Save, then the tray is rebuilt via `_apply_language`),
   "Credentials" button (`show_api_key_dialog`), "Open Console" button (`open_console_window`). "Open README" was removed.
 - **Red dot** (`selection_button.py` + `setup_selection_button()` / `setup_mouse_listener()` in whisperer.py):
@@ -125,8 +141,13 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   the element under the release point, up to a ListItem whose parent class contains `HistoryInner`, then
   SelectionItem.IsSelected — the chat list on the left is also "selected", so it is excluded). Dot = next to the release
   point, on "선택" and on every further click that selects another message. Right after "선택" the menu may still be
-  closing (focus = `Ui::PopupMenu`) → result `"menu"` → ask again every 0.1 s up to 1 s (`TELEGRAM_MENU_RETRY_*`, user
-  decision; measured: selected after 0.23 s). Clicking the dot reads via Ctrl+C — Telegram copies the selected message
+  closing → result `"menu"` when the focus **or the element under the release point** is a menu, or an element vanished
+  (`_Lost`) → ask again every 0.1 s up to 1 s (`TELEGRAM_MENU_RETRY_*`, user decision; measured: selected after 0.23 s).
+  Once `"menu"` was seen, `False` is retried too until the limit (the focus can return to a message before the selection
+  shows — 2026-10-24); `None` (slow/failed) stops. A short message's menu opens over **another** message, so the release
+  point is not the chosen one: the mouse hook also posts `("selection_button", "rpress", x, y)` on right press, kept in
+  `_tg_right_click` and passed once to the next show/click check, which also looks at that spot (2026-10-24).
+  Clicking the dot reads via Ctrl+C — Telegram copies the selected message
   text (measured, no name/time header). Diagnostic `[텔레그램]` log lines are written per check (file log only).
   The Tk main thread (`_handle_selection_button_msg`) drops it for a web page in a disabled browser, the desktop / taskbar / Explorer
   (`_no_dot_window_at`, `_no_dot_foreground`) and non-client spots such as title bars and scrollbars (`_nonclient_at`,
@@ -142,7 +163,10 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   fallback) + GAP, clamped into the monitor work area;
   if the clamped dot would cover the cursor pixel (e.g. after dragging a maximized window's scrollbar at the right
   screen edge) it goes to the cursor's left (`x - GAP - size`).
-- **Global hotkey**: pynput. Default TTS hotkey Ctrl+Alt+D (user setting may differ).
+- **Global hotkey**: pynput. Default TTS hotkey Ctrl+Alt+D (user setting may differ). `win32_filter` swallows the
+  hotkey's letter key (and its key-up) so it is not typed into the foreground app. It also swallows **Ctrl+←/→ while a
+  reading exists** (`tts_session`, paused included) for the speed step (`_rate_key_swallowing`); Ctrl+Shift/Alt
+  combinations and every press while not reading pass through (word-wise cursor moves keep working).
 - **Single instance**: Windows named mutex + UDP socket bound to `localhost:51888`.
 - **Source highlight** (`source_highlight.py`): all UI Automation calls on one dedicated thread (COM initialized there,
   request queue); the overlay window is drawn on the Tk main thread (click-through `WS_EX_TRANSPARENT|WS_EX_LAYERED`,
@@ -165,15 +189,16 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 
 - `whisperer_settings.json` in the working directory (git-ignored — it holds API keys in plain text). Keys: `language`,
   `google_tts_api_key`, `gemini_api_key`,
-  `tts_hotkey`, `tts_settings` (`voice_name`, `speaking_rate`, `volume`), `reader_window_enabled`,
+  `tts_hotkey`, `tts_settings` (`voice_name`, `speaking_rate` — snapped to the step's list on load, `rate_step`),
+  `reader_window_enabled`,
   `reader_window_geometry`, `bottom_bar_monitor`, `selection_button_enabled`, `disable_in_browsers` (default true),
   `source_highlight_enabled` (default true — deliberately **not** in the tray or the settings dialog; the user fixed the
   tray list, so it can only be turned off by editing the file), `translate_enabled` and `translation_overlay_enabled`
   (both default true, in the settings dialog "General"). Boolean keys with non-boolean values are ignored.
   Settings printed to the console go through `_mask_keys` (key prefix + length only).
 - `save_settings()` rewrites the whole file; keep `save_settings()` and `load_settings()` in sync when adding a key.
-  Old keys (STT keys, the floating icon's `controller_position` / `controller_hidden`, `google_credentials_path`) are
-  ignored on load and dropped from the file at the next save.
+  Old keys (STT keys, the floating icon's `controller_position` / `controller_hidden`, `google_credentials_path`,
+  `tts_settings.volume`) are ignored on load and dropped from the file at the next save.
 - Logging: `setup_logging()` uses `basicConfig(force=True)` — earlier `logging.*` calls in `main()` had installed a
   default handler, so `logs/whisperer_*.log` stayed 0 bytes from 2026-07 until 2026-09-29.
 

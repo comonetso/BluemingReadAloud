@@ -167,6 +167,10 @@ messages = {
         "ko": "재생 속도:",
         "en": "Speaking Rate:"
     },
+    "label_rate_step": {
+        "ko": "속도 간격",
+        "en": "Speed step"
+    },
     "btn_preview": {
         "ko": "미리듣기",
         "en": "Preview"

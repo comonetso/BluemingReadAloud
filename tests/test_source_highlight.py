@@ -1221,6 +1221,7 @@ class PropUIA:
     def __init__(self):
         self.focused = None
         self.under = None
+        self.under_at = {}         # (x, y) → 그 자리 요소(없으면 under)
         self.under_error = None
         self.points = []
         self.calls = []
@@ -1249,7 +1250,7 @@ class PropUIA:
         self.points.append(pt)
         if self.under_error is not None:
             raise FakeCOMError(self.under_error)
-        return self.under
+        return self.under_at.get((pt[1], pt[2]), self.under)
 
 
 class OneShotQueryTest(unittest.TestCase):
@@ -1356,6 +1357,65 @@ class OneShotQueryTest(unittest.TestCase):
         u.focused = u.el(50009, hist, cls="class Ui::PopupMenu")
         u.under = u.el(50011, u.el(50026, cls="class Ui::Menu::Menu"), cls="class Ui::Menu::Action")
         self.assertEqual(self.ask("query_telegram_selected", 1, 2), "menu")
+
+    def test_menu_under_mouse_with_focus_on_message_gives_menu(self):
+        # 10-23 설치본 로그: 메뉴 항목을 누르고 뗀 순간 포커스는 이미 메시지(선택 표시 아직 안 켜짐), 마우스 아래는 메뉴
+        u = self.make()
+        hist = self.tg_history(u)
+        u.focused = u.el(ITEM, hist, selected=False)
+        u.under = u.el(50009, cls="class Ui::PopupMenu")
+        self.assertEqual(self.ask("query_telegram_selected", 1, 2), "menu")
+
+    def test_menu_under_mouse_with_focus_on_input_gives_menu(self):
+        # 같은 로그: 포커스가 아래 입력칸으로 넘어간 경우
+        u = self.make()
+        u.focused = u.el(EDIT, cls="class Ui::InputField::Inner")
+        u.under = u.el(50009, cls="class Ui::PopupMenu")
+        self.assertEqual(self.ask("query_telegram_selected", 1, 2), "menu")
+
+    def test_lost_element_gives_menu(self):
+        # 같은 로그 23:31:23: 메뉴가 닫히며 보던 요소가 사라짐 → 잠깐 뒤 다시 묻게 "menu"
+        u = self.make()
+        u.focused = u.el(EDIT, cls="class Ui::InputField::Inner")
+        u.under_error = UIA_E_ELEMENTNOTAVAILABLE_SIGNED
+        self.assertEqual(self.ask("query_telegram_selected", 1, 2), "menu")
+
+    def test_telegram_slow_call_gives_unknown(self):
+        # 느린 호출은 다시 묻지 않는다(다른 앱을 얼리지 않는 규칙) → None
+        u = self.make()
+        u.focused = u.el(50009, cls="class Ui::PopupMenu")
+        u.hook = lambda name: self.clock.advance(2.0) if name == "focus" else None
+        self.assertIsNone(self.ask("query_telegram_selected", 1, 2))
+
+    def ask_rc(self, x, y, right_click):
+        got = []
+        self.hl.query_telegram_selected(x, y, lambda r: got.append(r), right_click=right_click)
+        self.assertTrue(wait(self.root, lambda: got), "on_done 이 와야 한다")
+        return got[0]
+
+    def test_right_click_spot_message_selected(self):
+        # 10-24 개발 모드 로그: 메뉴가 닫힌 뒤 뗀 자리 밑은 다른 메시지(선택 안 됨) — 우클릭한 자리의 메시지가 고른 메시지
+        u = self.make()
+        hist = self.tg_history(u)
+        u.focused = u.el(ITEM, hist, selected=False)
+        u.under = u.el(ITEM, hist, selected=False)
+        u.under_at[(30, 40)] = u.el(ITEM, hist, selected=True)
+        self.assertIs(self.ask_rc(100, 200, (30, 40)), True)
+        self.assertEqual(u.points, [("pt", 100, 200), ("pt", 30, 40)])
+
+    def test_right_click_spot_not_selected(self):
+        u = self.make()
+        hist = self.tg_history(u)
+        u.focused = u.el(ITEM, hist, selected=False)
+        u.under = u.el(50038, hist)                        # 날짜 구분선(Separator) — 실측 01:01:57
+        u.under_at[(30, 40)] = u.el(ITEM, hist, selected=False)
+        self.assertIs(self.ask_rc(100, 200, (30, 40)), False)
+
+    def test_no_right_click_asks_one_point(self):
+        u = self.make()
+        u.focused = u.el(ITEM, self.tg_history(u), selected=True)
+        self.assertIs(self.ask_rc(1, 2, None), True)
+        self.assertEqual(u.points, [("pt", 1, 2)])
 
     def test_selected_wins_over_menu(self):
         u = self.make()

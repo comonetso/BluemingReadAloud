@@ -764,7 +764,7 @@ class _UiaWorker:
 
     요청: ("begin", gen, source_text, spans, target_pid, own_pid) / ("rects", gen, idx, reveal) / ("end", gen) / ("quit",)
           한 번짜리 조회(읽기 세션과 무관, 토큰 = Tk 쪽 요청 번호): ("caret", 토큰) / ("page_scheme", 토큰)
-          / ("tg_selected", 토큰, x, y)
+          / ("tg_selected", 토큰, x, y, 우클릭 자리 (rx, ry) 또는 None)
     결과: ("begin_ok", gen, info) / ("begin_fail", gen, reason) / ("rects", gen, idx, rects, doc_rect, scrolled)
           / ("slow", gen, 설명) / ("lost", gen, 설명) / ("error", gen, 설명)
           / ("caret", 토큰, 결과) — 한 번짜리 조회 세 가지가 모두 이 모양으로 돌려준다
@@ -819,7 +819,7 @@ class _UiaWorker:
                 self._one_shot(req[1], "페이지 주소 종류", self._page_scheme)
                 continue
             if kind == "tg_selected":
-                self._one_shot(req[1], "텔레그램 메시지 선택", self._telegram_selected, req[2], req[3])
+                self._one_shot(req[1], "텔레그램 메시지 선택", self._telegram_selected, req[2], req[3], req[4])
                 continue
             gen = req[1]
             if gen < self.current_gen:
@@ -1004,50 +1004,72 @@ class _UiaWorker:
             el = parent
         return None
 
-    def _telegram_selected(self, x, y):
+    def _element_at(self, x, y):
+        """(x, y) 아래 요소 하나(ElementFromPoint). 관리자 창·작업 표시줄 위의 "액세스 거부" 등은 None(건너뜀).
+
+        느린 호출(_SlowCall)·요소 사라짐(_Lost)은 그대로 올려 보낸다.
+        """
+        try:
+            return self._call("ElementFromPoint", self._uia.ElementFromPoint, self._U.tagPOINT(int(x), int(y)))
+        except (_SlowCall, _Lost):
+            raise
+        except Exception as exc:
+            log.debug("텔레그램: (%s, %s) 아래 요소 조회 실패(건너뜀): %r", x, y, exc)
+            return None
+
+    def _telegram_selected(self, x, y, right_click=None):
         """텔레그램: 포커스 요소와 (x, y) 아래 요소에서 위로 걸어, 메시지 목록 안 메시지가 "선택됨"인지 본다.
 
-        결과: True 선택됨 / "menu" 아직 우클릭 메뉴가 떠 있다(포커스가 메뉴 — 부르는 쪽이 잠깐 뒤 다시 묻는다) / False
+        right_click: 마지막 우클릭 자리 (rx, ry) 또는 None. 있으면 그 자리 아래 요소도 본다(2026-10-24 사용자 결정 —
+            "선택" 메뉴 항목을 누르고 메뉴가 닫히면 뗀 자리 밑은 우클릭한 메시지가 아니라 그 아래 다른 메시지·날짜 구분선일 수
+            있다. 10-24 개발 모드 로그 01:01:48·01:01:56 — 1초 동안 다시 물어도 False). 우클릭한 자리는 고른 메시지 위다.
+
+        결과: True 선택됨 / "menu" 우클릭 메뉴가 닫히는 중(부르는 쪽이 잠깐 뒤 다시 묻는다) / False
         왜: 텔레그램(Qt)은 글 위치 기능(TextPattern)이 없어 선택 끝을 못 묻는다. 대신 우클릭 메뉴 "선택" 으로 고른 메시지는
             목록 항목의 선택 상태(SelectionItem.IsSelected)가 켜진다(2026-10-23 실측 — 두 개 골라도 각각 켜지고 Esc 로 꺼짐).
         두 요소를 다 보는 까닭(실측): "선택" 을 누른 직후엔 포커스는 다른 메시지·마우스 아래가 고른 메시지였고, 선택 상태에서
             다른 메시지를 더 누르면 그 반대였다.
         "menu" 를 두는 까닭(2026-10-23 개발 모드 시험 — "처음엔 안 뜨고 다음엔 뜬다"): "선택" 을 누르고 뗀 순간엔 메뉴가
             닫히는 중이라 포커스·마우스 아래가 다 메뉴일 수 있다(측정에서도 메뉴가 떠 있는 동안은 메뉴만 잡혔다).
+        "menu" 가 되는 경우(2026-10-24 — 10-23 설치본 로그에서 "선택" 뒤 점이 안 뜬 7번을 보고 넓힘):
+            ① 포커스가 메뉴 ② 마우스 아래가 메뉴(= 메뉴 항목을 누르고 뗐다 — 포커스는 이미 메시지·입력칸으로 넘어갔을 수 있다)
+            ③ 보던 요소가 사라짐(_Lost — 메뉴가 닫히며 생긴다, 23:31:23 실측). 느린 호출(_SlowCall)은 그대로 올려 보내 그만둔다.
         (x, y) 아래 요소 조회는 관리자 창·작업 표시줄 위에서 "액세스 거부"가 난다(실측) → 그 요소만 건너뛴다.
         진단 로그(원인 확정 전까지 — 사용자 결정): 조회마다 본 요소의 종류·클래스 이름·결과·걸린 시간. 글·이름은 남기지 않는다.
         """
         U = self._U
         call = self._call
         t0 = self._clock()
-        candidates = []
-        focused = call("GetFocusedElement", self._uia.GetFocusedElement)
-        if focused:
-            candidates.append(("포커스", focused))
-        if x is not None and y is not None:
-            try:
-                under = call("ElementFromPoint", self._uia.ElementFromPoint, U.tagPOINT(int(x), int(y)))
-            except (_SlowCall, _Lost):
-                raise
-            except Exception as exc:
-                log.debug("텔레그램: 마우스 아래 요소 조회 실패(건너뜀): %r", exc)
-                under = None
-            if under:
-                candidates.append(("마우스 아래", under))
         seen = []
-        focus_type = None
-        for name, el in candidates:
-            ct = call("ControlType", el.GetCurrentPropertyValue, U.UIA_ControlTypePropertyId)
-            cls = str(call("ClassName", el.GetCurrentPropertyValue, U.UIA_ClassNamePropertyId) or "")
-            seen.append("%s %s/%s" % (name, ct, cls.replace("class ", "")[:30]))
-            if name == "포커스":
-                focus_type = ct
-        if any(self._telegram_item_selected(el) for _, el in candidates):
-            result = True
-        elif focus_type in UIA_MENU_TYPES:
+        try:
+            candidates = []
+            focused = call("GetFocusedElement", self._uia.GetFocusedElement)
+            if focused:
+                candidates.append(("포커스", focused))
+            if x is not None and y is not None:
+                under = self._element_at(x, y)
+                if under:
+                    candidates.append(("마우스 아래", under))
+            if right_click:
+                rc_el = self._element_at(right_click[0], right_click[1])
+                if rc_el:
+                    candidates.append(("우클릭 자리", rc_el))
+            on_menu = False
+            for name, el in candidates:
+                ct = call("ControlType", el.GetCurrentPropertyValue, U.UIA_ControlTypePropertyId)
+                cls = str(call("ClassName", el.GetCurrentPropertyValue, U.UIA_ClassNamePropertyId) or "")
+                seen.append("%s %s/%s" % (name, ct, cls.replace("class ", "")[:30]))
+                if ct in UIA_MENU_TYPES:
+                    on_menu = True
+            if any(self._telegram_item_selected(el) for _, el in candidates):
+                result = True
+            elif on_menu:
+                result = "menu"
+            else:
+                result = False
+        except _Lost as exc:
+            seen.append("사라짐(%s)" % exc)
             result = "menu"
-        else:
-            result = False
         log.info("[텔레그램] 선택 확인 %s · %s · %.0fms", result, " · ".join(seen) or "요소 없음",
                  (self._clock() - t0) * 1000)
         return result
@@ -1800,14 +1822,14 @@ class SourceHighlighter:
         self._check_thread("query_page_scheme")
         self._one_shot_query("page_scheme", (), on_done)
 
-    def query_telegram_selected(self, x, y, on_done):
+    def query_telegram_selected(self, x, y, on_done, right_click=None):
         """(Tk 메인) 텔레그램에서 (x, y) 를 뗀 뒤 메시지가 "선택"(우클릭 메뉴 → 선택) 상태인지 묻는다.
 
-        결과는 나중에 Tk 메인에서 on_done(True / "menu" / False). "menu" = 우클릭 메뉴가 아직 떠 있다(잠깐 뒤 다시 물을 것).
-        막혀 있거나 실패하면 None(= 점을 띄우지 않는다).
+        결과는 나중에 Tk 메인에서 on_done(True / "menu" / False). "menu" = 우클릭 메뉴가 닫히는 중(잠깐 뒤 다시 물을 것).
+        막혀 있거나 실패하면 None(= 점을 띄우지 않는다). right_click = 마지막 우클릭 자리 (rx, ry) — 그 자리 메시지도 본다.
         """
         self._check_thread("query_telegram_selected")
-        self._one_shot_query("tg_selected", (x, y), on_done)
+        self._one_shot_query("tg_selected", (x, y, right_click), on_done)
 
     def _one_shot_query(self, kind, args, on_done):
         """(Tk 메인) 한 번짜리 조회 요청을 워커에 넣고 on_done 을 요청 번호로 맡겨 둔다(결과는 _handle 의 "caret")."""
