@@ -50,6 +50,7 @@ __all__ = [
     "align_segments_to_source", "Alignment",
     "make_spoken_text", "spoken_text", "SpokenText",
     "pauses_markup", "load_english_words",
+    "INPUT_CHUNK_BYTES", "split_paragraphs", "split_input", "split_paragraphs_for_reading",
 ]
 
 # 이식 기준: F:\workspace\EtcProject\ChromeExtentions\read-aloud-hrg 의 HEAD
@@ -930,4 +931,124 @@ def split_for_reading(source_text, lang, voice_lang=None, words=None, keep_raw=F
         if keep_raw:
             item["raw"] = seg
         result.append(item)
+    return result
+
+
+# ════════════════════════════════════════════════════════════════════
+# 문단 단위 읽기 — Paseo 상태바 플러그인 기준 (2026-10-28 리규형님 지시)
+# ════════════════════════════════════════════════════════════════════
+# 세 곳(Paseo 상태바 플러그인 · 이 앱 · 크롬 확장)의 읽기를 같게 하려고 기준을 따른다.
+#   - 문단 = 빈 줄로 나눈 덩어리(기준 client/presentation/thinkingPlayer.ts splitParagraphs). 형광펜·이전/다음 키는 문단 단위.
+#   - 말할 글 = spoken_text.make_spoken_text(문단) (기준 server/presentation/spokenText.ts).
+#   - 한 요청은 UTF-8 2000바이트 이하, 문장 경계에서 나눈다(기준 server/presentation/tts.ts splitInput).
+#     기준은 문단 하나를 다 합성한 뒤 재생하지만, 이 앱은 나눈 조각마다 재생을 시작한다 — 문단이 길 때(빈 줄 없이 붙여 넣은 글)
+#     첫 소리가 수십 초 늦어지지 않게. 듣는 결과(같은 자리에서 끊긴 같은 소리)는 같다.
+# 위의 줄 단위 split_for_reading(크롬 확장 이식)은 더는 읽기에 쓰지 않는다(되돌릴 때를 위해 남겨 둠).
+
+INPUT_CHUNK_BYTES = 2000   # 기준 tts.ts INPUT_CHUNK_BYTES — 4981바이트 실호출이 30초를 넘겨 줄인 값(그쪽 10-06 확인)
+
+# 빈 줄(공백·탭만 있는 줄 포함) 하나 이상. 기준은 \r\n?→\n 으로 바꾼 뒤 /\n[\t ]*\n(?:[\t ]*\n)*/ 로 나눈다.
+# 원문 위치를 지키려고 바꾸지 않고 줄바꿈 모양 셋(\r\n · \r · \n)을 그대로 받는다
+_NL = r"(?:\r\n?|\n)"
+_PARAGRAPH_BREAK = re.compile(_NL + r"[\t ]*" + _NL + r"(?:[\t ]*" + _NL + r")*")
+# 기준 splitInput 의 문장 경계: 문장부호 뒤 공백, 또는 줄바꿈(앞뒤 공백 포함)
+_INPUT_BOUNDARY = re.compile(r"(?<=[.!?…。！？])[ \t 　]+|[ \t]*\r?\n[ \t\r\n]*")
+_LAST_WORD = re.compile("[" + _WS + "]+[^" + _WS + "]*\\Z")
+
+
+def split_paragraphs(source_text):
+    """원문 → 문단 [(시작, 끝)] (반열린, 앞뒤 공백 뺀 원문 위치). 공백뿐인 문단은 뺀다."""
+    spans = []
+    pos = 0
+    text = source_text or ""
+    for m in list(_PARAGRAPH_BREAK.finditer(text)) + [None]:
+        end = m.start() if m else len(text)
+        s, e = pos, end
+        while s < e and text[s] in _WS_SET:
+            s += 1
+        while e > s and text[e - 1] in _WS_SET:
+            e -= 1
+        if s < e:
+            spans.append((s, e))
+        if m:
+            pos = m.end()
+    return spans
+
+
+def split_input(text, voice_lang=None, voice_type=None, limit=INPUT_CHUNK_BYTES):
+    """말할 글 → 한 요청씩 보낼 조각 목록(기준 tts.ts splitInput 그대로).
+
+    문장을 차례로 이어 붙이다 limit 바이트(쉼 markup 을 붙인 길이 기준)를 넘으면 새 조각. 한 문장이 너무 길면
+    공백에서, 공백이 없으면 글자(코드 포인트) 경계에서 자른다. 이어 붙일 때 줄바꿈은 빈칸 하나가 된다.
+    """
+    def fits(s):
+        markup = pauses_markup(s, voice_lang, voice_type)
+        return len((markup if markup is not None else s).encode("utf-8", "surrogatepass")) <= limit
+
+    chunks = []
+    current = [""]
+
+    def append(piece):
+        joined = f"{current[0]} {piece}" if current[0] else piece
+        if fits(joined):
+            current[0] = joined
+        else:
+            if current[0]:
+                chunks.append(current[0])
+            current[0] = piece
+
+    for sentence in (s for s in _INPUT_BOUNDARY.split(text or "") if s):
+        if fits(sentence):
+            append(sentence)
+            continue
+        chars = list(sentence)
+        start = 0
+        while start < len(chars):
+            low = 1
+            high = min(limit, len(chars) - start)
+            while low < high:
+                mid = (low + high + 1) // 2
+                if fits("".join(chars[start:start + mid])):
+                    low = mid
+                else:
+                    high = mid - 1
+            piece = "".join(chars[start:start + low])
+            if start + low < len(chars):
+                m = _LAST_WORD.search(piece)
+                if m and m.start() > 0:
+                    piece = piece[:m.start()]
+                    low = len(piece)
+            append(piece)
+            start += low
+    if current[0]:
+        chunks.append(current[0])
+    return chunks
+
+
+def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_whole=None):
+    """원문 → 읽을 조각 [{"text", "src_start", "src_end", "para"}] — 문단 단위(기준 방식).
+
+    text: 음성에 보낼 글(spoken_text.make_spoken_text 뒤, 2000바이트 이하로 나눔).
+    src_start/src_end: 그 조각이 속한 **문단** 의 원문 위치(형광펜은 문단을 칠한다). para: 문단 번호(0부터, 빈 문단은 세지 않음).
+    keep_whole(raw): True 면 그 문단을 나누지 않고 한 조각으로 두고 "raw"(변환 전 글)를 담는다 — 번역할 문단
+      (translation.plan). 번역은 변환 전 글에 하고 변환은 번역 뒤에 한다(translation.make_translating_synthesize).
+      raw 에서는 URL 을 "URL" 로 가린다 — 주소가 번역 회사로 나가지 않게(예전 "HTTP URL." 대체와 같은 이유).
+    다듬어 빈 글이 된 문단(괄호·기호뿐)은 조각을 만들지 않는다(기준은 무음으로 지나간다 — 듣는 결과는 같다).
+    """
+    import spoken_text   # 여기서 부른다 — spoken_text 는 이 모듈을 부르지 않지만, 옛 경로만 쓰는 시험이 이 모듈만 불러도 되게
+    lang = spoken_text.speech_lang(voice_lang)
+    result = []
+    para = 0
+    for s, e in split_paragraphs(source_text):
+        raw = source_text[s:e]
+        spoken = spoken_text.make_spoken_text(raw, lang)
+        if not spoken:
+            continue
+        masked = spoken_text.mask_urls(raw)
+        if keep_whole is not None and keep_whole(masked):
+            result.append({"text": spoken, "src_start": s, "src_end": e, "para": para, "raw": masked})
+        else:
+            for chunk in split_input(spoken, voice_lang, voice_type):
+                result.append({"text": chunk, "src_start": s, "src_end": e, "para": para})
+        para += 1
     return result

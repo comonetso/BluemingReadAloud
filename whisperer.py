@@ -125,6 +125,7 @@ from messages import messages, get_message
 # 읽기용 텍스트 로직(확장 read-aloud-hrg 이식)과 재생 엔진 — 둘 다 모듈 로딩 시점엔 표준 라이브러리만 쓴다
 # (numpy·sounddevice·google 은 엔진 안에서 필요할 때 불러온다)
 import readaloud_text
+import spoken_text      # 말할 글 다듬기 — Paseo 상태바 플러그인 규칙(2026-10-28)
 import tts_engine
 # 주 언어가 아닌 문장 번역(2026-09-29) — requests 는 번역기를 만들 때(init_tts_client) 불러온다
 import translation
@@ -242,9 +243,10 @@ _translation_lookup = None  # (세션, 조각 글 → 번역문 함수). speak_t
 gemini_translator = None   # translation.GeminiTranslator(키가 없거나 못 만들었으면 MissingTranslator). init_tts_client 가 채운다
 tts_hotkey_modifiers = {"ctrl": True, "shift": False, "alt": True} # 기본 TTS 단축키: Ctrl+Alt+D
 tts_hotkey_key = "D"
-tts_voice_name = "ko-KR-Chirp3-HD-Callirrhoe"  # 기본 음성 모델
-tts_speaking_rate = 1.0   # 재생 속도(기본 1.0). 설정 창 목록에서 고른다 — 늘 tts_rate_step 목록의 값(tts_engine.snap_rate)
-tts_rate_step = tts_engine.DEFAULT_RATE_STEP   # 속도 목록 간격 0.1(0.7~2.0배) / 0.25(0.5~3.0배) — 2026-10-24 사용자 결정
+# 기본 음성 모델 — 2026-10-28 Paseo 상태바 플러그인·크롬 확장과 같은 목소리로(리규형님 지시, 그 전 기본은 Callirrhoe)
+tts_voice_name = "ko-KR-Chirp3-HD-Zephyr"
+tts_speaking_rate = 1.0   # 재생 속도(기본 1.0). 하단 바 목록·Ctrl+↑/↓ 로 고른다 — 늘 tts_rate_step 간격의 값(tts_engine.snap_rate)
+tts_rate_step = tts_engine.DEFAULT_RATE_STEP   # 속도 간격 0.1(0.5~2배) / 0.25(0.5~5배) — 2026-10-28 Paseo 기준(그 전 10-24 는 0.7~2.0 / 0.5~3.0)
 tts_volume = 1.0          # 재생 볼륨 — 늘 1.0(2026-10-24 사용자 결정: 볼륨 막대 제거, 소리 크기는 윈도우 볼륨으로). 저장·읽기 안 함
 # ※ TTS 재생 중 판정은 tts_playing(아래 TTS 재생 상태 변수)으로 한다
 
@@ -258,12 +260,16 @@ bottom_bar = None
 reader_window = None
 _reading_work_area = None        # 이번 읽기에서 하단 바를 붙일 모니터 작업 영역 (left, top, right, bottom)
 _reading_segment_idx = None      # 지금 형광펜을 칠한 조각 번호 (리더 창을 읽는 도중에 켤 때 다시 칠하려고)
+# 형광펜·리더 창은 문단을 칠한다(2026-10-28 Paseo 기준). (세션, 문단 목록, 조각 → 문단 번호 표) — _paragraphs_of 가 채운다
+_reading_paragraphs = None
+_painted_para = None             # (세션, 문단 번호, 번역문) — 원문 형광펜에 마지막으로 넘긴 것(같은 문단의 다음 조각에서 다시 칠하지 않게)
 _english_words = None            # 영어 단어 목록(data/english-words.js). 처음 읽을 때 한 번 불러온다
 _english_words_loaded = False
 
 # 사용 가능한 한국어 TTS 음성 목록 (이름, 성별, 유형, 설명)
 KOREAN_VOICES = [
-    ("ko-KR-Chirp3-HD-Callirrhoe", "여성", "Chirp3-HD", "고품질 한/영 자연스러운 여성 목소리 (추천)"),
+    ("ko-KR-Chirp3-HD-Zephyr", "여성", "Chirp3-HD", "고품질 한/영 여성 목소리 — Paseo·크롬 확장과 같은 기본 (추천)"),
+    ("ko-KR-Chirp3-HD-Callirrhoe", "여성", "Chirp3-HD", "고품질 한/영 자연스러운 여성 목소리"),
     ("ko-KR-Wavenet-A", "여성", "WaveNet", "밝고 친근한 여성 목소리"),
     ("ko-KR-Wavenet-B", "여성", "WaveNet", "부드럽고 차분한 여성 목소리"),
     ("ko-KR-Wavenet-C", "남성", "WaveNet", "신뢰감 있는 남성 목소리"),
@@ -701,8 +707,9 @@ def load_modules():
 # 키보드 리스너 설정
 # 단축키 글자 키를 "삼키는 중"인지 — 누름을 삼켰으면 짝이 되는 뗌도 삼킨다(누르고 있는 동안의 자동 반복 포함)
 _hotkey_swallowing = False
-# 속도 단축키(Ctrl+←/→)로 삼킨 방향키의 vk — 짝이 되는 뗌도 삼킨다(2026-10-24). 삼키는 중이 아니면 None
-_rate_key_swallowing = None
+# 읽기 단축키(Ctrl+Space·Ctrl+화살표)로 삼킨 키의 vk — 짝이 되는 뗌도 삼킨다(2026-10-24 속도 키 → 10-28 읽기 키 다섯 개).
+# 삼키는 중이 아니면 None
+_read_key_swallowing = None
 # 키보드로 글을 골랐는지(Ctrl+A, Shift+화살표·Home·End·PgUp·PgDn) — 수정자 키를 모두 뗄 때 빨간 점을 띄운다(2026-09-28 사용자 요청)
 _kbd_select_pending = False
 # 빨간 점 "선택 확인" 세대 — 확인 결과를 기다리는 사이 hide(누름·키 입력)가 오면 올려서 늦은 결과를 버린다
@@ -871,7 +878,8 @@ def setup_keyboard_listener():
 
     WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0100, 0x0101, 0x0104, 0x0105
     LLKHF_INJECTED = 0x10
-    VK_LEFT, VK_RIGHT = 0x25, 0x27
+    # 읽기 단축키 — Paseo 상태바 플러그인 기준(shared/shortcuts.ts, 2026-10-28 리규형님 지시). Ctrl 만 눌렀을 때
+    READ_KEYS = {0x20: "toggle", 0x25: "rewind", 0x27: "forward", 0x28: "slower", 0x26: "faster"}  # Space ← → ↓ ↑
 
     def win32_filter(msg, data):
         """(훅 스레드) 단축키 글자 키를 다른 앱에 넘기지 않고 삼킨다 — 2026-09-28 메모장 사고 수정.
@@ -887,11 +895,14 @@ def setup_keyboard_listener():
         ⚠️ 앱이 흉내 낸 입력(LLKHF_INJECTED — read_selected_text 의 Ctrl+C)은 건드리지 않는다.
         ⚠️ suppress_event() 는 예외를 던져 pynput 에 "이 이벤트 막음" 을 알리는 방식이라 try 밖에서 불러야 한다.
         ⚠️ 훅 콜백이라 가볍게: 변수 확인·root.after 한 번뿐. 로그·파일 I/O 금지(윈도우가 느린 훅을 떼어 낸다).
-        속도 단축키(2026-10-24 사용자 결정): 읽는 동안(tts_session 이 있는 동안 — 일시정지 포함) Ctrl+← 한 단계 느리게,
-            Ctrl+→ 한 단계 빠르게(_step_rate). Ctrl 만 눌렸을 때만 — Ctrl+Shift+←/→(단어 선택)·AltGr 는 넘긴다.
-            그 누름은 삼켜서 앞 창의 커서가 단어 단위로 움직이지 않게 하고, 짝이 되는 뗌도 삼킨다. 읽지 않을 땐 원래대로 넘긴다.
+        읽기 단축키(2026-10-28 Paseo 상태바 플러그인 기준 — 10-24 의 "Ctrl+←/→ = 속도" 를 바꿈, _read_key_action):
+            Ctrl+Space 멈춤·다시 시작 · Ctrl+← 이전 문단 · Ctrl+→ 다음 문단 · Ctrl+↓ 한 단계 느리게 · Ctrl+↑ 한 단계 빠르게.
+            읽기가 있을 때만(tts_session) 가로챈다. 멈춘 동안(tts_paused)은 Ctrl+Space 만 받고 화살표는 원래대로 넘긴다
+            (기준 web.ts listenTtsSpeedKeys — 입력창의 Ctrl+←/→ 단어 이동이 그대로 되게). 읽기가 없으면 다섯 키 모두 넘긴다
+            — Ctrl+Space 로 새 읽기를 시작하지는 않는다. Ctrl 만 눌렸을 때만 — Ctrl+Shift+←/→(단어 선택)·AltGr 는 넘긴다.
+            그 누름은 삼켜서 앞 창에 가지 않게 하고(커서 이동·자동완성 등), 짝이 되는 뗌도 삼킨다.
         """
-        global _hotkey_swallowing, _rate_key_swallowing
+        global _hotkey_swallowing, _read_key_swallowing
         suppress = False
         try:
             vk = _hotkey_vk(tts_hotkey_key)
@@ -915,16 +926,18 @@ def setup_keyboard_listener():
                 elif msg in (WM_KEYUP, WM_SYSKEYUP) and _hotkey_swallowing:
                     _hotkey_swallowing = False
                     suppress = True
-            elif data.vkCode in (VK_LEFT, VK_RIGHT) and not (data.flags & LLKHF_INJECTED):
+            elif data.vkCode in READ_KEYS and not (data.flags & LLKHF_INJECTED):
                 if msg in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                    if ctrl_pressed and not shift_pressed and not alt_pressed and tts_session is not None:
-                        _rate_key_swallowing = data.vkCode
+                    action = READ_KEYS[data.vkCode]
+                    if (ctrl_pressed and not shift_pressed and not alt_pressed and tts_session is not None
+                            and (action == "toggle" or not tts_paused)):
+                        _read_key_swallowing = data.vkCode
                         suppress = True
                         if root:
-                            direction = -1 if data.vkCode == VK_LEFT else 1
-                            root.after(0, lambda d=direction: _step_rate(d))   # 누르고 있으면 자동 반복마다 한 칸
-                elif msg in (WM_KEYUP, WM_SYSKEYUP) and _rate_key_swallowing == data.vkCode:
-                    _rate_key_swallowing = None
+                            # 누르고 있으면 자동 반복마다 한 번(기준 keydown 처리와 같음)
+                            root.after(0, lambda a=action: _read_key_action(a))
+                elif msg in (WM_KEYUP, WM_SYSKEYUP) and _read_key_swallowing == data.vkCode:
+                    _read_key_swallowing = None
                     suppress = True
         except Exception:
             suppress = False                                  # 판정이 깨지면 예전처럼 흘려보낸다(on_press 가 처리)
@@ -2581,13 +2594,14 @@ def show_tts_settings_dialog():
         selected_disp = voice_var.get()
         sel_voice_id = voice_map.get(selected_disp, "ko-KR-Wavenet-A")
         # 속도는 지금 저장된 값(하단 바 목록에서 고른 값 — 2026-10-24 설정 창에서 속도 칸을 뺐다)
-        sel_rate = tts_speaking_rate
+        # 지금 속도로 들려준다. 서버 허용이 0.25~4.0 이라(2026-10-28 속도 범위가 5배까지 늘어남) 미리듣기만 4.0 에서 자른다
+        sel_rate = min(tts_speaking_rate, 4.0)
 
         text = "안녕하세요. TTS 목소리 미리듣기입니다."
 
         def _preview():
             # (별도 스레드) 네트워크 요청이 Tk 메인을 멈추지 않게 따로 돈다. 여기서는 Tk 를 만지지 않는다.
-            # 속도는 목록에서 고른 값 그대로(0.5~3.0 — Cloud TTS 허용 0.25~4.0 안), 언어 코드는 ko-KR 고정(한국어 음성 목록뿐).
+            # 속도는 sel_rate 그대로(Cloud TTS 허용 0.25~4.0 안이어야 한다 — 읽기는 늘 1.0 으로 합성), 언어 코드는 ko-KR 고정(한국어 음성 목록뿐).
             try:
                 if not google_tts_client:
                     log_to_console("TTS 클라이언트 미초기화")
@@ -2614,7 +2628,7 @@ def show_tts_settings_dialog():
 
 
     # 2. 재생 속도 — 속도 간격만 (2026-10-24 사용자 결정: 속도는 하단 바 닫기 버튼 옆 목록에서 고른다.
-    #    여기서는 그 목록의 간격만 정한다 — 0.1 → 0.7~2.0배, 0.25 → 0.5~3.0배, 처음 0.1)
+    #    여기서는 간격만 정한다 — 2026-10-28 Paseo 기준으로 0.1 → 0.5~2배, 0.25 → 0.5~5배, 처음 0.1)
     rate_frame = ttk.Labelframe(dialog, text=get_msg("label_speaking_rate"), padding=15)
     rate_frame.pack(fill="x", **padding)
 
@@ -2624,9 +2638,9 @@ def show_tts_settings_dialog():
     ttk.Label(rate_row, text=get_msg("label_rate_step")).pack(side="left", padx=5)
 
     def _step_text(step):
-        # "0.1  (0.7x ~ 2.0x)" — 간격과 그 목록의 범위를 같이 보인다
-        ch = tts_engine.rate_choices(step)
-        return f"{step:g}  ({tts_engine.format_rate(ch[0], step)} ~ {tts_engine.format_rate(ch[-1], step)})"
+        # "0.1  (0.5x ~ 2x)" — 간격과 그 간격의 속도 범위를 같이 보인다(목록에는 1배 이상만 보이고 1배 아래는 Ctrl+↓ 로)
+        lo, hi = tts_engine.RATE_STEPS[step]
+        return f"{step:g}  ({tts_engine.format_rate(lo)} ~ {tts_engine.format_rate(hi)})"
 
     step_by_text = {_step_text(step): step for step in tts_engine.RATE_STEPS}
     step_var = tk.StringVar(value=_step_text(tts_engine.normalize_rate_step(tts_rate_step)))
@@ -3009,12 +3023,15 @@ def speak_text(text):
         return
 
     lang = tts_engine.voice_lang_of(tts_voice_name)
-    words = _get_english_words()
-    # 번역(2026-09-29): 켜져 있고 음성 언어가 지원 대상(지금은 한국어)이면, 조각마다 변환 전 글도 받아서
-    # 한글이 없는 문장이 든 조각만 번역 경로로 보낸다(translation.mark_for_translation). 규칙은 translation.py 머리 설명.
+    voice_type = tts_engine.voice_type_of(tts_voice_name)
+    # 2026-10-28 Paseo 상태바 플러그인 기준(리규형님 지시): 빈 줄로 나눈 문단 단위로 읽고, 말할 글은 spoken_text 규칙,
+    # 한 요청 2000바이트 이하(readaloud_text.split_paragraphs_for_reading). 형광펜·이전/다음은 문단 단위.
+    # 번역(2026-09-29): 켜져 있고 음성 언어가 지원 대상(지금은 한국어)이면, 한글이 없는 문장이 든 문단은 나누지 않고
+    # 변환 전 글(주소는 "URL" 로 가림)을 번역 경로로 보낸다(translation.mark_for_translation). 규칙은 translation.py 머리 설명.
     use_translation = translate_enabled and translation.supports(lang)
     try:
-        segments = readaloud_text.split_for_reading(text, lang, lang, words, keep_raw=use_translation)
+        segments = readaloud_text.split_paragraphs_for_reading(
+            text, lang, voice_type, keep_whole=translation.plan if use_translation else None)
         raw_texts = translation.mark_for_translation(segments) if use_translation else set()
     except Exception as e:
         logging.error(f"조각 나누기 오류: {e}")
@@ -3038,11 +3055,12 @@ def speak_text(text):
             translator = gemini_translator or translation.MissingTranslator("번역기가 준비되지 않았습니다(인증 전)")
             # on_translated: 번역이 끝나면(합성 스레드) Tk 메인에 알려 지금 칠하는 조각을 번역문 막으로 다시 칠하게 한다.
             # box["session"] 은 아래에서 세션을 만든 뒤 채워진다 — 번역은 start() 뒤에야 일어나므로 늘 채워져 있다.
+            spoken_lang = spoken_text.speech_lang(lang)
             synthesize = translation.make_translating_synthesize(
-                synthesize, translator, lambda t: readaloud_text.spoken_text(t, lang, words).text,
+                synthesize, translator, lambda t: spoken_text.make_spoken_text(t, spoken_lang),
                 raw_texts, log=log_to_console,
                 on_translated=lambda t: gui_queue.put(("tts_event", box.get("session"), "translation_ready", t)))
-            log_to_console(f"[번역] 번역할 문장이 있는 조각 {sum(1 for s in segments if s['text'] in raw_texts)}개")
+            log_to_console(f"[번역] 번역할 문장이 있는 문단 {sum(1 for s in segments if s['text'] in raw_texts)}개")
         session = tts_engine.TtsSession(
             text, segments,
             synthesize,
@@ -3120,30 +3138,46 @@ def _ensure_reading_ui():
             log_to_console(f"[UI] 리더 창을 만들지 못했습니다(형광펜 없이 읽기만 합니다): {e}")
 
 def _rate_menu_items():
-    """하단 바 속도 목록 [(배속, 글자), ...] — 지금 간격(tts_rate_step)의 목록. 0.1 → 0.7x~2.0x, 0.25 → 0.50x~3.00x."""
-    return [(c, tts_engine.format_rate(c, tts_rate_step)) for c in tts_engine.rate_choices(tts_rate_step)]
+    """하단 바 속도 목록 [(배속, 글자), ...] — Paseo 기준 rateOptions(2026-10-28): 1배부터 위로(0.1 → 1.0x~2x,
+    0.25 → 1.0x~5x), 지금 속도가 1배보다 느리면 그 값 하나만 맨 앞에(1배 아래는 Ctrl+↓ 로만 내려간다)."""
+    return [(c, tts_engine.format_rate(c)) for c in tts_engine.rate_choices(tts_rate_step, tts_speaking_rate)]
 
 def _refresh_bar_rate_choices():
-    """(Tk 메인) 하단 바에 지금 간격의 속도 목록을 넘긴다 — 바를 만든 직후, 설정 창에서 간격을 저장한 뒤."""
+    """(Tk 메인) 하단 바에 지금 속도 목록을 넘긴다 — 바를 만든 직후, 속도를 바꾼 뒤(1배 아래 값이 바뀜), 설정 창에서 간격을 저장한 뒤."""
     if bottom_bar is not None and hasattr(bottom_bar, "set_rate_choices"):
         _safe_ui("하단 바 속도 목록", bottom_bar.set_rate_choices, _rate_menu_items())
 
 def _step_rate(direction):
-    """(Tk 메인) 속도 단축키 — 지금 간격 목록에서 한 칸 느리게(-1, Ctrl+←)·빠르게(+1, Ctrl+→).
+    """(Tk 메인) 속도 단축키 — 한 단계 느리게(-1, Ctrl+↓)·빠르게(+1, Ctrl+↑). 0.5배~최댓값에서 멈춘다(돌지 않음).
 
-    2026-10-24 사용자 결정: 읽는 동안에만, 목록 끝에서는 멈춘다(돌아가지 않는다). 바꾸는 길은 하단 바 목록에서 고른 것과
-    같다(_on_bar_command "setRate" — 바로 반영·저장, 하단 바 글자는 엔진 상태 알림으로 바뀐다).
+    2026-10-28 Paseo 기준(stepSpeed): 지금 값 ± 간격을 snap_rate 로(tts_engine.step_rate). 소리가 나는 동안에만
+    (키 필터가 멈춘 동안은 이 키를 넘긴다). 바꾸는 길은 하단 바 목록에서 고른 것과 같다(_on_bar_command "setRate").
     """
     if tts_session is None:
         return
-    choices = tts_engine.rate_choices(tts_rate_step)
     cur = tts_engine.snap_rate(tts_speaking_rate, tts_rate_step)
-    i = min(range(len(choices)), key=lambda k: abs(choices[k] - cur))
-    j = max(0, min(len(choices) - 1, i + direction))
-    if j == i:
+    new = tts_engine.step_rate(cur, tts_rate_step, direction)
+    if new == cur:
         return
-    logging.info(f"[속도] 단축키 {'느리게' if direction < 0 else '빠르게'}: {choices[i]} → {choices[j]}")
-    _on_bar_command("setRate", choices[j])
+    logging.info(f"[속도] 단축키 {'느리게' if direction < 0 else '빠르게'}: {cur} → {new}")
+    _on_bar_command("setRate", new)
+
+def _read_key_action(action):
+    """(Tk 메인) 읽기 단축키(키 필터 win32_filter 가 넘김) — Paseo 상태바 플러그인 기준(2026-10-28 리규형님 지시).
+
+    "toggle"(Ctrl+Space) 멈춤 ↔ 다시 시작 · "rewind"(Ctrl+←) 이전 문단 · "forward"(Ctrl+→) 다음 문단 ·
+    "slower"(Ctrl+↓)·"faster"(Ctrl+↑) 한 단계. 멈춘 동안은 "toggle" 만 한다(키 필터와 같은 규칙 — 그 사이 멈췄을 때 대비).
+    """
+    if tts_session is None:
+        return
+    if action == "toggle":
+        _on_bar_command("togglePause")
+    elif tts_paused:
+        return
+    elif action in ("rewind", "forward"):
+        _on_bar_command(action)
+    elif action in ("slower", "faster"):
+        _step_rate(-1 if action == "slower" else 1)
 
 def _on_bar_command(cmd, value=None):
     """(Tk 메인) 하단 바 버튼 → 재생 엔진 명령. BottomBar(on_command) 가 부른다.
@@ -3165,6 +3199,7 @@ def _on_bar_command(cmd, value=None):
         if session is not None:
             session.set_rate(tts_speaking_rate)     # 즉시 반영(다음 0.1초 블록부터 — tts_engine 모듈 설명 "속도 즉시 반영")
         save_settings()
+        _refresh_bar_rate_choices()                 # 1배 아래 값은 목록 맨 앞 한 칸이 지금 값을 따라간다(Paseo rateOptions)
         return
     if session is None:
         return
@@ -3196,7 +3231,7 @@ def _show_reader_window(session):
     _ensure_reading_ui()
     if reader_window is None:
         return
-    _safe_ui("리더 창 시작", reader_window.start, session.source_text, session.segments)
+    _safe_ui("리더 창 시작", reader_window.start, session.source_text, _paragraphs_of(session)[0])
     bar_height = 0
     if bottom_bar is not None:
         try:
@@ -3205,8 +3240,42 @@ def _show_reader_window(session):
             bar_height = 0
     _safe_ui("리더 창 표시", reader_window.show, _reading_work_area or _current_work_area(), bar_height,
              geometry=reader_window_geometry)
-    if _reading_segment_idx is not None:
-        _safe_ui("형광펜", reader_window.highlight, _reading_segment_idx)
+    para = _para_index(session, _reading_segment_idx)
+    if para is not None:
+        _safe_ui("형광펜", reader_window.highlight, para)
+
+def _paragraphs_of(session):
+    """(Tk 메인) 이 세션의 (문단 목록 [{"text", "src_start", "src_end"}], 조각 번호 → 문단 번호 표).
+
+    2026-10-28 Paseo 상태바 플러그인 기준 — 읽는 문단에 형광펜. 엔진 조각(2000바이트 이하로 나눈 것)은 "para" 로 문단을
+    알려 주고 원문 위치(src)는 문단 것이다. 형광펜(SourceHighlighter)·리더 창에는 문단 목록을 넘기고 문단 번호로 칠한다.
+    "para" 가 없는 조각은 조각 하나 = 문단 하나(예전 동작).
+    """
+    global _reading_paragraphs
+    if _reading_paragraphs is not None and _reading_paragraphs[0] is session:
+        return _reading_paragraphs[1], _reading_paragraphs[2]
+    paras, para_of = [], []
+    last = None
+    for i, seg in enumerate(getattr(session, "segments", None) or []):
+        seg = seg if isinstance(seg, dict) else {}
+        p = seg.get("para")
+        if not isinstance(p, int) or isinstance(p, bool):
+            p = ("piece", i)
+        if not paras or p != last:
+            paras.append({"text": seg.get("text") or "", "src_start": seg.get("src_start"), "src_end": seg.get("src_end")})
+            last = p
+        else:
+            paras[-1]["text"] += " " + (seg.get("text") or "")
+        para_of.append(len(paras) - 1)
+    _reading_paragraphs = (session, paras, para_of)
+    return paras, para_of
+
+def _para_index(session, idx):
+    """(Tk 메인) 조각 번호 → 문단 번호(형광펜·리더 창이 칠할 번호). 모르면 None."""
+    if session is None or not isinstance(idx, int) or isinstance(idx, bool):
+        return None
+    para_of = _paragraphs_of(session)[1]
+    return para_of[idx] if 0 <= idx < len(para_of) else None
 
 def _hide_reading_ui():
     """(Tk 메인) 읽기가 끝났다 → 하단 바를 숨기고, 리더 창은 칠을 지우고 숨긴다."""
@@ -3286,7 +3355,7 @@ def _begin_source_highlight(session):
         _on_source_highlight_result(session, ok, reason)
 
     try:
-        hl.begin(session.source_text, session.segments, on_result)
+        hl.begin(session.source_text, _paragraphs_of(session)[0], on_result)   # 문단 목록(2026-10-28)
     except Exception as e:
         logging.error(f"원문 위 형광펜 시작 오류: {e}")
         log_to_console(f"[형광펜] 원문 위 형광펜을 시작하지 못했습니다(리더 창으로): {e}")
@@ -3363,7 +3432,7 @@ def _handle_tts_event(session, kind, data):
       전에 불리고 segment 알림은 start 뒤에만 오므로 늘 begin 뒤다. _reading_segment_idx 에도 적어 둔다(결과가
       ok=False 면 _show_reader_window 가 그 번호로 리더 창을 칠한다).
     """
-    global tts_session, _reading_segment_idx, _reading_ui_session, _translation_lookup
+    global tts_session, _reading_segment_idx, _reading_ui_session, _translation_lookup, _reading_paragraphs, _painted_para
     if session is None or session is not tts_session:
         return
     if kind == "session_start":
@@ -3375,18 +3444,26 @@ def _handle_tts_event(session, kind, data):
     elif kind == "segment":
         _reading_segment_idx = data
         caption = _caption_for(session, data)
+        # 형광펜은 문단 번호로 칠한다(2026-10-28). 같은 문단의 다음 조각(2000바이트로 나뉜 것)이면 다시 칠하지 않는다 —
+        # 같은 사각형 조회·자동 스크롤 요청이 또 가지 않게(UIA 호출을 늘리지 않는다)
+        para = _para_index(session, data)
+        repaint = para is not None and _painted_para != (session, para, caption)
         # 진단용(2026-09-29 Codex 분석 260929_211454): 실제로 읽기 시작한 조각 번호. 콘솔의 "조각 N/M 합성" 은
         # 미리 합성한 기록이라 재생 순서와 다르다 — 형광펜 로그와 같은 파일에 순서대로 남긴다
         logging.info(f"[형광펜] 재생 조각 {data + 1 if isinstance(data, int) else data} "
-                     f"(형광펜 상태 {_source_hl_state}, 번역문 {'있음' if caption else '없음'})")
+                     f"(문단 {para + 1 if para is not None else '?'}, 형광펜 상태 {_source_hl_state}, "
+                     f"번역문 {'있음' if caption else '없음'})")
         if session is _source_hl_session and _source_hl_state == "on":
-            if _source_highlight_active():
-                _safe_ui("원문 형광펜", source_highlighter.highlight, data, caption)
+            if _source_highlight_active() and repaint:
+                _painted_para = (session, para, caption)
+                _safe_ui("원문 형광펜", source_highlighter.highlight, para, caption)
         elif session is _source_hl_session and _source_hl_state == "pending":
-            if source_highlighter is not None:
-                _safe_ui("원문 형광펜(결과 대기 중 번호 전달)", source_highlighter.highlight, data, caption)
+            if source_highlighter is not None and repaint:
+                _painted_para = (session, para, caption)
+                _safe_ui("원문 형광펜(결과 대기 중 번호 전달)", source_highlighter.highlight, para, caption)
         elif reader_window is not None and reader_window_enabled and not _source_highlight_blocks_reader(session):
-            _safe_ui("형광펜", reader_window.highlight, data)
+            if para is not None:
+                _safe_ui("형광펜", reader_window.highlight, para)
     elif kind == "state":
         if bottom_bar is not None:
             _safe_ui("하단 바 갱신", bottom_bar.update, data)
@@ -3402,8 +3479,10 @@ def _handle_tts_event(session, kind, data):
             except Exception:
                 same = False
             caption = _caption_for(session, idx) if same else None
-            if caption:
-                _safe_ui("원문 형광펜(번역문 도착)", source_highlighter.highlight, idx, caption)
+            para = _para_index(session, idx)
+            if caption and para is not None:
+                _painted_para = (session, para, caption)
+                _safe_ui("원문 형광펜(번역문 도착)", source_highlighter.highlight, para, caption)
     elif kind == "segment_failed":
         # 번역 실패로 그 조각 차례에 읽기가 멈췄다(2026-09-29 사용자 결정 "읽기 멈추고 알림"). 정리는 곧 올 session_end 가 한다
         _notify_segment_failed(data)
@@ -3416,6 +3495,8 @@ def _handle_tts_event(session, kind, data):
             tts_session = None
         _reading_segment_idx = None
         _reading_ui_session = None
+        _reading_paragraphs = None
+        _painted_para = None
         try:
             update_tray_menu()
         except Exception:

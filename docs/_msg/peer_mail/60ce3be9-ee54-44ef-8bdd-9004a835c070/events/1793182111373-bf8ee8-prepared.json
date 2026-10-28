@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-28T10:08:31.373Z",
+  "type": "prepared",
+  "recipient": "peer",
+  "attempt_id": "d523a125-cb6d-4e6e-a369-c77c45a661ad",
+  "detail": "peer_mail to=PC:F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+  "route": {
+    "transport": "peer_mail",
+    "host": "PC",
+    "path": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+    "agent": null
+  }
+}

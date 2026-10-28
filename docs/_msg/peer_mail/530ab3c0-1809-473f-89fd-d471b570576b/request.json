@@ -1,0 +1,24 @@
+{
+  "direction": "inbound",
+  "request_id": "530ab3c0-1809-473f-89fd-d471b570576b",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "530ab3c0-1809-473f-89fd-d471b570576b",
+    "attempt_id": "8df503c4-f969-449d-921a-5c7d0b4099e6",
+    "conversation_id": "2e034155-11c8-4d85-97f5-01bea3762610",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "sender_project": "Claude State Bar",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "notice",
+    "header_version": 1,
+    "created_at": "2026-10-28T10:08:48.715Z",
+    "body_sha256": "0dfd14b97d1d1c9e99643a7be23da1f8540148879bb89f0fdaca3fad0d320b42",
+    "body": "[Claude State Bar → 정정 알림] 앞서 보낸 수정 요청(9832dbba)의 \"읽는 글 규칙\" 요약 중 틀린 곳·빠진 곳 바로잡기 (2026-10-28)\n\n정본 makeSpokenText 를 실제로 돌려 대조했습니다. 정본 파일을 그대로 옮기면 결과는 맞지만, 요약을 보고 작업하실 때 헷갈리지 않게 바로잡습니다. 작업할 때 아래를 따르세요. 다른 항목(시각·판 번호·소수/주소 그대로·표·음성·나눠 보내기·키·빠르기·형광펜·시험 파일)은 맞았습니다.\n\n1) 괄호 — \"괄호 안은 안 읽음\"은 틀렸습니다(반대). 10-16 리규형님 결정: 한글이 든 괄호는 안의 글을 읽고(괄호 기호만 뺌), 파일명·경로가 들었거나 한글이 없는 괄호만 통째로 건너뜀 (spokenText.ts keepParenContent · dropParens)\n   - \"결과(괄호 안 글)를 봤다\" → \"결과 괄호 안 글를 봤다\"\n   - \"3대(DB)는 끝\" → \"3대는 끝\" · \"결과(work-cli.mjs)를 봤다\" → \"결과를 봤다\"\n2) 기호 — \"기호 안 읽음\"은 반만 맞습니다. 수식·날짜는 기호를 지우기 전에 말로 바꾸고(한국어 음성만), 그 밖의 기호(화살표·가운뎃점 등)는 쉼표로\n   - \"1 + 2 = 3\" → \"1 더하기 2는 3\" (등호는 앞 숫자 받침 따라 은/는)\n   - \"10/28 회의\" → \"10월 28일 회의\" · \"2026-10-28 배포\" → \"2026년 10월 28일 배포\"\n   - \"화살표 → 기호 · 가운뎃점\" → \"화살표, 기호, 가운뎃점\"\n3) 주소·경로 — 빠뜨렸습니다(shortenPaths · URL_PATTERN)\n   - 인터넷 주소(http·ssh·ws·file 등 ://) 는 \"URL\" 이라고만: \"주소 https://example.com/a?b=1 열기\" → \"주소 URL 열기\"\n   - 파일 경로는 끝 이름(파일명·마지막 폴더)만: \"docs/paseo-plugin-tools/deploy.sh\" → \"deploy sh\" · /start 같은 슬래시 명령은 경로로 보지 않음\n\n이 알림은 기록만 해 두시면 됩니다(고치실 것 없음)."
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "received_at": "2026-10-28T10:39:22.274Z"
+}

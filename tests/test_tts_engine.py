@@ -162,7 +162,7 @@ class Harness:
     """세션 하나를 가짜 부품으로 조립한다. hooks: [(조건 함수(블록, h) → bool, 실행 함수(h))] — 한 번씩만 실행."""
 
     def __init__(self, texts, seconds=None, fail=(), gates=None, audio_of=None, hooks=None,
-                 open_stream=None, on_event_error=None, **kwargs):
+                 open_stream=None, on_event_error=None, paras=None, **kwargs):
         self.texts = list(texts)
         self.clock = FakeClock()
         self.events = []
@@ -171,6 +171,9 @@ class Harness:
         self.stream = FakeStream(self.clock, on_write=self._on_write)
         self.synth = FakeSynth(self.texts, seconds=seconds, fail=fail, gates=gates, audio_of=audio_of)
         self.segments = [{"text": t, "src_start": None, "src_end": None} for t in self.texts]
+        if paras is not None:   # 문단 번호(readaloud_text.split_paragraphs_for_reading 의 "para")
+            for seg, p in zip(self.segments, paras):
+                seg["para"] = p
         self.on_event_error = on_event_error
         self.session = TtsSession(
             "원문", self.segments, self.synth, open_stream or (lambda: self.stream), self._on_event,
@@ -410,6 +413,48 @@ class TestStopAndThreads(EngineTestBase):
         self.assertEqual(order, [("open_new", True)])
 
 
+class TestParagraphMoves(EngineTestBase):
+    """문단 단위 이전·다음(2026-10-28 Paseo 상태바 플러그인 기준) — 조각에 "para" 가 있으면 문단 첫 조각으로 움직인다."""
+
+    def test_forward_goes_to_next_paragraph_start(self):
+        h = Harness(["가.", "나.", "다.", "라."], paras=[0, 0, 1, 1], seconds=lambda i, r: 5.0,
+                    hooks=[(at_block(0, 3), lambda h: h.session.forward())])
+        runs = h.run()
+        self.assertEqual([r[0] for r in runs], [0, 2, 3])
+        self.assertEqual(h.segment_events(), [0, 2, 3])
+
+    def test_rewind_within_3s_of_paragraph_goes_to_previous_paragraph(self):
+        # 문단 1(조각 2·3)이 시작된 지 1.1초 — 조각 3 의 1블록. 3초 안이라 앞 문단(조각 0)부터
+        h = Harness(["가.", "나.", "다.", "라."], paras=[0, 0, 1, 1], seconds=lambda i, r: 1.0,
+                    hooks=[(at_block(3, 0), lambda h: h.session.rewind())])
+        h.run()
+        self.assertEqual(h.segment_events(), [0, 1, 2, 3, 0, 1, 2, 3])
+
+    def test_rewind_after_3s_restarts_paragraph_not_piece(self):
+        # 문단 1 이 시작된 지 3.5초(조각 2 의 2초 + 조각 3 의 1.5초) → 지금 문단 처음(조각 2)부터 바로.
+        # 같은 문단 안에서 조각 3 으로 넘어갈 때 시각을 다시 재지 않아야 한다(재면 0.5초라 앞 문단으로 간다)
+        h = Harness(["가.", "나.", "다.", "라."], paras=[0, 0, 1, 1], seconds=lambda i, r: 2.0,
+                    hooks=[(at_block(3, 15), lambda h: h.session.rewind())])
+        h.run()
+        self.assertEqual(h.segment_events(), [0, 1, 2, 3, 2, 3])
+
+    def test_next_disabled_in_last_paragraph(self):
+        h = Harness(["가.", "나.", "다."], paras=[0, 1, 1], seconds=lambda i, r: 1.0,
+                    hooks=[(at_block(1, 3), lambda h: h.session.forward())])
+        h.run()
+        self.assertEqual(h.segment_events(), [0, 1, 2])    # 마지막 문단의 첫 조각에서 다음 → 무시
+        current = None
+        seen = {}
+        for kind, data in h.all_events():
+            if kind == "segment":
+                current = data
+            elif kind == "state" and data["state"] == "PLAYING" and current is not None:
+                seen.setdefault(current, set()).add(data["can_next"])
+        self.assertEqual(seen.get(0), {True})
+        self.assertEqual(seen.get(1), {False})
+        self.assertEqual(seen.get(2), {False})
+
+
 class TestMoves(EngineTestBase):
     def test_rewind_within_3s_goes_to_previous_after_750ms(self):
         # 조각 1 을 1.1초 들은 때 이전 → 750ms 동안 조각 1 이 계속 나오다가 조각 0 처음부터
@@ -526,36 +571,55 @@ class TestRateVolume(EngineTestBase):
         self.assertEqual(tts_engine.clamp_rate(float("nan")), 1.0)
         self.assertEqual(tts_engine.clamp_rate(1.23), 1.23)
         s = TtsSession("", [], lambda t, r: None, lambda: None, rate=9)
-        self.assertEqual(s.rate, 4.0)
+        self.assertEqual(s.rate, 5.0)
 
     def test_rate_choices_by_step(self):
-        # 2026-10-24 사용자 결정: 간격 0.1 → 0.7~2.0배, 간격 0.25 → 0.5~3.0배
+        # 2026-10-28 Paseo 상태바 플러그인 기준(rateOptions): 1배부터 위로만 — 0.1 → 1.0~2.0, 0.25 → 1.0~5.0
         c1 = tts_engine.rate_choices(0.1)
-        self.assertEqual((c1[0], c1[-1], len(c1)), (0.7, 2.0, 14))
+        self.assertEqual((c1[0], c1[-1], len(c1)), (1.0, 2.0, 11))
         self.assertIn(1.3, c1)
         c2 = tts_engine.rate_choices(0.25)
-        self.assertEqual(c2, [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0])
+        self.assertEqual((c2[0], c2[-1], len(c2)), (1.0, 5.0, 17))
+        self.assertIn(1.75, c2)
+        # 지금 속도가 1배보다 느리면 그 값 하나만 맨 앞에(맞춘 값)
+        self.assertEqual(tts_engine.rate_choices(0.1, 0.7)[:2], [0.7, 1.0])
+        self.assertEqual(tts_engine.rate_choices(0.25, 0.6)[:2], [0.5, 1.0])
+        self.assertEqual(tts_engine.rate_choices(0.1, 1.3), c1)
         self.assertEqual(tts_engine.rate_choices("이상한 값"), c1)      # 모르는 간격 → 처음 간격 0.1
         self.assertEqual(tts_engine.normalize_rate_step("0.25"), 0.25)
         self.assertEqual(tts_engine.normalize_rate_step(0.5), tts_engine.DEFAULT_RATE_STEP)
 
     def test_snap_rate_nearest_and_faster_on_tie(self):
+        # 기준 normalizeRate: 0.5~최댓값으로 자르고 1배에서 간격 몇 칸인지 Math.round(가운데면 올림)
         snap = tts_engine.snap_rate
         self.assertEqual(snap(1.37, 0.1), 1.4)
         self.assertEqual(snap(1.3, 0.25), 1.25)
-        self.assertEqual(snap(0.33, 0.1), 0.7)     # 확장 하단 바 최저값(0.33배) → 목록 맨 아래
-        self.assertEqual(snap(4.0, 0.25), 3.0)
-        self.assertEqual(snap(1.25, 0.1), 1.3)     # 1.2 와 1.3 의 정확히 가운데 → 빠른 쪽
-        self.assertEqual(snap(1.75, 0.1), 1.8)
+        self.assertEqual(snap(0.33, 0.1), 0.5)     # 맨 아래는 0.5배
+        self.assertEqual(snap(4.0, 0.25), 4.0)
+        self.assertEqual(snap(9, 0.25), 5.0)
+        self.assertEqual(snap(2.4, 0.1), 2.0)
+        self.assertEqual(snap(1.25, 0.1), 1.3)     # 1.2 와 1.3 의 가운데 → 빠른 쪽
+        self.assertEqual(snap(1.75, 0.1), 1.8)     # 0.75/0.1 = 7.5 → 올림(node 로 기준 normalizeRate 와 같음을 확인)
         self.assertEqual(snap(1.125, 0.25), 1.25)  # 1.0 과 1.25 의 가운데 → 빠른 쪽
+        self.assertEqual(snap(0.7, 0.25), 0.75)
         self.assertEqual(snap(1.0, 0.1), 1.0)
         self.assertEqual(snap("x", 0.25), 1.0)
         self.assertEqual(snap(float("nan"), 0.1), 1.0)
 
+    def test_step_rate(self):
+        self.assertEqual(tts_engine.step_rate(1.0, 0.1, -1), 0.9)
+        self.assertEqual(tts_engine.step_rate(0.5, 0.1, -1), 0.5)     # 끝에서는 그대로
+        self.assertEqual(tts_engine.step_rate(2.0, 0.1, +1), 2.0)
+        self.assertEqual(tts_engine.step_rate(4.75, 0.25, +1), 5.0)
+        self.assertEqual(tts_engine.step_rate(1.3, 0.25, +1), 1.5)    # 1.3 → 맞춘 1.25 에서 한 칸
+
     def test_format_rate(self):
+        # 기준 speedLabel: 1배는 "1.0x", 나머지는 숫자 그대로
         self.assertEqual(tts_engine.format_rate(1.3, 0.1), "1.3x")
         self.assertEqual(tts_engine.format_rate(1.25, 0.25), "1.25x")
-        self.assertEqual(tts_engine.format_rate(1.0, 0.25), "1.00x")
+        self.assertEqual(tts_engine.format_rate(1.0, 0.25), "1.0x")
+        self.assertEqual(tts_engine.format_rate(2.0), "2x")
+        self.assertEqual(tts_engine.format_rate(0.5), "0.5x")
 
     def test_volume_and_mute_gain(self):
         def audio_of(idx, rate, sec):
@@ -674,16 +738,24 @@ class TestGoogleSynthesize(unittest.TestCase):
                                      AudioConfig=AudioConfig,
                                      AudioEncoding=types.SimpleNamespace(LINEAR16="LINEAR16"))
 
+    class ApiError(Exception):
+        """google.api_core 예외 흉내 — code 가 HTTP 상태."""
+
+        def __init__(self, code):
+            super().__init__(f"{code} error")
+            self.code = code
+
     class FakeClient:
-        def __init__(self, reject_markup=False, content=None):
+        def __init__(self, reject_markup=False, content=None, reject_code=400):
             self.reject_markup = reject_markup
+            self.reject_code = reject_code
             self.requests = []
             self.content = content if content is not None else b"H" * 44 + np.array([1, 2, 3], np.int16).tobytes()
 
         def synthesize_speech(self, input, voice, audio_config):
             self.requests.append((input, voice, audio_config))
             if input.markup is not None and self.reject_markup:
-                raise RuntimeError("400 INVALID_ARGUMENT")
+                raise TestGoogleSynthesize.ApiError(self.reject_code)
             return types.SimpleNamespace(audio_content=self.content)
 
     def test_korean_chirp_uses_markup_first(self):
@@ -706,6 +778,26 @@ class TestGoogleSynthesize(unittest.TestCase):
         self.assertEqual([r[0].markup is not None for r in client.requests], [True, False])
         self.assertEqual(client.requests[1][0].text, "사과, 배.")
 
+    def test_markup_other_errors_fail_at_once(self):
+        # 기준 tts.ts: markup 은 400 일 때만 평문으로 다시 — 인증(401·403)·한도(429)·시간 초과(504)는 바로 실패
+        for code in (401, 403, 429, 504):
+            client = self.FakeClient(reject_markup=True, reject_code=code)
+            synth = tts_engine.make_google_synthesize(client, self.fake_tts(), "ko-KR-Chirp3-HD-Zephyr")
+            with self.assertRaises(TestGoogleSynthesize.ApiError):
+                synth("사과, 배.", 1.0)
+            self.assertEqual(len(client.requests), 1)
+
+    def test_long_text_split_into_requests_and_joined(self):
+        # 2000바이트(UTF-8)를 넘는 글은 문장 경계에서 나눠 차례로 요청하고 소리를 이어 붙인다
+        client = self.FakeClient()
+        synth = tts_engine.make_google_synthesize(client, self.fake_tts(), "ko-KR-Chirp3-HD-Zephyr")
+        sentence = "가" * 300 + "."          # 901바이트
+        audio = synth(" ".join([sentence] * 5), 1.0)
+        self.assertEqual(len(client.requests), 3)   # 2 + 2 + 1 문장
+        self.assertEqual(audio.tolist(), [1, 2, 3] * 3)
+        for inp, _voice, _cfg in client.requests:
+            self.assertLessEqual(len((inp.markup or inp.text).encode("utf-8")), 2000)
+
     def test_text_only_when_markup_not_applicable(self):
         for voice_name, text, field in [("ko-KR-Wavenet-A", "사과, 배.", True),          # Chirp3-HD 아님
                                         ("ko-KR-Chirp3-HD-Callirrhoe", "사과 배.", True),  # 쉼표·화살표 없음
@@ -720,8 +812,8 @@ class TestGoogleSynthesize(unittest.TestCase):
     def test_rate_clamped_and_header_stripped(self):
         client = self.FakeClient()
         synth = tts_engine.make_google_synthesize(client, self.fake_tts(), "ko-KR-Wavenet-A")
-        synth("가.", 5.0)
-        self.assertEqual(client.requests[0][2].speaking_rate, 4.0)
+        synth("가.", 9.0)
+        self.assertEqual(client.requests[0][2].speaking_rate, tts_engine.RATE_MAX)
         empty = tts_engine.make_google_synthesize(self.FakeClient(content=b"H" * 44), self.fake_tts(), "ko-KR-Wavenet-A")
         self.assertIsNone(empty("가.", 1.0))
 
@@ -1195,7 +1287,9 @@ _GLUE_FUNCS = ["stop_current_playback", "_make_tts_event_handler", "speak_text",
                # 번역문 막(2026-09-29) — _handle_tts_event 가 부른다
                "_caption_for",
                # 하단 바 속도 목록(2026-10-24) — _ensure_reading_ui 가 부른다
-               "_rate_menu_items", "_refresh_bar_rate_choices", "_step_rate"]
+               "_rate_menu_items", "_refresh_bar_rate_choices", "_step_rate",
+               # 문단 형광펜·읽기 단축키(2026-10-28 Paseo 기준) — _show_reader_window·_handle_tts_event·키 필터가 부른다
+               "_paragraphs_of", "_para_index", "_read_key_action"]
 _GLUE_VARS = ["_tts_state_lock"]
 
 
@@ -1286,7 +1380,8 @@ def _load_glue(ui_log):
         "__builtins__": __builtins__, "__name__": "whisperer_glue",
         "os": os, "sys": sys, "threading": threading, "time": time, "logging": types.SimpleNamespace(
             error=lambda *a, **k: None, warning=lambda *a, **k: None, info=lambda *a, **k: None),
-        "readaloud_text": readaloud_text, "tts_engine": engine, "queue": __import__("queue"),
+        "readaloud_text": readaloud_text, "spoken_text": __import__("spoken_text"), "tts_engine": engine,
+        "queue": __import__("queue"), "_reading_paragraphs": None, "_painted_para": None,
         "gui_queue": __import__("queue").Queue(), "log_to_console": lambda msg: None, "save_settings": lambda: None,
         "update_tray_menu": lambda: None, "root": object(), "get_msg": lambda k, *a: k,
         "BottomBar": Bar, "ReaderWindow": Reader, "bottom_bar": None, "reader_window": None,
@@ -1348,7 +1443,7 @@ class TestWhispererGlue(EngineTestBase):
         ns = self.ns = _load_glue(ui)
         calls = []
         dict.__setitem__(ns, "gemini_translator", lambda xs: calls.append(xs) or xs)
-        ns["speak_text"](self.KO_LINE + "\n" + self.EN_LINE)
+        ns["speak_text"](self.KO_LINE + "\n\n" + self.EN_LINE)   # 두 문단(2026-10-28 문단 단위)
         self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))
         self.assertEqual(calls, [])
         ns["stop_tts"]()
@@ -1364,7 +1459,7 @@ class TestWhispererGlue(EngineTestBase):
             return ["영어로만 쓴 줄입니다" for _ in xs]
         dict.__setitem__(ns, "translate_enabled", True)
         dict.__setitem__(ns, "gemini_translator", fake_translate)
-        ns["speak_text"](self.KO_LINE + "\n" + self.EN_LINE)
+        ns["speak_text"](self.KO_LINE + "\n\n" + self.EN_LINE)   # 두 문단(2026-10-28 문단 단위)
         self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))
         self.assertEqual(calls, [[self.EN_LINE]])               # 한국어 조각은 번역하지 않는다
         self.assertIn("README", ns["_synth_texts"][0])          # 한국어 조각 속 영어 용어는 그대로
@@ -1389,7 +1484,7 @@ class TestWhispererGlue(EngineTestBase):
                 self.calls.append((idx, caption))
         dict.__setitem__(ns, "translate_enabled", True)
         dict.__setitem__(ns, "gemini_translator", lambda xs: ["영어로만 쓴 줄입니다" for _ in xs])
-        ns["speak_text"](self.KO_LINE + "\n" + self.EN_LINE)
+        ns["speak_text"](self.KO_LINE + "\n\n" + self.EN_LINE)   # 두 문단(2026-10-28 문단 단위)
         session = dict.__getitem__(ns, "tts_session")
         self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))   # 두 조각 모두 번역·합성 끝
         self.assertIs(dict.__getitem__(ns, "_translation_lookup")[0], session)
@@ -1550,8 +1645,8 @@ class TestWhispererGlue(EngineTestBase):
     def test_normal_reading_drives_bar_and_reader(self):
         ui = []
         ns = self.ns = _load_glue(ui)
-        # 60바이트 이하 짧은 줄은 다음 줄과 합쳐지므로(확장 speech.js:444) 두 조각이 되게 길게 쓴다
-        ns["speak_text"]("첫 번째 줄은 이렇게 조금 길게 써서 육십 바이트를 넘깁니다.\n"
+        # 빈 줄로 나눈 두 문단 = 두 조각(2026-10-28 문단 단위 — 그 전엔 줄마다 나눴다)
+        ns["speak_text"]("첫 번째 줄은 이렇게 조금 길게 써서 육십 바이트를 넘깁니다.\n\n"
                          "두 번째 줄도 마찬가지로 조금 길게 써서 합쳐지지 않게 합니다.")
         self.assertTrue(dict.__getitem__(ns, "tts_playing"))
         self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None, timeout=10))
@@ -1603,21 +1698,24 @@ class TestWhispererGlue(EngineTestBase):
         self.assertTrue(_pump(ns, lambda: ("bar.show",) in ui))
         bar = dict.__getitem__(ns, "bottom_bar")
         self.assertEqual(bar.init_kw, {"show_settings": False})
+        # 2026-10-28 Paseo 기준 rateOptions: 1배부터 위로 — 간격 0.1 → 1.0x~2x 11개
         self.assertEqual((bar.rate_choices[0], bar.rate_choices[-1], len(bar.rate_choices)),
-                         ((0.7, "0.7x"), (2.0, "2.0x"), 14))       # 간격 0.1 목록
+                         ((1.0, "1.0x"), (2.0, "2x"), 11))
         session = dict.__getitem__(ns, "tts_session")
         self.assertEqual(session.volume, 1.0)
         ns["_on_bar_command"]("setRate", 1.3)          # 목록에서 1.3x 를 골랐다 → 바로 반영·저장
         self.assertEqual(session.rate, 1.3)
         self.assertEqual(saved, [1.3])
-        ns["_on_bar_command"]("setRate", 2.5)          # 목록 밖 값 → 지금 간격 목록으로 맞춘다
+        ns["_on_bar_command"]("setRate", 2.5)          # 범위 밖 값 → 지금 간격으로 맞춘다
         self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 2.0)
+        ns["_on_bar_command"]("setRate", 0.7)          # 1배 아래(Ctrl+↓ 로 내려온 값) → 목록 맨 앞 한 칸이 그 값
+        self.assertEqual(bar.rate_choices[:2], [(0.7, "0.7x"), (1.0, "1.0x")])
         ns["stop_tts"]()
         self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
         self.assertTrue(session.join(3))
 
     def test_rate_hotkey_steps_one_and_stops_at_ends(self):
-        # 2026-10-24 사용자 결정: 읽는 동안 Ctrl+← 한 단계 느리게 / Ctrl+→ 한 단계 빠르게, 목록 끝에서 멈춤
+        # 2026-10-28 Paseo 기준: 읽는 동안 Ctrl+↓ 한 단계 느리게 / Ctrl+↑ 한 단계 빠르게, 0.5배·최댓값에서 멈춤
         ui = []
         saved = []
         ns = self.ns = _load_glue(ui)
@@ -1633,18 +1731,59 @@ class TestWhispererGlue(EngineTestBase):
         ns["_step_rate"](-1)
         self.assertEqual(session.rate, 0.9)
         for _ in range(5):
-            ns["_step_rate"](-1)                       # 0.7 에서 멈춘다
-        self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 0.7)
-        self.assertEqual(saved, [1.1, 1.0, 0.9, 0.8, 0.7])   # 끝에서 더 누른 것은 저장도 안 한다
+            ns["_step_rate"](-1)                       # 0.5 에서 멈춘다
+        self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 0.5)
+        self.assertEqual(saved, [1.1, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5])   # 끝에서 더 누른 것은 저장도 안 한다
         dict.__setitem__(ns, "tts_rate_step", 0.25)
-        dict.__setitem__(ns, "tts_speaking_rate", 3.0)
-        ns["_step_rate"](1)                            # 3.0 에서 멈춘다
-        self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 3.0)
+        dict.__setitem__(ns, "tts_speaking_rate", 5.0)
+        ns["_step_rate"](1)                            # 5.0 에서 멈춘다
+        self.assertEqual(dict.__getitem__(ns, "tts_speaking_rate"), 5.0)
         ns["_step_rate"](-1)
-        self.assertEqual(session.rate, 2.75)
+        self.assertEqual(session.rate, 4.75)
         ns["stop_tts"]()
         self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
         self.assertTrue(session.join(3))
+
+    def test_read_keys_follow_paseo(self):
+        # 2026-10-28 Paseo 기준 읽기 키: 멈춘 동안은 Ctrl+Space(다시 시작)만, 읽지 않을 때는 아무것도 안 한다
+        ui = []
+        ns = self.ns = _load_glue(ui)
+        ns["_read_key_action"]("toggle")               # 읽지 않을 때 — 새 읽기를 시작하지 않는다
+        self.assertIsNone(dict.__getitem__(ns, "tts_session"))
+        ns["speak_text"]("첫 문단입니다.\n\n둘째 문단입니다.")
+        self.assertTrue(_pump(ns, lambda: ("bar.show",) in ui))
+        session = dict.__getitem__(ns, "tts_session")
+        ns["_read_key_action"]("toggle")               # 멈춤
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_paused")))
+        ns["_read_key_action"]("faster")               # 멈춘 동안 — 속도 키는 동작하지 않는다
+        self.assertEqual(session.rate, 1.0)
+        ns["_read_key_action"]("toggle")               # 다시 시작
+        self.assertTrue(_pump(ns, lambda: not dict.__getitem__(ns, "tts_paused")))
+        ns["_read_key_action"]("faster")
+        self.assertEqual(session.rate, 1.1)
+        ns["_read_key_action"]("slower")
+        self.assertEqual(session.rate, 1.0)
+        ns["stop_tts"]()
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
+        self.assertTrue(session.join(3))
+
+    def test_paragraph_index_maps_pieces_to_paragraphs(self):
+        # 형광펜·리더 창은 문단을 칠한다 — 2000바이트로 나뉜 조각들은 같은 문단 번호, 원문 위치는 문단 것
+        ns = self.ns = _load_glue([])
+        # 같은 글자가 4번 넘게 이어지면 3개로 줄이는 규칙이 있어(spoken_text) 반복 없는 900바이트 문장을 쓴다
+        long_para = " ".join(["가나다라" * 75 + "."] * 3)
+        text = "첫 문단.\n\n" + long_para + "\n\n끝."
+        segs = readaloud_text.split_paragraphs_for_reading(text, "ko-KR", "Chirp3-HD")
+        session = types.SimpleNamespace(segments=segs)
+        paras, para_of = ns["_paragraphs_of"](session)
+        self.assertEqual(len(paras), 3)
+        self.assertEqual(para_of, [0, 1, 1, 2])
+        self.assertEqual(text[paras[1]["src_start"]:paras[1]["src_end"]], long_para)
+        self.assertEqual(ns["_para_index"](session, 2), 1)
+        self.assertIsNone(ns["_para_index"](session, 9))
+        # 문단 번호가 없는 옛 조각은 조각 하나 = 문단 하나
+        old = types.SimpleNamespace(segments=[{"text": "가.", "src_start": 0, "src_end": 2}, {"text": "나.", "src_start": 3, "src_end": 5}])
+        self.assertEqual(ns["_paragraphs_of"](old)[1], [0, 1])
 
 
 class TestEnglishWordsData(unittest.TestCase):

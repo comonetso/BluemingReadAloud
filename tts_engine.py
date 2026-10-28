@@ -101,6 +101,7 @@ stop_current_playback 의 스트림 멈춤 부분)를 옮겨 와서 클래스 �
     - 메모리: 24kHz int16 = 약 48KB/초. 캐시가 늘리는 몫은 최대 2조각.
 """
 
+import math
 import re
 import threading
 import time
@@ -139,10 +140,13 @@ SYNTH_CACHE_SIZE = 2         # tts-engines.js:407 prefetched ... .slice(0, 2) �
 # ⚠️ 설치된 google-cloud-texttospeech 2.33.0 의 docstring(cloud_tts.py AudioConfig)은 "[0.25, 2.0], 넘으면 오류"
 #    라고 적혀 있다. 실측과 다르다. 나중에 서버가 2.0 을 넘는 값을 거절하기 시작하면 여기를 2.0 으로 내려라
 #    (거절되면 그 조각은 합성 실패로 건너뛰어진다).
-RATE_MIN, RATE_MAX = 0.25, 4.0
-# 속도 목록: 간격 → (가장 느린 값, 가장 빠른 값). 2026-10-24 사용자 결정 — 막대 대신 하단 바 닫기 옆 목록에서 고르고,
-#   간격(0.1 은 0.7~2.0배, 0.25 는 0.5~3.0배, 처음 0.1)은 설정 창에서 정한다. 목록에 없는 속도는 snap_rate 로 맞춘다.
-RATE_STEPS = {0.1: (0.7, 2.0), 0.25: (0.5, 3.0)}
+#    (합성은 늘 SYNTH_RATE=1.0 이라 지금 이 범위는 재생 속도에만 쓰인다 — 그래서 RATE_MAX 를 5.0 으로 올려도 서버와 무관)
+RATE_MIN, RATE_MAX = 0.25, 5.0
+# 속도: 간격 → (가장 느린 값, 가장 빠른 값). 2026-10-28 리규형님 지시로 Paseo 상태바 플러그인 기준에 맞춤
+#   (client/presentation/thinkingPlayer.ts normalizeRate·rateOptions): 0.1 → 0.5~2배, 0.25 → 0.5~5배, 1배를 기준으로 간격만큼.
+#   하단 바 목록에는 1배 이상만 보이고, 1배 아래는 단축키(Ctrl+↓)로만 내려간다 — 지금 값이 1배 아래면 그 값 하나만 맨 앞에.
+#   (그 전 10-24 결정은 0.1 → 0.7~2.0배·0.25 → 0.5~3.0배, 목록에 전부 보임)
+RATE_STEPS = {0.1: (0.5, 2.0), 0.25: (0.5, 5.0)}
 DEFAULT_RATE_STEP = 0.1
 # 재생 블록에 곱하는 게인. 1 을 넘기면 int16 이 깨지므로(클리핑) 0~1. 하단 바 슬라이더는 0.2~1(page-ui.js).
 VOLUME_MIN, VOLUME_MAX = 0.0, 1.0
@@ -206,36 +210,45 @@ def normalize_rate_step(step):
     return DEFAULT_RATE_STEP
 
 
-def rate_choices(step):
-    """간격에 맞는 속도 목록(느린 것부터). 0.1 → 0.7~2.0(14개), 0.25 → 0.5~3.0(11개)."""
+def snap_rate(rate, step):
+    """속도를 그 간격의 값으로 맞춘다 — 기준 normalizeRate 그대로: 0.5~최댓값으로 자르고, 1배에서 간격 몇 칸인지
+    반올림(가운데면 빠른 쪽 — JS Math.round). 숫자가 아니면 1.0."""
     step = normalize_rate_step(step)
     lo, hi = RATE_STEPS[step]
-    n = int(round((hi - lo) / step))
-    return [round(lo + i * step, 2) for i in range(n + 1)]
-
-
-def snap_rate(rate, step):
-    """속도를 그 간격 목록의 가장 가까운 값으로. 정확히 가운데면 빠른 쪽. 숫자가 아니면 1.0 에 맞춘다.
-
-    빠른 쪽인 까닭: 하단 바 슬라이더가 쓰던 눈금 맞춤(bottom_bar._snap — 브라우저 range 입력처럼 동점이면 큰 쪽)과 같게.
-    """
     try:
         r = float(rate)
     except (TypeError, ValueError):
         r = 1.0
-    if r != r:  # NaN
+    if r != r or r in (float("inf"), float("-inf")):  # NaN·무한 — JS Number.isFinite 가 아니면 1
         r = 1.0
-    best, best_d = None, None
-    for c in rate_choices(step):
-        d = abs(c - r)
-        if best is None or d < best_d - 1e-9 or (abs(d - best_d) <= 1e-9 and c > best):
-            best, best_d = c, d
-    return best
+    bounded = max(lo, min(hi, r))
+    snapped = 1 + math.floor((bounded - 1) / step + 0.5) * step
+    return round(max(lo, min(hi, snapped)), 2)
 
 
-def format_rate(rate, step):
-    """목록에 보일 글자. 간격 0.1 → "1.3x", 간격 0.25 → "1.25x"."""
-    return ("%.1fx" if normalize_rate_step(step) == 0.1 else "%.2fx") % float(rate)
+def rate_choices(step, rate=1.0):
+    """하단 바 속도 목록(느린 것부터) — 기준 rateOptions 그대로: 1배부터 최댓값까지 간격마다(0.1 → 1.0~2.0 11개,
+    0.25 → 1.0~5.0 17개). 지금 속도(rate)가 1배보다 느리면 그 값(맞춘 값) 하나만 맨 앞에 붙인다."""
+    step = normalize_rate_step(step)
+    hi = RATE_STEPS[step][1]
+    count = int(round((hi - 1) / step))
+    options = [round(1 + i * step, 2) for i in range(count + 1)]
+    cur = snap_rate(rate, step)
+    if cur < 1:
+        options.insert(0, cur)
+    return options
+
+
+def step_rate(rate, step, direction):
+    """한 단계 느리게(-1)·빠르게(+1) — 기준 stepSpeed: 지금 값 ± 간격을 snap_rate 로. 끝에서는 그대로(돌지 않음)."""
+    step = normalize_rate_step(step)
+    return snap_rate(snap_rate(rate, step) + (1 if direction > 0 else -1) * step, step)
+
+
+def format_rate(rate, step=None):
+    """목록·버튼에 보일 글자 — 기준 speedLabel 그대로: 1배는 "1.0x", 나머지는 숫자 그대로("1.3x" · "1.25x" · "2x")."""
+    r = round(float(rate), 2)
+    return ("1.0" if r == 1 else f"{r:g}") + "x"
 
 
 def clamp_volume(volume):
@@ -433,16 +446,35 @@ def make_google_synthesize(client, tts, voice_name, sample_rate=SAMPLE_RATE, log
     """Google Cloud TTS 로 조각 하나를 합성하는 함수 synthesize(text, rate) 를 만든다 (옛 _synthesize_chunk).
 
     client: texttospeech.TextToSpeechClient,  tts: texttospeech 모듈(요청 객체를 만드는 데 씀).
-    한국어 Chirp3-HD 는 쉼표·화살표 자리 쉼을 markup 으로 먼저 요청하고, 거절되면(어떤 예외든) 평문으로
-    다시 요청한다 — 확장 tts-engines.js:530-535 와 같다(쉼 없이라도 읽는 게 안 읽는 것보다 낫다).
-    markup 은 readaloud_text.pauses_markup (tts-engines.js:542-550 이식)이 만든다. 해당 없으면 None → 평문.
+    2026-10-28 Paseo 상태바 플러그인 기준(server/presentation/tts.ts synthesizeVoice)에 맞춤:
+      - 한 요청은 UTF-8 2000바이트 이하(readaloud_text.split_input). 문단 조각은 이미 그 안이지만, 번역문처럼
+        합성 직전에 길어진 글은 여기서 나눠 차례로 요청하고 소리를 이어 붙인다.
+      - 한국어 Chirp3-HD 는 쉼표·em space 자리 쉼을 markup 으로 먼저 요청하고, **400(잘못된 요청)으로 거절될 때만** 평문으로
+        한 번 다시 요청한다. 인증·한도·시간 초과는 바로 실패(예전에는 어떤 예외든 평문으로 다시 요청했다).
+    markup 은 readaloud_text.pauses_markup (tts-engines.js:542-550 이식, 기준 pausesMarkup 과 같은 규칙)이 만든다.
     설치된 라이브러리에 markup 필드가 없으면 처음부터 평문만 쓴다.
     반환: int16 numpy 배열(24kHz) 또는 None(소리 없음). 요청 자체가 실패하면 예외가 올라간다.
     """
+    import numpy as np
     log = log or (lambda msg: None)
     voice_lang = voice_lang_of(voice_name)
     voice_type = voice_type_of(voice_name)
     use_markup = _markup_supported(tts)
+
+    def synthesize_one(text, voice, audio_config):
+        markup = readaloud_text.pauses_markup(text, voice_lang, voice_type) if use_markup else None
+        if markup is not None:
+            try:
+                resp = client.synthesize_speech(input=tts.SynthesisInput(markup=markup),
+                                                voice=voice, audio_config=audio_config)
+                return pcm_from_linear16(resp.audio_content)
+            except Exception as e:
+                if not _is_bad_request(e):
+                    raise
+                log(f"[TTS] markup 요청이 거절되어(400) 평문으로 다시 요청합니다: {e}")
+        resp = client.synthesize_speech(input=tts.SynthesisInput(text=text),
+                                        voice=voice, audio_config=audio_config)
+        return pcm_from_linear16(resp.audio_content)
 
     def synthesize(text, rate):
         voice = tts.VoiceSelectionParams(language_code=voice_lang, name=voice_name)
@@ -451,19 +483,21 @@ def make_google_synthesize(client, tts, voice_name, sample_rate=SAMPLE_RATE, log
             sample_rate_hertz=sample_rate,
             speaking_rate=clamp_rate(rate),
         )
-        markup = readaloud_text.pauses_markup(text, voice_lang, voice_type) if use_markup else None
-        if markup is not None:
-            try:
-                resp = client.synthesize_speech(input=tts.SynthesisInput(markup=markup),
-                                                voice=voice, audio_config=audio_config)
-                return pcm_from_linear16(resp.audio_content)
-            except Exception as e:
-                log(f"[TTS] markup 요청이 거절되어 평문으로 다시 요청합니다: {e}")
-        resp = client.synthesize_speech(input=tts.SynthesisInput(text=text),
-                                        voice=voice, audio_config=audio_config)
-        return pcm_from_linear16(resp.audio_content)
+        pieces = readaloud_text.split_input(text, voice_lang, voice_type) or [text]
+        out = [pcm for pcm in (synthesize_one(p, voice, audio_config) for p in pieces) if pcm is not None and len(pcm)]
+        if not out:
+            return None
+        return out[0] if len(out) == 1 else np.concatenate(out)
 
     return synthesize
+
+
+def _is_bad_request(error):
+    """구글 API 오류가 400(잘못된 요청 — markup 미지원·거절)인가. google.api_core 예외는 code 가 400(HTTPStatus)."""
+    try:
+        return int(getattr(error, "code", 0) or 0) == 400
+    except (TypeError, ValueError):
+        return False
 
 
 def sounddevice_stream_factory(sample_rate=SAMPLE_RATE):
@@ -545,6 +579,12 @@ class TtsSession:
         self._texts = [(seg.get("text") if isinstance(seg, dict) else None) or "" for seg in self.segments]
         self._n = len(self._texts)
         self._blank = [is_silent_segment(t) for t in self._texts]
+        # 조각마다 문단 번호(2026-10-28 — readaloud_text.split_paragraphs_for_reading 의 "para"). 이전·다음은 문단 단위로
+        # 움직인다(Paseo 상태바 플러그인 기준). "para" 가 없으면 조각 하나 = 문단 하나(예전 동작 그대로)
+        self._para = []
+        for i, seg in enumerate(self.segments):
+            p = seg.get("para") if isinstance(seg, dict) else None
+            self._para.append(p if isinstance(p, int) and not isinstance(p, bool) else i)
 
         self._synthesize = synthesize
         self._open_stream = open_stream
@@ -765,30 +805,45 @@ class TtsSession:
             self._paused = not self._paused
             self._changed_locked()
 
-    def forward(self):
-        """다음 조각으로. 750ms 기다렸다가 옮긴다. 기다리는 동안 또 누르면 목표만 한 칸 더 간다.
+    def _para_start(self, idx):
+        """(락 안) 조각 idx 가 속한 문단의 첫 조각 번호."""
+        while idx > 0 and self._para[idx - 1] == self._para[idx]:
+            idx -= 1
+        return idx
 
-        마지막 조각이면 아무것도 안 한다(하단 바는 can_next=False 로 버튼을 끈다).
-        확장 speech.js:193-201(forward) + 231-235(debounce).
+    def _next_para_start(self, idx):
+        """(락 안) 조각 idx 다음 문단의 첫 조각 번호. 마지막 문단이면 None."""
+        j = idx + 1
+        while j < self._n and self._para[j] == self._para[idx]:
+            j += 1
+        return j if j < self._n else None
+
+    def forward(self):
+        """다음 문단으로(문단 번호가 없으면 다음 조각). 750ms 기다렸다가 옮긴다. 기다리는 동안 또 누르면 목표만 한 문단 더 간다.
+
+        마지막 문단이면 아무것도 안 한다(하단 바는 can_next=False 로 버튼을 끈다).
+        확장 speech.js:193-201(forward) + 231-235(debounce). 문단 단위는 Paseo 상태바 플러그인 기준(2026-10-28).
         """
         with self._cond:
             if self._stop_event.is_set():
                 return
-            if self._target + 1 >= self._n:
-                self._log("[TTS] 다음: 마지막 조각이라 이동하지 않습니다")
+            nxt = self._next_para_start(self._target) if self._n else None
+            if nxt is None:
+                self._log("[TTS] 다음: 마지막 문단이라 이동하지 않습니다")
                 return
             now = self._clock()
-            self._target += 1
+            self._target = nxt
             self._ts = now
             self._deadline = now + self._move_delay
             self._changed_locked()
 
     def rewind(self):
-        """이전. 지금 조각이 시작된 지 3초가 넘었으면 지금 조각을 처음부터, 아니면 이전 조각으로(750ms 뒤).
+        """이전. 지금 문단이 시작된 지 3초가 넘었으면 지금 문단을 처음부터, 아니면 이전 문단으로(750ms 뒤).
 
-        첫 조각이면 처음부터(기다리지 않음) — 확장 document.js:332-339 의 seek(0).
+        첫 문단이면 처음부터(기다리지 않음) — 확장 document.js:332-339 의 seek(0). 문단 번호가 없으면 조각 단위.
         "처음부터" 두 경우는 확장에서 delay 가 없는 seek 라 바로 적용한다(speech.js:206-208, document.js:337).
-        "시작된 지"의 기준 시각은 확장처럼 조각이 정해진 순간(ts)이다 — 합성 대기 시간도 포함된다.
+        "시작된 지"의 기준 시각은 문단이 정해진 순간(ts)이다 — 합성 대기 시간도 포함되고, 같은 문단 안에서 다음 조각으로
+        넘어가도 바뀌지 않는다(_advance_locked). 기준 thinkingPlayer.ts previous() 의 3000ms 규칙과 같다.
         """
         with self._cond:
             if self._stop_event.is_set():
@@ -796,12 +851,14 @@ class TtsSession:
             now = self._clock()
             if self._ts is None:   # start() 전에 불린 경우(정상 흐름에선 없음) 계산이 깨지지 않게
                 self._ts = now
-            if self._target > 0 and not (now - self._ts > self._restart_after):
-                self._target -= 1
+            start = self._para_start(self._target) if self._n else 0
+            if start > 0 and not (now - self._ts > self._restart_after):
+                self._target = self._para_start(start - 1)
                 self._deadline = now + self._move_delay
             else:
-                # 지금(_target) 조각을 처음부터. 마감을 "지금"으로 두면 재생 스레드가 다음 걸음에 바로 적용한다.
+                # 지금 문단을 처음부터. 마감을 "지금"으로 두면 재생 스레드가 다음 걸음에 바로 적용한다.
                 # 기다리던 이동이 있었다면 이것으로 덮어쓴다(확장 debounce 는 마지막 명령만 남긴다).
+                self._target = start
                 self._deadline = now
             self._ts = now
             self._changed_locked()
@@ -1164,10 +1221,15 @@ class TtsSession:
             self._advance_locked(self._clock())
 
     def _advance_locked(self, now):
-        """(락 안) 자연스럽게 다음 조각으로. 세대는 그대로(미리 합성한 소리를 그대로 쓴다)."""
+        """(락 안) 자연스럽게 다음 조각으로. 세대는 그대로(미리 합성한 소리를 그대로 쓴다).
+
+        같은 문단의 다음 조각이면 ts(문단이 정해진 시각)는 그대로 둔다 — "이전" 의 3초 규칙이 문단 기준이 되게.
+        """
+        same_para = self._cur + 1 < self._n and self._para[self._cur + 1] == self._para[self._cur]
         self._cur += 1
         self._target = self._cur
-        self._ts = now
+        if not same_para or self._ts is None:
+            self._ts = now
         self._waiting_since = None
         self._cond.notify_all()   # 합성 스레드: 미리 합성할 창이 한 칸 밀렸다
 
@@ -1394,7 +1456,7 @@ class TtsSession:
             "total": total,
             "progress": progress,
             "can_prev": navigable,
-            "can_next": navigable and self._target + 1 < n,
+            "can_next": navigable and self._target < n and self._next_para_start(self._target) is not None,
             "can_mute": self._can_mute,
             "muted": self._muted,
             "rate": rate,

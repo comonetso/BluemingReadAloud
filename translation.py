@@ -24,8 +24,10 @@
   - 번역 결과는 읽기 한 번(세션) 동안만 기억한다(make_translating_synthesize 안).
 
 어디에 끼는가 (whisperer.speak_text)
-  split_for_reading(keep_raw=True) → mark_for_translation 이 번역할 문장이 있는 조각의 text 를 "변환 전 글"(raw)로
-  바꾼다 → make_translating_synthesize 가 그 조각만 번역 → 읽기용 변환(spoken_text) → 합성.
+  2026-10-28 부터 문단 단위: readaloud_text.split_paragraphs_for_reading(keep_whole=plan) 이 번역할 문장이 있는 문단을
+  나누지 않고 "raw"(변환 전 글, 주소는 "URL" 로 가림)를 담는다 → mark_for_translation 이 그 조각의 text 를 raw 로
+  바꾼다 → make_translating_synthesize 가 그 조각만 번역 → 읽기용 변환(spoken_text.make_spoken_text) → 합성.
+  (그 전에는 줄 단위 split_for_reading(keep_raw=True) 를 썼다 — 판별 규칙 "한글 없는 문장만" 은 그대로다)
   엔진(tts_engine)은 모른다. 엔진의 소리 캐시 키가 (글, 속도)라 raw 가 키가 되고, 이동 뒤 되돌아와도 다시 번역하지 않는다.
   형광펜은 조각 번호·원문 위치로 칠하므로 그대로 원문(영어) 위에 칠해진다.
 """
@@ -72,6 +74,10 @@ _HANGUL = re.compile("[ᄀ-ᇿ㄰-㆏가-힣]")
 _BOUNDARY = re.compile("(?<=[.!?…。！？])[ \t 　]+|[ \t 　]*\r?\n[ \t 　\r\n]*")
 
 
+# 주소를 가린 낱말 "URL"(spoken_text.mask_urls) — 낱말 하나일 때만(CURLY 같은 낱말 속은 아님)
+_URL_WORD = re.compile(r"(?<![A-Za-z])URL(?![A-Za-z])")
+
+
 def supports(lang):
     """음성 언어("ko-KR")가 번역을 지원하는 주 언어인가. 지금은 한국어만(주 언어 글자 = 한글)."""
     return (lang or "").lower().split("-")[0] == "ko"
@@ -85,12 +91,13 @@ def has_primary(text):
 def needs_translation(sentence):
     """이 문장을 번역하나 — 한글이 한 글자도 없고, 번역할 글자(문자)가 있을 때.
 
-    숫자·기호뿐인 문장, URL 대체 문구("HTTP URL.")만 있는 문장은 번역하지 않는다.
+    숫자·기호뿐인 문장, URL 대체 문구만 있는 문장은 번역하지 않는다 — 옛 줄 단위 경로의 "HTTP URL." 과
+    문단 단위 경로(2026-10-28, readaloud_text.split_paragraphs_for_reading)가 주소를 가린 "URL" 둘 다.
     """
     s = (sentence or "").strip()
     if not s or has_primary(s):
         return False
-    rest = s.replace(readaloud_text.URL_REPLACEMENT, "")
+    rest = _URL_WORD.sub("", s.replace(readaloud_text.URL_REPLACEMENT, ""))
     return any(c.isalpha() for c in rest)
 
 

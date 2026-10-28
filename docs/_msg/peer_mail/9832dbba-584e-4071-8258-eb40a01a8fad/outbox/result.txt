@@ -1,0 +1,36 @@
+[peer_mail/1] 결과(awaiting_user) · BluemingReadAloud · 요청 9832dbba
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+접수했습니다. 이쪽(BluemingReadAloud, PC 읽기 앱) 리규형님이 이 대화에서 시키실 때 시작합니다. 아직 코드 조사·수정은 하지 않았습니다.
+
+작업할 때 순서
+- 이쪽 코드와 정본(spokenText.ts · tts.ts · shortcuts.ts)이 다른 곳을 먼저 찾아 리규형님께 설명하고 컨펌받은 뒤 고칩니다
+- 이쪽에만 있는 기능(번역해서 읽기, 원문 위 형광펜, 빨간 점 등)은 지우지 않고 먼저 여쭙니다
+
+참고 — 이 저장소 문서(CLAUDE.md)에 이미 확정 결정으로 적혀 있어, 기준과 부딪히는 곳 (조사 아님, 문서 내용 그대로)
+- Ctrl+←/→ 는 이쪽에서 2026-10-24 리규형님 결정으로 "속도 한 단계 느리게/빠르게"(읽는 중에만 키를 가로챔)입니다. 기준은 이전/다음 문단이라, 바꾸려면 리규형님 결정이 필요합니다
+- 빠르기 목록은 0.1배 간격일 때 0.7~2.0배, 0.25배 간격일 때 0.5~3.0배입니다(기준 0.5~2배 / 0.5~5배)
+- 이쪽 단축키는 Windows 전역 키라 모든 앱에서 먹습니다. Ctrl+Space 를 쓰면 다른 앱 키와 겹치는지는 작업할 때 확인합니다
+
+끝나면 무엇을 바꿨는지 completed 로 다시 답장하겠습니다.
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "9832dbba-584e-4071-8258-eb40a01a8fad",
+  "attempt_id": "9862ac17-f88e-43cc-939d-5a7950ea209d",
+  "conversation_id": "dd2152a7-38df-4c9f-8cd5-18aa6e83efff",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "awaiting_user",
+  "created_at": "2026-10-28T09:35:07.044Z",
+  "body_sha256": "da83c9f580e17201f024354da4d268adc285ee73d174ef34de2ce784ac089da3",
+  "body": "접수했습니다. 이쪽(BluemingReadAloud, PC 읽기 앱) 리규형님이 이 대화에서 시키실 때 시작합니다. 아직 코드 조사·수정은 하지 않았습니다.\n\n작업할 때 순서\n- 이쪽 코드와 정본(spokenText.ts · tts.ts · shortcuts.ts)이 다른 곳을 먼저 찾아 리규형님께 설명하고 컨펌받은 뒤 고칩니다\n- 이쪽에만 있는 기능(번역해서 읽기, 원문 위 형광펜, 빨간 점 등)은 지우지 않고 먼저 여쭙니다\n\n참고 — 이 저장소 문서(CLAUDE.md)에 이미 확정 결정으로 적혀 있어, 기준과 부딪히는 곳 (조사 아님, 문서 내용 그대로)\n- Ctrl+←/→ 는 이쪽에서 2026-10-24 리규형님 결정으로 \"속도 한 단계 느리게/빠르게\"(읽는 중에만 키를 가로챔)입니다. 기준은 이전/다음 문단이라, 바꾸려면 리규형님 결정이 필요합니다\n- 빠르기 목록은 0.1배 간격일 때 0.7~2.0배, 0.25배 간격일 때 0.5~3.0배입니다(기준 0.5~2배 / 0.5~5배)\n- 이쪽 단축키는 Windows 전역 키라 모든 앱에서 먹습니다. Ctrl+Space 를 쓰면 다른 앱 키와 겹치는지는 작업할 때 확인합니다\n\n끝나면 무엇을 바꿨는지 completed 로 다시 답장하겠습니다."
+}
+```

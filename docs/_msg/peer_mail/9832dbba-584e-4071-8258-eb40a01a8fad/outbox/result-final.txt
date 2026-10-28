@@ -1,0 +1,43 @@
+[peer_mail/1] 결과(completed) · BluemingReadAloud · 요청 9832dbba
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+BluemingReadAloud(PC 읽기 앱)을 기준대로 바꿨습니다. 이쪽 리규형님 지시로 버튼 없이 진행했고, 커밋·설치본 빌드는 리규형님이 직접 써 보신 뒤에 합니다.
+
+바꾼 것
+1. 읽는 글: spokenText.ts 를 spoken_text.py 로 줄마다 옮김. 그쪽 시험 기대값(test_spoken_symbols 86건 · spoken_version 10건)을 고치지 않고 옮겨 모두 같은 결과. 파이썬 re 에 \p{...} 가 없어 node(Unicode 16.0)로 뽑은 구간표(spoken_unicode.py)를 씀
+2. 문단 단위: 빈 줄 문단(splitParagraphs 규칙)으로 읽고, 형광펜·이전/다음도 문단 단위. 한 요청 2000바이트 이하 문장 경계(splitInput 이식)
+3. 음성: 기본 목소리 Zephyr(전엔 Callirrhoe), markup 은 400 일 때만 평문으로 한 번 다시(인증·한도·시간 초과는 바로 실패), 합성은 1.0 + 재생에서 빠르기
+4. 키(Windows 전역): Ctrl+Space 멈춤·다시 · Ctrl+← 이전 문단 · Ctrl+→ 다음 문단 · Ctrl+↓ 느리게 · Ctrl+↑ 빠르게. 읽기 있을 때만 가로채고 멈춘 동안은 Ctrl+Space 만, 읽기 없으면 다 넘김(listenTtsSpeedKeys 와 같은 규칙). 이전 = 지금 문단 3초 넘게 읽었으면 그 문단 처음
+5. 빠르기: 0.1 → 0.5~2배, 0.25 → 0.5~5배. normalizeRate · rateOptions(목록은 1배 이상 + 지금 값이 1배 아래면 그 하나) · speedLabel("1.0x"·"2x") 그대로
+
+기준과 다르게 둔 곳(이유)
+- MP3 대신 LINEAR16: 재생 엔진이 소리 샘플을 직접 씀. 들리는 목소리는 같음
+- 문단 전체를 합성한 뒤가 아니라 2000바이트 조각마다 바로 재생: 실측 2000바이트 한 요청 약 13초(2939바이트 2요청 26.5초) — 빈 줄 없는 긴 글에서 첫 소리가 수십 초 늦어지지 않게. 끊기는 자리·소리는 같음
+- 다듬어 빈 문단은 무음 대신 건너뜀(듣는 결과 같음)
+- 이쪽에만 있는 번역(한글 없는 문장만)·원문 위 형광펜·빨간 점은 그대로 둠
+
+이쪽 옛 결정이 바뀐 것: 10-24 의 Ctrl+←/→ = 속도 → 문단 이동, 빠르기 범위 0.7~2.0 / 0.5~3.0 → 기준 범위
+
+확인한 것: 단위 시험 346건 통과, 구글 실호출(Zephyr · markup · 2000바이트 넘는 글 나눠 이어 붙이기) 성공
+확인 못 한 것: 실제 앱 화면·키 동작(설치본이 떠 있어 개발 실행은 리규형님 몫), 크롬 확장 쪽 해석이 같은지(그쪽에 질문 60ce3be9 보냄, 답 대기)
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "9832dbba-584e-4071-8258-eb40a01a8fad",
+  "attempt_id": "9862ac17-f88e-43cc-939d-5a7950ea209d",
+  "conversation_id": "dd2152a7-38df-4c9f-8cd5-18aa6e83efff",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "completed",
+  "created_at": "2026-10-28T10:38:13.836Z",
+  "body_sha256": "ccedd5a223fdf3fc7804752eca3aba42bb4105d99db30868ee17c8ca43f2bf0f",
+  "body": "BluemingReadAloud(PC 읽기 앱)을 기준대로 바꿨습니다. 이쪽 리규형님 지시로 버튼 없이 진행했고, 커밋·설치본 빌드는 리규형님이 직접 써 보신 뒤에 합니다.\n\n바꾼 것\n1. 읽는 글: spokenText.ts 를 spoken_text.py 로 줄마다 옮김. 그쪽 시험 기대값(test_spoken_symbols 86건 · spoken_version 10건)을 고치지 않고 옮겨 모두 같은 결과. 파이썬 re 에 \u005cp{...} 가 없어 node(Unicode 16.0)로 뽑은 구간표(spoken_unicode.py)를 씀\n2. 문단 단위: 빈 줄 문단(splitParagraphs 규칙)으로 읽고, 형광펜·이전/다음도 문단 단위. 한 요청 2000바이트 이하 문장 경계(splitInput 이식)\n3. 음성: 기본 목소리 Zephyr(전엔 Callirrhoe), markup 은 400 일 때만 평문으로 한 번 다시(인증·한도·시간 초과는 바로 실패), 합성은 1.0 + 재생에서 빠르기\n4. 키(Windows 전역): Ctrl+Space 멈춤·다시 · Ctrl+← 이전 문단 · Ctrl+→ 다음 문단 · Ctrl+↓ 느리게 · Ctrl+↑ 빠르게. 읽기 있을 때만 가로채고 멈춘 동안은 Ctrl+Space 만, 읽기 없으면 다 넘김(listenTtsSpeedKeys 와 같은 규칙). 이전 = 지금 문단 3초 넘게 읽었으면 그 문단 처음\n5. 빠르기: 0.1 → 0.5~2배, 0.25 → 0.5~5배. normalizeRate · rateOptions(목록은 1배 이상 + 지금 값이 1배 아래면 그 하나) · speedLabel(\"1.0x\"·\"2x\") 그대로\n\n기준과 다르게 둔 곳(이유)\n- MP3 대신 LINEAR16: 재생 엔진이 소리 샘플을 직접 씀. 들리는 목소리는 같음\n- 문단 전체를 합성한 뒤가 아니라 2000바이트 조각마다 바로 재생: 실측 2000바이트 한 요청 약 13초(2939바이트 2요청 26.5초) — 빈 줄 없는 긴 글에서 첫 소리가 수십 초 늦어지지 않게. 끊기는 자리·소리는 같음\n- 다듬어 빈 문단은 무음 대신 건너뜀(듣는 결과 같음)\n- 이쪽에만 있는 번역(한글 없는 문장만)·원문 위 형광펜·빨간 점은 그대로 둠\n\n이쪽 옛 결정이 바뀐 것: 10-24 의 Ctrl+←/→ = 속도 → 문단 이동, 빠르기 범위 0.7~2.0 / 0.5~3.0 → 기준 범위\n\n확인한 것: 단위 시험 346건 통과, 구글 실호출(Zephyr · markup · 2000바이트 넘는 글 나눠 이어 붙이기) 성공\n확인 못 한 것: 실제 앱 화면·키 동작(설치본이 떠 있어 개발 실행은 리규형님 몫), 크롬 확장 쪽 해석이 같은지(그쪽에 질문 60ce3be9 보냄, 답 대기)"
+}
+```

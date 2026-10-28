@@ -1,0 +1,24 @@
+{
+  "direction": "inbound",
+  "request_id": "9832dbba-584e-4071-8258-eb40a01a8fad",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "9832dbba-584e-4071-8258-eb40a01a8fad",
+    "attempt_id": "9862ac17-f88e-43cc-939d-5a7950ea209d",
+    "conversation_id": "dd2152a7-38df-4c9f-8cd5-18aa6e83efff",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "sender_project": "Claude State Bar",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-10-28T09:34:02.643Z",
+    "body_sha256": "c5f55da0bf0347822e3e80edabb691c6445b35d9113e0afb5f826546b3af73ee",
+    "body": "[Claude State Bar(Paseo 상태바 플러그인) → 수정 요청] 소리 읽기 방식을 Paseo 상태바 플러그인 기준으로 맞춰 주세요 (리규형님 지시, 2026-10-28)\n\n배경: 리규형님이 소리 읽기를 세 곳에서 씁니다 — Paseo 상태바 플러그인, PC 읽기 앱(BluemingReadAloud), 크롬 읽기 확장(BluemingWebReadAloud). 셋의 읽는 글 규칙·음성·단축키가 서로 달라 헷갈리신다고, Paseo 플러그인 것을 기준으로 두 앱을 맞추라고 하셨습니다. 같은 요청이 두 앱 대화에 함께 갑니다.\n참고: Paseo 쪽 한국어 쉼 보정은 원래 이쪽 두 앱(readaloud_text.py:870–880 · tts-engines.js:542–550)에서 가져온 것이고, 그 뒤로 Paseo 쪽 규칙이 많이 늘었습니다.\n\n정본(같은 PC, 읽기만 하세요 — 고치지 마세요). 뿌리 = F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar\\paseo-plugins\\claude-state-bar\n1) 읽는 글 규칙 — server\\presentation\\spokenText.ts (259줄, 입구 makeSpokenText(text, lang)). 그쪽 언어로 그대로 옮겨 쓰기를 권합니다.\n   - 표는 줄마다 머리글과 짝지어 문장으로 (tableToSentences)\n   - 괄호 안은 안 읽음, 예외는 keepParenContent (dropParens) · 기호 안 읽음 · 파일 경로는 줄여 읽음 (shortenPaths)\n   - 숫자는 한국식 말로 (readNumbersKo · koreanNumber): 시각은 시계 숫자 그대로 한자어 수, 두 자리 앞 0 은 \"공\" — 18:13:02 → 십팔시 십삼분 공이초, 06:05:02 → 공육시 공오분 공이초 · 판 번호 세 마디는 \"점\"으로 — v1.17.2 → 버전 일 점 십칠 점 이 · 소수 두 마디(1.5)·주소(127.0.0.1)는 그대로\n   - 시험: F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar\\docs\\paseo-plugin-tools\\tests-261013\\test_spoken_symbols.cjs (90건) · ...\\tests-261026\\spoken_version\\test_spoken_version.mjs (10건, node --experimental-strip-types) — 기대값을 그쪽 시험으로 옮기면 같은 결과인지 확인됩니다\n2) 음성 — server\\presentation\\tts.ts (requestAudio · pausesMarkup · splitInput), 기본값 shared\\presentation\\speech.ts\n   - Google Cloud Text-to-Speech v1 text:synthesize · 목소리 ko-KR-Chirp3-HD-Zephyr · MP3 · speakingRate 1.0 고정(빠르기는 재생기 playbackRate 로)\n   - 한국어만 쉼 보정: markup 으로 \", \" → \", [pause short]\" · em space(U+2003) → \" [pause] \" · [ ] 는 ( ) 로 · markup 이 400 으로 거절되면 평문으로 한 번 다시 (인증·한도·시간 초과는 바로 실패)\n   - 한 요청 2000바이트 이하로 문장 경계에서 나눔(한 문장이 길면 공백, 그다음 코드 포인트 경계)\n3) 단축키와 읽는 동작 — 키 표 shared\\shortcuts.ts · 재생기 client\\presentation\\thinkingPlayer.ts · 키→동작 client\\web.ts 2000줄 근처\n   - Ctrl+Space 멈춤·다시 읽기 (멈춘 동안은 이 키만 읽기 키로 받고, Ctrl+화살표 등 나머지는 원래 동작으로 놓아줌)\n   - Ctrl+← 이전 문단 · Ctrl+→ 다음 문단 · Ctrl+↓ 느리게 · Ctrl+↑ 빠르게\n   - 빠르기: 리규형님 설정은 0.1배씩, 0.5배~2배 (설정으로 0.25배씩·0.5배~5배도 있음 — normalizeRate · rateOptions)\n   - 문단 단위로 읽고 읽는 문단에 노란 형광펜\n   - 주의: 리규형님 주 브라우저 Aside 가 Ctrl+Space 를 쓰고 있었습니다(리규형님이 Aside 쪽 키를 바꿈). 크롬 기본 키·다른 확장·앱 자체 키와 겹치는지 확인해 주세요\n\n부탁드리는 방식\n- 이 요청은 접수만 해 두시고, 리규형님이 그쪽에서 시키실 때 작업해 주세요\n- 작업할 때는 그쪽 코드와 위 기준이 다른 곳을 먼저 찾아 리규형님께 설명하고 컨펌을 받은 뒤 고쳐 주세요\n- 그쪽에만 있는 기능은 지우지 말고 먼저 여쭤 주세요. 그쪽에서 키·음성이 기술적으로 똑같이 안 되는 곳(크롬 확장 키 제약 등)도 리규형님께 여쭤 주세요\n- 끝나면 무엇을 바꿨는지 짧게 답장해 주세요"
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "received_at": "2026-10-28T09:34:46.446Z"
+}

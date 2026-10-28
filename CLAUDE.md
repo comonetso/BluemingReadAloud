@@ -51,6 +51,12 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   `query_telegram_selected(x, y, on_done, right_click=None)` (`True` / `"menu"` / `False`, `None` on failure;
   `right_click` = last right-click spot `(rx, ry)`, also checked).
 - **tts_engine.py** / **readaloud_text.py** — playback engine and text splitting (tests in `tests/`).
+- **spoken_text.py** — the text actually sent to the voice (tables → sentences, brackets, paths, symbols, Korean numbers).
+  A line-by-line port of the Paseo status bar plugin's `server/presentation/spokenText.ts`
+  (`F:\workspace\EtcProject\VsCodeExtentions\claudeContextBar\paseo-plugins\claude-state-bar`) — user decision 2026-10-28:
+  Paseo plugin, this app and the Chrome extension must read the same text the same way, so follow that file when it changes.
+  `tests/test_spoken_text.py` holds that repo's test expectations unchanged (86 + 10 cases).
+  `spoken_unicode.py` is generated (`node tools/gen_spoken_unicode.cjs > spoken_unicode.py`) — Python `re` has no `\p{...}`.
 - **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
   client are in its header. Voices are Korean only, so "primary language" = Hangul.
 - **messages.py** — Korean/English UI strings. Add every user-facing message to both `ko` and `en`.
@@ -78,16 +84,21 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    selection → hide the red dot + `speak_text()`; no selection + playing → `stop_tts()`;
    no selection + idle → **nothing** (user decision 2026-09-28). The clipboard is restored when nothing was selected.
    From the red dot (`from_selection_button=True`) an empty selection never stops playback (the extension's dot only reads).
-3. **`speak_text()`** — `readaloud_text.split_for_reading()` (the extension's per-line split: speech cleanup,
-   CharBreaker chunks, offsets back into the original text for the highlighter), stops the previous reading,
-   then starts a new `tts_engine.TtsSession`. Right before `session.start()` it calls `_begin_source_highlight()`
+3. **`speak_text()`** — `readaloud_text.split_paragraphs_for_reading()` (2026-10-28, Paseo plugin rules): paragraphs =
+   blocks separated by blank lines; each paragraph → `spoken_text.make_spoken_text` → pieces of at most 2000 UTF-8 bytes
+   cut at sentence boundaries (`split_input`, port of `tts.ts splitInput`). Every piece carries `para` (paragraph number) and
+   the **paragraph's** source offsets. Pieces start playing one by one (the plugin waits for a whole paragraph; measured
+   2026-10-28: one 2000-byte request takes ~13 s, so a long paragraph would delay the first sound). The old per-line split
+   (`split_for_reading`, Chrome extension port) is kept but no longer used. Then it stops the previous reading
+   and starts a new `tts_engine.TtsSession`. Right before `session.start()` it calls `_begin_source_highlight()`
    → `SourceHighlighter.begin(source_text, segments, on_result)` while the selection is still alive. Sound never waits
    for that result.
    **Translation** (setting `translate_enabled`, default on — user decisions 2026-09-29): a sentence with **no Hangul at
    all** is translated to Korean by Gemini (`gemini-3.5-flash-lite`, Gemini API key) before synthesis; Korean sentences
-   with English terms stay as they are. `split_for_reading(keep_raw=True)` → `translation.mark_for_translation` puts the
-   pre-spoken raw text into those segments → `make_translating_synthesize` wraps `synthesize`: translate → spoken_text →
-   TTS. Timeout 3 s (user decision; measured 0.87–1.55 s). A failed translation raises `tts_engine.SegmentFailed` →
+   with English terms stay as they are. A paragraph with such a sentence (`keep_whole=translation.plan`) stays one piece
+   with its raw text (URLs masked as "URL" so addresses never go to Gemini) → `translation.mark_for_translation` →
+   `make_translating_synthesize` wraps `synthesize`: translate → `spoken_text.make_spoken_text` → TTS (a translated text
+   over 2000 bytes is split inside `make_google_synthesize`). Timeout 3 s (user decision; measured 0.87–1.55 s). A failed translation raises `tts_engine.SegmentFailed` →
    reading **stops at that segment's turn** and a warning box appears (`segment_failed` event → `_notify_segment_failed`).
 4. **`tts_engine.TtsSession`** — one object per reading. Thread `tts-producer` synthesizes up to 2 segments ahead
    (`PREFETCH_AHEAD`) with Google Cloud TTS v1 (`make_google_synthesize`, LINEAR16 24 kHz, synthesized at 1.0);
@@ -95,16 +106,26 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    (WSOLA — `set_rate` takes effect from the next block). Recent results are reused
    (2-entry cache, like the extension's `js/tts-engines.js:385-407`). Volume is always 1.0 (user decision 2026-10-24 —
    the volume slider was removed; loudness is the Windows volume).
-   **Speed** (user decisions 2026-10-24): picked from a list, not a slider. The list step is chosen in the settings dialog
-   (`tts_rate_step`: 0.1 → 0.7–2.0×, 0.25 → 0.5–3.0×, default 0.1 — `tts_engine.RATE_STEPS` / `rate_choices`); a stored
-   speed that is not in the list is snapped to the nearest entry, the faster one on a tie (`tts_engine.snap_rate`).
-   The speed itself is picked in the bottom bar (button next to Close → list) or with **Ctrl+← one step slower /
-   Ctrl+→ one step faster** (`_step_rate`, stops at the ends). Both go through `_on_bar_command("setRate")`: applied at
-   once and saved. Changing the step in the settings dialog while reading re-snaps the speed and refreshes the bar list
-   at once (user decision; the Chrome extension applies it from the next reading instead).
+   **Voice / requests** (2026-10-28, Paseo `tts.ts`): default voice `ko-KR-Chirp3-HD-Zephyr` (was Callirrhoe; a saved
+   voice is kept). Korean Chirp3-HD asks for pauses with markup first and falls back to plain text **only on HTTP 400**
+   (auth, quota, timeout fail at once). LINEAR16 stays (the player writes samples itself; the plugin uses MP3).
+   **Speed** (2026-10-24 list in the bottom bar; ranges from the Paseo plugin 2026-10-28): the step is chosen in the
+   settings dialog (`tts_rate_step`: 0.1 → 0.5–2×, 0.25 → 0.5–5×, default 0.1 — `tts_engine.RATE_STEPS`); speeds are
+   1× ± steps, rounded like `normalizeRate` (`tts_engine.snap_rate`). The bottom bar list shows 1× and up only, plus the
+   current value when it is below 1× (`rate_choices(step, rate)` = `rateOptions`); below 1× is reached with Ctrl+↓ only.
+   Labels like the plugin: "1.0x", "1.3x", "2x" (`format_rate`). Speed is picked in the bottom bar (button next to Close →
+   list) or with **Ctrl+↓ one step slower / Ctrl+↑ one step faster** (`_step_rate` → `tts_engine.step_rate`, stops at the
+   ends). Both go through `_on_bar_command("setRate")`: applied at once, saved, bar list refreshed. Changing the step in
+   the settings dialog while reading re-snaps the speed and refreshes the bar list at once. The voice preview clamps the
+   speed to 4.0 (server limit; reading always synthesizes at 1.0).
+   **Previous / next** (2026-10-28): by paragraph — `TtsSession.forward/rewind` jump to the first piece of the next /
+   previous paragraph (`para`); "previous" restarts the current paragraph if it started more than 3 s ago (the paragraph's
+   start time is kept while moving to its next piece). Pieces without `para` behave as before (one piece = one paragraph).
 5. **Events** — the engine's `on_event(kind, data)` → `gui_queue` → `check_gui_queue()` → `_handle_tts_event()`
-   → bottom bar + highlighter. Highlighter rule (user decision 2026-09-28): `on_result(ok=True)` → paint on the
-   original text (`SourceHighlighter.highlight(idx)` per `segment` event), **no reader window**;
+   → bottom bar + highlighter. The highlighter and the reader window get the **paragraph** list and paint by paragraph
+   number (`_paragraphs_of` / `_para_index` map piece → paragraph; the next piece of the same paragraph is not repainted —
+   2026-10-28, "yellow highlight on the paragraph being read"). Highlighter rule (user decision 2026-09-28):
+   `on_result(ok=True)` → paint on the original text (`SourceHighlighter.highlight(para)` per `segment` event), **no reader window**;
    `ok=False` → reader window if "Use Reader Window" is on; **while waiting for the result, no reader window**.
    State: `_source_hl_session` + `_source_hl_state` (`None` / `"pending"` / `"on"` / `"off"`); stale results from an
    older session are dropped. `session_end` → `_end_source_highlight()` → `SourceHighlighter.end()`.
@@ -124,6 +145,7 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   Check items go through `gui_queue` to the Tk main thread.
 - **Bottom bar** (`bottom_bar.py`, created with `show_settings=False`): the extension's gear button (speed/volume panel)
   is hidden — its code is kept (`_build_panel` …, the default `show_settings=True` is used by `dev_demo_ui.py`).
+  Its previous / next buttons move by paragraph like the keys (2026-10-28).
   Right end = [speed] [close]: `set_rate_choices([(rate, text), ...])` shows the speed button ("1.3x"); clicking it opens
   a non-activating list window above the bar (current speed in the accent color; Esc / outside click / foreground change
   closes it, like the panel) → `on_command("setRate", rate)`. Widths in `RATE_*` constants are arbitrary.
@@ -164,16 +186,21 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   if the clamped dot would cover the cursor pixel (e.g. after dragging a maximized window's scrollbar at the right
   screen edge) it goes to the cursor's left (`x - GAP - size`).
 - **Global hotkey**: pynput. Default TTS hotkey Ctrl+Alt+D (user setting may differ). `win32_filter` swallows the
-  hotkey's letter key (and its key-up) so it is not typed into the foreground app. It also swallows **Ctrl+←/→ while a
-  reading exists** (`tts_session`, paused included) for the speed step (`_rate_key_swallowing`); Ctrl+Shift/Alt
-  combinations and every press while not reading pass through (word-wise cursor moves keep working).
+  hotkey's letter key (and its key-up) so it is not typed into the foreground app. Reading keys (2026-10-28, Paseo plugin
+  `shared/shortcuts.ts` + `client/web.ts listenTtsSpeedKeys`, replacing the 10-24 "Ctrl+←/→ = speed"):
+  **Ctrl+Space pause / resume · Ctrl+← previous paragraph · Ctrl+→ next paragraph · Ctrl+↓ slower · Ctrl+↑ faster**
+  (`READ_KEYS` → `_read_key_action`). Swallowed only while a reading exists (`tts_session`); while paused (`tts_paused`)
+  only Ctrl+Space is taken and the arrows pass through (word-wise cursor moves work again). With no reading all five pass
+  through — Ctrl+Space never starts a new reading. Ctrl+Shift/Alt combinations always pass (`_read_key_swallowing`).
+  While a reading exists, Ctrl+Space no longer reaches the foreground app (e.g. VS Code suggestions, Chinese IME switch).
 - **Single instance**: Windows named mutex + UDP socket bound to `localhost:51888`.
 - **Source highlight** (`source_highlight.py`): all UI Automation calls on one dedicated thread (COM initialized there,
   request queue); the overlay window is drawn on the Tk main thread (click-through `WS_EX_TRANSPARENT|WS_EX_LAYERED`,
   NOACTIVATE, TOOLWINDOW, topmost). It stays visible while the target is not minimized and either in the foreground or
   **not covered at the overlay spot** (5 `WindowFromPoint` probes — user decision 2026-09-29). Wheel → hidden while
   scrolling, one position query after `SETTLE_TICKS` of quiet (user decision "hide while scrolling").
-  Known open issue: ranges are taken once at `begin` and never re-verified; Chromium can silently move them after a DOM
+  The user is not satisfied with its accuracy (2026-10-28, parked — see `docs/known_issues.md`; the Chrome extension
+  paints the page's HTML directly and is accurate). Known open issue: ranges are taken once at `begin` and never re-verified; Chromium can silently move them after a DOM
   rebuild (Codex analysis `docs/codex_rescue/260929_211454_response_highlight-overlay-vanish.md`). Diagnostic logs
   (position boxes, show/hide reasons) are kept on purpose until that is confirmed.
   2026-09-28 measurements in VS Code: only the ancestor **Document** element (ControlType 50030) has TextPattern;
