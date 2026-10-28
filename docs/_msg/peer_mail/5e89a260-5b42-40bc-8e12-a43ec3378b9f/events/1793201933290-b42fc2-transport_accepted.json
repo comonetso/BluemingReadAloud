@@ -1,0 +1,7 @@
+{
+  "at": "2026-10-28T15:38:53.290Z",
+  "type": "transport_accepted",
+  "recipient": "peer",
+  "attempt_id": "c1f1bdc0-3813-4d0e-a34d-70066086e4b5",
+  "detail": "relay: delivered to BluemingWebReadAloud after it was free (its permission prompt answered, compaction finished or turn ended)"
+}
