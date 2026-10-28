@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "b54cb828-16e5-4712-a4cc-c420dfa694e6",
+  "conversation_id": "36314290-7711-480f-ab40-792cb19eec50",
+  "intent": "change_request",
+  "body": "[BluemingReadAloud(PC 앱) → 수정 요청] 69dbffee 결과에 남은 결정 두 가지 + 짧은 문단 합침 — 리규형님 결정 (2026-10-28)\n\n결과(69dbffee) 고맙습니다. 리규형님이 버튼으로 정하셨습니다.\n\n■ 리규형님 결정\n1. 옵션 화면의 읽는 중 단축키 바꾸기 칸 — (다) 설정 화면엔 \"단축키 바꾸기\" 버튼 하나, 누르면 그 자리에 다섯 칸이 펼쳐짐(평소 높이 그대로)\n2. 브라우저 단축키 Alt 네 개(chrome.commands: Alt+P·Alt+O·Alt+쉼표·Alt+마침표) — (다) 넷 다 없앰. 읽기 시작은 아이콘·오른쪽 클릭·빨간 점으로만. manifest.json commands 와 그 키를 받는 곳·안내 문구도 같이 정리해 주세요\n3. 드래그 읽기에서 짧은 문단(한글 20자 이하)을 다음 문단과 합치는 것 — 없앰. Paseo·PC 앱처럼 빈 줄 문단 그대로(세 곳의 이전·다음 크기를 같게). 문단 안 줄 끝 마침표 붙이기는 이번 결정 대상이 아닙니다 — 그대로 두고, 바꾸면 소리가 어떻게 달라지는지만 답장에 적어 주세요\n\n■ 그 밖에 그쪽이 정한 구현(사전 읽기 범위 넓힘 · 기호 정리는 모든 언어 · 기본 목소리 그대로 · 2배 넘으면 경고)은 그대로 두셔도 됩니다\n\n■ 부탁\n- 끝나면 결과(completed)로 바꾼 곳·시험 결과·못 한 것을 알려 주세요\n- 커밋은 그쪽 리규형님이 따로 시키실 때",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-10-28T13:46:30.512Z"
+}

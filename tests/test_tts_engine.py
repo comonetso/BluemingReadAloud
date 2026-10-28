@@ -1289,7 +1289,9 @@ _GLUE_FUNCS = ["stop_current_playback", "_make_tts_event_handler", "speak_text",
                # 하단 바 속도 목록(2026-10-24) — _ensure_reading_ui 가 부른다
                "_rate_menu_items", "_refresh_bar_rate_choices", "_step_rate",
                # 문단 형광펜·읽기 단축키(2026-10-28 Paseo 기준) — _show_reader_window·_handle_tts_event·키 필터가 부른다
-               "_paragraphs_of", "_para_index", "_read_key_action"]
+               "_paragraphs_of", "_para_index", "_read_key_action",
+               # 따라 읽기 창(2026-10-28) — read_selected_text·키 필터가 부른다
+               "_close_follow_dialog", "_follow_dialog_key", "_speak_or_ask_follow", "_show_follow_dialog"]
 _GLUE_VARS = ["_tts_state_lock"]
 
 
@@ -1400,6 +1402,8 @@ def _load_glue(ui_log):
         "translation_overlay_enabled": True, "_translation_lookup": None,
         "_notify_segment_failed": lambda data: ui_log.append(("notify_failed", data)),
         "_synth_texts": synth_texts,
+        # 따라 읽기 창(2026-10-28): 기본은 "모듈 없음" — 예전 흐름 그대로. 시험할 땐 테스트가 가짜를 넣는다
+        "FollowDialog": None, "_follow_dialog": None, "_follow_dialog_open": False, "_follow_ask_seq": 0,
     })
     exec(code, ns)
     return ns
@@ -1784,6 +1788,120 @@ class TestWhispererGlue(EngineTestBase):
         # 문단 번호가 없는 옛 조각은 조각 하나 = 문단 하나
         old = types.SimpleNamespace(segments=[{"text": "가.", "src_start": 0, "src_end": 2}, {"text": "나.", "src_start": 3, "src_end": 5}])
         self.assertEqual(ns["_paragraphs_of"](old)[1], [0, 1])
+
+
+class TestFollowGlue(EngineTestBase):
+    """따라 읽기 창 연결(2026-10-28): 한 문단 안이면 묻고, 고른 답에 따라 그 범위로 읽는다."""
+
+    def tearDown(self):
+        ns = getattr(self, "ns", None)
+        if ns is not None:
+            s = dict.get(ns, "tts_session")
+            if s is not None:
+                s.stop()
+        super().tearDown()
+
+    RESULT = {"id": 7, "inside": True, "web": True, "framework": "Chrome", "para": "고른 문단입니다.",
+              "all": "고른 문단입니다.\n\n그 아래 문단입니다.", "complete": True, "pieces": 1}
+
+    def setup_ns(self):
+        ui = []
+        ns = self.ns = _load_glue(ui)
+        test = self
+
+        class FakeHL:
+            active = False
+
+            def __init__(self):
+                self.asks = []
+                self.begins = []
+
+            def query_follow_text(self, on_done):
+                self.asks.append(on_done)
+
+            def begin(self, source_text, segments, on_result, area=None):
+                self.begins.append((source_text, area))
+
+            def highlight(self, idx, caption=None):
+                pass
+
+            def end(self):
+                pass
+
+        class FakeDialog:
+            made = []
+
+            def __init__(self, root, message, ok_text, only_text, on_choice):
+                self.texts = (message, ok_text, only_text)
+                self.on_choice = on_choice
+                self.is_open = False
+                self.closed = False
+                FakeDialog.made.append(self)
+
+            def show(self, work_area=None):
+                self.is_open = True
+
+            def press_key(self, key):
+                self.is_open = False
+                self.on_choice({"enter": "follow", "esc": "cancel"}[key])
+
+            def close(self):
+                self.is_open = False
+                self.closed = True
+
+        self.hl = FakeHL()
+        self.Dialog = FakeDialog
+        dict.__setitem__(ns, "source_highlighter", self.hl)
+        dict.__setitem__(ns, "FollowDialog", FakeDialog)
+        return ns
+
+    def session(self):
+        return dict.__getitem__(self.ns, "tts_session")
+
+    def test_one_paragraph_asks_and_enter_reads_to_the_end(self):
+        ns = self.setup_ns()
+        ns["_speak_or_ask_follow"]("고른 문단")
+        self.assertEqual(len(self.hl.asks), 1, "한 문단이면 먼저 묻는다")
+        self.assertIsNone(self.session(), "답을 고르기 전엔 읽지 않는다")
+        self.hl.asks[0](dict(self.RESULT))
+        self.assertTrue(dict.__getitem__(ns, "_follow_dialog_open"), "훅이 Enter·Esc 를 삼키게")
+        self.assertEqual(self.Dialog.made[-1].texts, ("follow_prompt", "follow_ok", "follow_only"))
+        ns["_follow_dialog_key"]("enter")
+        self.assertFalse(dict.__getitem__(ns, "_follow_dialog_open"))
+        self.assertEqual(self.session().source_text, self.RESULT["all"])
+        self.assertEqual(self.hl.begins[-1], (self.RESULT["all"], (7, "all")), "형광펜도 따라 읽기 범위로")
+
+    def test_two_paragraphs_read_without_asking(self):
+        ns = self.setup_ns()
+        ns["_speak_or_ask_follow"]("첫 문단\n\n둘째 문단")
+        self.assertEqual(self.hl.asks, [])
+        self.assertEqual(self.session().source_text, "첫 문단\n\n둘째 문단")
+        self.assertEqual(self.hl.begins[-1], ("첫 문단\n\n둘째 문단", None))
+
+    def test_not_inside_one_paragraph_reads_selection(self):
+        ns = self.setup_ns()
+        ns["_speak_or_ask_follow"]("고른 글")
+        self.hl.asks[0](dict(self.RESULT, inside=False))
+        self.assertEqual(self.Dialog.made, [])
+        self.assertEqual(self.session().source_text, "고른 글")
+
+    def test_esc_reads_nothing(self):
+        ns = self.setup_ns()
+        ns["_speak_or_ask_follow"]("고른 문단")
+        self.hl.asks[0](dict(self.RESULT))
+        ns["_follow_dialog_key"]("esc")
+        self.assertIsNone(self.session())
+        self.assertFalse(dict.__getitem__(ns, "_follow_dialog_open"))
+
+    def test_late_answer_of_older_ask_is_dropped(self):
+        ns = self.setup_ns()
+        ns["_speak_or_ask_follow"]("처음 고른 글")
+        ns["_speak_or_ask_follow"]("다시 고른 글")
+        self.hl.asks[0](dict(self.RESULT))        # 옛 질의의 늦은 답
+        self.assertEqual(self.Dialog.made, [])
+        self.assertIsNone(self.session())
+        self.hl.asks[1](None)                     # 모름 → 고른 글을 그대로
+        self.assertEqual(self.session().source_text, "다시 고른 글")
 
 
 class TestEnglishWordsData(unittest.TestCase):

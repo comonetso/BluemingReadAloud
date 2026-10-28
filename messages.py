@@ -370,6 +370,19 @@ messages = {
     "auth_saved": {
         "ko": "✓ API 키 설정이 완료되었습니다.",
         "en": "✓ API keys saved."
+    },
+    # 따라 읽기 창(2026-10-28 리규형님 — Paseo 상태바 플러그인 confirmBox 문구를 이 앱에 맞춤: "이 말" → "이 문단", 새로 오는 말 → 글 끝)
+    "follow_prompt": {
+        "ko": "따라 읽기 할까요?\n이 문단부터 글 끝까지 읽습니다.\n취소하면 이 문단만 읽습니다.",
+        "en": "Follow along?\nReads from this paragraph to the end of the text.\nCancel reads only this paragraph."
+    },
+    "follow_ok": {
+        "ko": "따라 읽기",
+        "en": "Follow along"
+    },
+    "follow_only": {
+        "ko": "이 말만 읽기",
+        "en": "Read this only"
     }
 }
 

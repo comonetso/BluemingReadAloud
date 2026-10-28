@@ -49,7 +49,14 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   `notify_scroll()`, `end()`, `destroy()`, `active`, and one-shot queries answered later on the Tk main thread:
   `query_selection_end(on_done)`, `query_page_scheme(on_done)` (`"https"`, `"chrome-extension"`, … or `None`),
   `query_telegram_selected(x, y, on_done, right_click=None)` (`True` / `"menu"` / `False`, `None` on failure;
-  `right_click` = last right-click spot `(rx, ry)`, also checked).
+  `right_click` = last right-click spot `(rx, ry)`, also checked),
+  `query_follow_text(on_done)` (follow-read window, 2026-10-28 — see below; result dict or `None`).
+  `begin(..., area=(id, "para"|"all"))` paints over the range that query kept instead of the current selection
+  (`follow_lost` if another follow query replaced it).
+- **follow_dialog.py** — the follow-read window (2026-10-28 user request, Paseo plugin `client/web.ts confirmBox` look):
+  "따라 읽기 할까요?" with [이 말만 읽기] [따라 읽기]. Enter = follow (default), outside click = this paragraph only,
+  Esc = read nothing (user decision), foreground change = read nothing (app choice), centered on the foreground monitor.
+  Never takes focus (NOACTIVATE + `ShowWindow(SW_SHOWNOACTIVATE)`, like the red dot) — Enter/Esc come from the key hook.
 - **tts_engine.py** / **readaloud_text.py** — playback engine and text splitting (tests in `tests/`).
 - **spoken_text.py** — the text actually sent to the voice (tables → sentences, brackets, paths, symbols, Korean numbers).
   A line-by-line port of the Paseo status bar plugin's `server/presentation/spokenText.ts`
@@ -81,9 +88,17 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    the Tk main thread only (`_handle_selection_button_msg`, start of `read_selected_text`), never in a hook callback.
 2. **`read_selected_text()`** — releases modifier keys, backs up the clipboard, **clears it**,
    sends Ctrl+C, waits, then reads the clipboard. Three-way branch:
-   selection → hide the red dot + `speak_text()`; no selection + playing → `stop_tts()`;
+   selection → hide the red dot + `_speak_or_ask_follow()`; no selection + playing → `stop_tts()`;
    no selection + idle → **nothing** (user decision 2026-09-28). The clipboard is restored when nothing was selected.
    From the red dot (`from_selection_button=True`) an empty selection never stops playback (the extension's dot only reads).
+   **Follow-read window** (2026-10-28 user decisions): if the copied text is one paragraph (`split_paragraphs` = 1), the app
+   asks `SourceHighlighter.query_follow_text` (UIA thread): paragraph around the selection + the text below it, fetched for
+   at most `FOLLOW_FETCH_S` = 1 s (user decision). Chromium (`FrameworkId` "Chrome" — measured in Aside/Whale) uses UIA
+   paragraph units (block, `<br>` line, list item) and walks down with `Move` (stops on 0 / no progress / repeated text —
+   Aside repeated the last block thousands of times when the end point was stretched instead); other apps (Notepad) use
+   blank lines (line walk) and 2000-character end-point steps. No `DocumentRange`. If the selection lies inside that
+   paragraph → the window; choice → `speak_text(all or para, hl_area=(id, ...))` (web blocks joined with blank lines).
+   Otherwise (several paragraphs, no TextPattern e.g. Telegram, unknown) → `speak_text(clipboard text)` as before.
 3. **`speak_text()`** — `readaloud_text.split_paragraphs_for_reading()` (2026-10-28, Paseo plugin rules): paragraphs =
    blocks separated by blank lines; each paragraph → `spoken_text.make_spoken_text` → pieces of at most 2000 UTF-8 bytes
    cut at sentence boundaries (`split_input`, port of `tts.ts splitInput`). Every piece carries `para` (paragraph number) and
@@ -193,6 +208,8 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   only Ctrl+Space is taken and the arrows pass through (word-wise cursor moves work again). With no reading all five pass
   through — Ctrl+Space never starts a new reading. Ctrl+Shift/Alt combinations always pass (`_read_key_swallowing`).
   While a reading exists, Ctrl+Space no longer reaches the foreground app (e.g. VS Code suggestions, Chinese IME switch).
+  While the follow-read window is open (`_follow_dialog_open`), Enter and Esc without modifiers are swallowed and passed to
+  it (`FOLLOW_KEYS` → `_follow_dialog_key`) — otherwise Enter would replace the selected text in Notepad.
 - **Single instance**: Windows named mutex + UDP socket bound to `localhost:51888`.
 - **Source highlight** (`source_highlight.py`): all UI Automation calls on one dedicated thread (COM initialized there,
   request queue); the overlay window is drawn on the Tk main thread (click-through `WS_EX_TRANSPARENT|WS_EX_LAYERED`,

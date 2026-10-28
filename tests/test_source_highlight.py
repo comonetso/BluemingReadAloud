@@ -1443,5 +1443,211 @@ class OneShotQueryTest(unittest.TestCase):
         self.assertIsNone(self.ask("query_selection_end"))
 
 
+# ── 따라 읽기(2026-10-28): 고른 곳이 든 문단 + 그 아래 글 ──────────────────────────────────────────
+# 가짜 문서의 "\n" 사이 한 줄 = 줄(Line) = 문단 칸(Paragraph). 웹은 칸 하나가 문단, 메모장은 빈 줄 사이가 문단.
+UF = types.SimpleNamespace(**vars(U), UIA_FrameworkIdPropertyId=30024, TextUnit_Line=3, TextUnit_Paragraph=4)
+
+
+class FollowRange(FakeRange):
+    """줄 단위 이동·넓히기·Move·비교를 흉내(크로미움·메모장 실측 동작 중 따라 읽기가 쓰는 것만)."""
+
+    def Clone(self):
+        self.doc.note("Clone")
+        return FollowRange(self.doc, self.s, self.e)
+
+    def _line_start(self, k):
+        u = self.doc.units
+        while k > 0 and u[k - 1] != "\n":
+            k -= 1
+        return k
+
+    def _line_end(self, k):
+        u = self.doc.units
+        while k < len(u) and u[k] != "\n":
+            k += 1
+        return min(len(u), k + 1)
+
+    def ExpandToEnclosingUnit(self, unit):
+        self.doc.note("ExpandToEnclosingUnit")
+        if unit in (UF.TextUnit_Line, UF.TextUnit_Paragraph):
+            k = min(self.s, max(0, len(self.doc.units) - 1))
+            self.s, self.e = self._line_start(k), self._line_end(k)
+
+    def MoveEndpointByUnit(self, ep, unit, count):
+        if unit == UF.TextUnit_Character:
+            return super().MoveEndpointByUnit(ep, unit, count)
+        self.doc.note("MoveEndpointByUnit")
+        n = len(self.doc.units)
+        if ep == 0 and count == -1:
+            cur = self.s
+            if cur == 0:
+                return 0
+            new = self._line_start(cur) if cur > self._line_start(cur) else self._line_start(cur - 1)
+            self.s = new
+            return -1
+        if ep == 1 and count == 1:
+            if self.e >= n:
+                return 0
+            self.e = self._line_end(self.e)
+            return 1
+        raise AssertionError("흉내 안 한 이동: %r %r %r" % (ep, unit, count))
+
+    def Move(self, unit, count):
+        self.doc.note("Move")
+        assert unit == UF.TextUnit_Paragraph and count == 1
+        nxt = self._line_end(self.s)
+        if nxt >= len(self.doc.units):
+            return 0                          # 글 끝 — 크로미움 실측 "움직임 0"
+        self.s = self.e = nxt
+        return 1
+
+    def CompareEndpoints(self, ep, other, other_ep):
+        self.doc.note("CompareEndpoints")
+        a = self.s if ep == 0 else self.e
+        b = other.s if other_ep == 0 else other.e
+        return (a > b) - (a < b)
+
+
+class FollowPattern(FakePattern):
+    def GetSelection(self):
+        self.doc.note("GetSelection")
+        s, e = self.doc.sel
+        return FakeArray([FollowRange(self.doc, s, e)])
+
+
+class FollowElement(FakeElement):
+    def __init__(self, doc, parent=None, has_text=False, framework="Chrome"):
+        super().__init__(doc, parent, has_text)
+        self.framework = framework
+
+    def GetCurrentPropertyValue(self, pid):
+        if pid == UF.UIA_FrameworkIdPropertyId:
+            self.doc.note("FrameworkId")
+            return self.framework
+        return super().GetCurrentPropertyValue(pid)
+
+    def GetCurrentPattern(self, pid):
+        self.doc.note("GetCurrentPattern")
+        return FollowPattern(self.doc) if self.has_text else None
+
+
+class FollowUIA:
+    def __init__(self, doc, framework):
+        self.doc = doc
+        self.doc_element = FollowElement(doc, None, has_text=True, framework=framework)
+        self.focused = FollowElement(doc, self.doc_element)
+        self.ControlViewWalker = FakeWalker(doc)
+
+    def GetFocusedElement(self):
+        self.doc.note("GetFocusedElement")
+        return self.focused
+
+
+WEB_BLOCKS = ["[제목] 시험 문서", "[문단 1] 첫 문단입니다.", "[문단 2] 둘째 문단에는 굵은 글씨가 있습니다.",
+              "• [목록 1] 첫째 항목", "[문단 3] 마지막 문단입니다."]
+WEB_UIA = "\n".join(WEB_BLOCKS) + "\n"
+NOTE_UIA = ("첫 문단 첫 줄\n첫 문단 둘째 줄\n\n"
+            "둘째 문단 첫 줄\n둘째 문단 둘째 줄\n둘째 문단 셋째 줄\n\n"
+            "셋째 문단\n")
+
+
+class FollowTextTest(unittest.TestCase):
+    """query_follow_text → begin(area=…) (가짜 UIA·Tk·Win32·막). 금지 호출(문서 전체 범위 등)을 안 부르는지도 본다."""
+
+    def make(self, text, sel_text, framework="Chrome", sel_len=None):
+        start = text.index(sel_text)
+        self.doc = FakeDoc(text, sel_start=start, sel_end=start + (sel_len or len(sel_text)))
+        self.uia = FollowUIA(self.doc, framework)
+        self.clock = FakeClock()
+        self.root = FakeRoot()
+        self.env = FakeEnv()
+        self.overlays = []
+        self.answers = []
+        self.results = []
+
+        def make_overlay(root):
+            ov = FakeOverlay()
+            self.overlays.append(ov)
+            return ov
+
+        self.hl = SourceHighlighter(self.root, on_stop=lambda r: None, uia_factory=lambda: (self.uia, UF),
+                                    overlay_factory=make_overlay, win_env=self.env, clock=self.clock)
+        self.addCleanup(self.hl.destroy)
+
+    def ask(self):
+        self.hl.query_follow_text(self.answers.append)
+        self.assertTrue(wait(self.root, lambda: self.answers), "on_done 가 와야 한다")
+        return self.answers[-1]
+
+    def test_web_paragraph_and_blocks_to_end(self):
+        self.make(WEB_UIA, "굵은")
+        r = self.ask()
+        self.assertTrue(r["web"])
+        self.assertEqual(r["framework"], "Chrome")
+        self.assertTrue(r["inside"], "칸 안에서 일부만 골라도 그 칸 전체")
+        self.assertEqual(r["para"], WEB_BLOCKS[2])
+        self.assertEqual(r["all"], "\n\n".join(WEB_BLOCKS[2:]), "칸들을 빈 줄로 이어 붙인다(읽기 쪽 문단 = 빈 줄)")
+        self.assertTrue(r["complete"])
+        self.assertEqual(r["pieces"], 2)
+        self.assertEqual(self.doc.forbidden, [])
+
+    def test_web_selection_over_two_blocks_is_not_inside(self):
+        self.make(WEB_UIA, "첫 문단입니다.\n[문단 2] 둘째")
+        r = self.ask()
+        self.assertFalse(r["inside"], "두 칸에 걸쳐 골랐다 → 창을 띄우지 않을 조건")
+        self.assertEqual(r["para"], WEB_BLOCKS[1], "넓히기는 고른 시작이 든 칸")
+
+    def test_last_block_has_nothing_below(self):
+        self.make(WEB_UIA, "마지막")
+        r = self.ask()
+        self.assertEqual((r["para"], r["all"], r["pieces"], r["complete"]), (WEB_BLOCKS[4], WEB_BLOCKS[4], 0, True))
+
+    def test_editor_blank_line_paragraph(self):
+        self.make(NOTE_UIA, "둘째 줄", framework="Win32", sel_len=3)
+        # "둘째 줄" 이 처음 나오는 곳은 첫 문단 — 둘째 문단 가운데 줄을 고르려고 위치를 다시 잡는다
+        start = NOTE_UIA.index("둘째 문단 둘째 줄") + 6
+        self.doc.sel = (start, start + 3)
+        r = self.ask()
+        self.assertFalse(r["web"])
+        self.assertTrue(r["inside"])
+        para = "둘째 문단 첫 줄\n둘째 문단 둘째 줄\n둘째 문단 셋째 줄\n"
+        self.assertEqual(r["para"], para, "위·아래로 빈 줄까지 넓힌다(줄바꿈 그대로)")
+        self.assertEqual(r["all"], para + "\n셋째 문단\n", "그 문단부터 글 끝까지 원문 그대로")
+        self.assertTrue(r["complete"])
+        self.assertEqual(self.doc.forbidden, [])
+
+    def test_fetch_stops_at_time_limit(self):
+        blocks = ["[문단 %02d] 칸 하나입니다." % i for i in range(12)]
+        self.make("\n".join(blocks) + "\n", "[문단 00]")
+        self.doc.hook = lambda name: self.clock.advance(0.3) if name == "GetText" else None
+        r = self.ask()
+        self.assertFalse(r["complete"], "FOLLOW_FETCH_S(1초) 안에 가져온 데까지만")
+        self.assertLess(r["pieces"], 11)
+        self.assertTrue(r["all"].startswith(blocks[0]))
+
+    def test_begin_with_area_paints_follow_range(self):
+        self.make(WEB_UIA, "굵은")
+        r = self.ask()
+        segs = readaloud_text.split_paragraphs_for_reading(r["all"], "ko")
+        self.hl.begin(r["all"], segs, lambda ok, why: self.results.append((ok, why)), area=(r["id"], "all"))
+        self.assertTrue(wait(self.root, lambda: self.results))
+        self.assertEqual(self.results[-1], (True, "ok"))
+        self.hl.highlight(1)                   # 둘째 문단 = 목록 칸
+        s = WEB_UIA.index(WEB_BLOCKS[3])
+        want = self.doc.expected_rects(s, s + len(WEB_BLOCKS[3]))
+        self.assertTrue(wait(self.root, lambda: self.overlays and self.overlays[-1].shows
+                             and self.overlays[-1].shows[-1] == want), "목록 칸을 칠한다")
+        self.assertEqual(self.doc.forbidden, [])
+
+    def test_begin_with_stale_area_fails(self):
+        self.make(WEB_UIA, "굵은")
+        r = self.ask()
+        self.ask()                             # 새 질의 → 앞 범위는 버려진다
+        segs = readaloud_text.split_paragraphs_for_reading(r["para"], "ko")
+        self.hl.begin(r["para"], segs, lambda ok, why: self.results.append((ok, why)), area=(r["id"], "para"))
+        self.assertTrue(wait(self.root, lambda: self.results))
+        self.assertEqual(self.results[-1], (False, "follow_lost"))
+
+
 if __name__ == "__main__":
     unittest.main()

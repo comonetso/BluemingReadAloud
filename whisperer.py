@@ -165,6 +165,13 @@ try:
 except Exception as _e:
     SourceHighlighter = None
     _source_highlight_import_error = _e
+# 따라 읽기 창(follow_dialog.py, 2026-10-28) — 없어도 앱은 산다. 실패하면 None → 창 없이 고른 글만 읽는다(예전 그대로)
+try:
+    from follow_dialog import FollowDialog
+    _follow_dialog_import_error = None
+except Exception as _e:
+    FollowDialog = None
+    _follow_dialog_import_error = _e
 
 # 언어 설정 (기본값: 한국어)
 current_language = "ko"  # "ko" 또는 "en"
@@ -583,6 +590,9 @@ def main():
         if _source_highlight_import_error is not None:
             logging.warning(f"원문 위 형광펜 모듈(source_highlight) 로딩 실패 — 리더 창으로만 형광펜을 보입니다: {_source_highlight_import_error}")
             log_to_console(f"[UI] 원문 위 형광펜을 불러오지 못했습니다(리더 창으로만 보입니다): {_source_highlight_import_error}")
+        if _follow_dialog_import_error is not None:
+            logging.warning(f"따라 읽기 창 모듈(follow_dialog) 로딩 실패 — 고른 글만 읽습니다: {_follow_dialog_import_error}")
+            log_to_console(f"[UI] 따라 읽기 창을 불러오지 못했습니다(고른 글만 읽습니다): {_follow_dialog_import_error}")
 
         # 모듈 로딩
         print("주요 모듈 로딩 중...")
@@ -710,6 +720,12 @@ _hotkey_swallowing = False
 # 읽기 단축키(Ctrl+Space·Ctrl+화살표)로 삼킨 키의 vk — 짝이 되는 뗌도 삼킨다(2026-10-24 속도 키 → 10-28 읽기 키 다섯 개).
 # 삼키는 중이 아니면 None
 _read_key_swallowing = None
+# 따라 읽기 창(2026-10-28): 떠 있는 창(FollowDialog — Tk 메인만 만진다)과, 훅이 Enter·Esc 를 삼켰을 때 그 vk(뗌도 삼킨다).
+# 훅 스레드는 _follow_dialog_open(대입 하나)만 읽는다. _follow_ask_seq = 질의를 보낸 차례(늦게 온 옛 결과를 버린다)
+_follow_dialog = None
+_follow_dialog_open = False
+_follow_key_swallowing = None
+_follow_ask_seq = 0
 # 키보드로 글을 골랐는지(Ctrl+A, Shift+화살표·Home·End·PgUp·PgDn) — 수정자 키를 모두 뗄 때 빨간 점을 띄운다(2026-09-28 사용자 요청)
 _kbd_select_pending = False
 # 빨간 점 "선택 확인" 세대 — 확인 결과를 기다리는 사이 hide(누름·키 입력)가 오면 올려서 늦은 결과를 버린다
@@ -880,6 +896,8 @@ def setup_keyboard_listener():
     LLKHF_INJECTED = 0x10
     # 읽기 단축키 — Paseo 상태바 플러그인 기준(shared/shortcuts.ts, 2026-10-28 리규형님 지시). Ctrl 만 눌렀을 때
     READ_KEYS = {0x20: "toggle", 0x25: "rewind", 0x27: "forward", 0x28: "slower", 0x26: "faster"}  # Space ← → ↓ ↑
+    # 따라 읽기 창이 떠 있는 동안만 삼키는 키(2026-10-28) — Enter = 따라 읽기, Esc = 아무것도 안 읽고 닫기
+    FOLLOW_KEYS = {0x0D: "enter", 0x1B: "esc"}
 
     def win32_filter(msg, data):
         """(훅 스레드) 단축키 글자 키를 다른 앱에 넘기지 않고 삼킨다 — 2026-09-28 메모장 사고 수정.
@@ -901,8 +919,11 @@ def setup_keyboard_listener():
             (기준 web.ts listenTtsSpeedKeys — 입력창의 Ctrl+←/→ 단어 이동이 그대로 되게). 읽기가 없으면 다섯 키 모두 넘긴다
             — Ctrl+Space 로 새 읽기를 시작하지는 않는다. Ctrl 만 눌렸을 때만 — Ctrl+Shift+←/→(단어 선택)·AltGr 는 넘긴다.
             그 누름은 삼켜서 앞 창에 가지 않게 하고(커서 이동·자동완성 등), 짝이 되는 뗌도 삼킨다.
+        따라 읽기 창(2026-10-28): 창이 떠 있는 동안(_follow_dialog_open) Enter(따라 읽기)·Esc(닫기)를 수정자 없이 누르면
+            삼켜서 창에 넘긴다(_follow_dialog_key). 창은 포커스를 안 받아 키가 앞 창으로 가기 때문 — 안 삼키면 메모장에서
+            Enter 가 고른 글을 줄바꿈으로 바꾼다. 누르고 있는 동안의 자동 반복·짝이 되는 뗌도 삼킨다(창이 닫힌 뒤라도).
         """
-        global _hotkey_swallowing, _read_key_swallowing
+        global _hotkey_swallowing, _read_key_swallowing, _follow_key_swallowing
         suppress = False
         try:
             vk = _hotkey_vk(tts_hotkey_key)
@@ -925,6 +946,19 @@ def setup_keyboard_listener():
                             root.after(10, read_selected_text)
                 elif msg in (WM_KEYUP, WM_SYSKEYUP) and _hotkey_swallowing:
                     _hotkey_swallowing = False
+                    suppress = True
+            elif (data.vkCode in FOLLOW_KEYS and not (data.flags & LLKHF_INJECTED)
+                  and (_follow_dialog_open or _follow_key_swallowing == data.vkCode)):
+                if msg in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                    if _follow_key_swallowing == data.vkCode:
+                        suppress = True                       # 누르고 있는 동안 자동 반복 — 삼키기만
+                    elif not (ctrl_pressed or shift_pressed or alt_pressed):
+                        _follow_key_swallowing = data.vkCode
+                        suppress = True
+                        if root:
+                            root.after(0, lambda k=FOLLOW_KEYS[data.vkCode]: _follow_dialog_key(k))
+                elif msg in (WM_KEYUP, WM_SYSKEYUP) and _follow_key_swallowing == data.vkCode:
+                    _follow_key_swallowing = None
                     suppress = True
             elif data.vkCode in READ_KEYS and not (data.flags & LLKHF_INJECTED):
                 if msg in (WM_KEYDOWN, WM_SYSKEYDOWN):
@@ -2999,8 +3033,11 @@ def _make_tts_event_handler(box):
         gui_queue.put(("tts_event", session, kind, data))
     return on_event
 
-def speak_text(text):
+def speak_text(text, hl_area=None):
     """선택한 글을 읽기 시작한다. ⚠️ Tk 메인 스레드에서만 부른다(read_selected_text 가 root.after 로 부름).
+
+    hl_area(따라 읽기 창, 2026-10-28): (질의 번호, "para"|"all") — 원문 위 형광펜을 지금 선택 대신 따라 읽기 질의가 잡은
+    범위(문단 / 문단부터 글 끝까지)로 맞춘다(SourceHighlighter.begin area). None 이면 예전처럼 지금 선택.
 
     1) readaloud_text.split_for_reading — 확장 드래그 읽기와 같은 규칙으로 줄 단위 조각 + 원문 위치를 만든다.
        lang/voice_lang 은 음성 이름 앞 두 덩어리(ko-KR). 영어 단어 목록은 data/english-words.js.
@@ -3084,7 +3121,7 @@ def speak_text(text):
     # 원문 위 형광펜: 선택이 아직 살아 있는 지금(Ctrl+C 바로 뒤) 그 앱의 선택 범위를 잡게 한다.
     # begin 은 요청만 넣고 곧바로 돌아온다(UIA 는 형광펜 전용 스레드). 소리는 이 결과를 기다리지 않는다.
     # ⚠️ tts_session 을 넣은 "뒤" 에 부른다 — 결과 처리(_on_source_highlight_result)가 "지금 세션인가" 로 걸러서.
-    _begin_source_highlight(session)
+    _begin_source_highlight(session, hl_area)
     try:
         session.start()
     except Exception as e:
@@ -3328,7 +3365,7 @@ def _source_highlight_blocks_reader(session):
     칠하는 중("on")이면 True. 안 쓰는 중(None)·못 칠함("off")이면 False(리더 창 규칙은 예전 그대로)."""
     return session is not None and session is _source_hl_session and _source_hl_state in ("pending", "on")
 
-def _begin_source_highlight(session):
+def _begin_source_highlight(session, area=None):
     """(Tk 메인, speak_text 가 부름) 이번 읽기의 원문 위 형광펜을 시작한다.
 
     - 앞 읽기가 쓰던 형광펜부터 끝낸다: 새 읽기가 앞 읽기를 대신하면 앞 세션의 session_end 는 "옛 세션" 이라 버려지므로
@@ -3355,7 +3392,10 @@ def _begin_source_highlight(session):
         _on_source_highlight_result(session, ok, reason)
 
     try:
-        hl.begin(session.source_text, _paragraphs_of(session)[0], on_result)   # 문단 목록(2026-10-28)
+        if area is None:
+            hl.begin(session.source_text, _paragraphs_of(session)[0], on_result)   # 문단 목록(2026-10-28)
+        else:                                    # 따라 읽기 — 질의가 잡은 범위로(2026-10-28)
+            hl.begin(session.source_text, _paragraphs_of(session)[0], on_result, area=area)
     except Exception as e:
         logging.error(f"원문 위 형광펜 시작 오류: {e}")
         log_to_console(f"[형광펜] 원문 위 형광펜을 시작하지 못했습니다(리더 창으로): {e}")
@@ -3551,6 +3591,90 @@ def toggle_reader_window():
     except Exception:
         pass
 
+# ── 따라 읽기 창 (2026-10-28 리규형님) ─────────────────────────────────────────
+# 한 문단 안에서 고르고 읽기를 시작하면(단축키·빨간 점) "따라 읽기 할까요?" 를 묻는다. 일부만 골라도 그 문단 전체로 본다.
+#   따라 읽기(Enter·기본) = 그 문단부터 지금 있는 글 끝까지 · 이 말만 읽기(바깥 클릭) = 그 문단만 · Esc = 아무것도 안 읽음.
+# 여러 문단을 골랐거나, 글 요소가 없는 앱(텔레그램)·모를 때·원문 위 형광펜을 못 쓸 때는 묻지 않고 고른 글을 읽는다(예전 그대로).
+# 문단과 아래 글은 클립보드가 아니라 원문 형광펜의 UIA 스레드가 가져온다(SourceHighlighter.query_follow_text).
+
+def _close_follow_dialog():
+    """(Tk 메인) 떠 있는 따라 읽기 창을 고르지 않고 닫는다. 기다리던 질의 결과도 버린다(_follow_ask_seq)."""
+    global _follow_dialog, _follow_dialog_open, _follow_ask_seq
+    _follow_ask_seq += 1
+    dlg, _follow_dialog = _follow_dialog, None
+    _follow_dialog_open = False
+    if dlg is not None:
+        try:
+            dlg.close()
+        except Exception as e:
+            logging.debug(f"따라 읽기 창 닫기 실패: {e}")
+
+def _follow_dialog_key(key):
+    """(Tk 메인) 훅이 삼킨 Enter·Esc 를 떠 있는 창에 넘긴다."""
+    dlg = _follow_dialog
+    if dlg is not None:
+        dlg.press_key(key)
+
+def _speak_or_ask_follow(text):
+    """(Tk 메인, read_selected_text 가 부름) 고른 글을 읽는다 — 한 문단 안에서 골랐으면 먼저 따라 읽기 창을 띄운다."""
+    global _follow_ask_seq
+    _close_follow_dialog()
+    hl = _ensure_source_highlighter() if source_highlight_enabled else None
+    if FollowDialog is None or hl is None or not hasattr(hl, "query_follow_text"):
+        speak_text(text)
+        return
+    if len(readaloud_text.split_paragraphs(text)) != 1:
+        speak_text(text)                         # 여러 문단을 골랐다 — 묻지 않고 고른 것만(리규형님 10-28 버튼)
+        return
+    _follow_ask_seq += 1
+    seq = _follow_ask_seq
+
+    def done(result):
+        if seq != _follow_ask_seq:
+            return                               # 그사이 새 읽기·창 닫기 — 늦은 결과
+        if not result or not result.get("inside") or not (result.get("para") or "").strip():
+            why = "모름" if not result else ("한 문단 밖" if not result.get("inside") else "문단 글 없음")
+            log_to_console(f"[따라 읽기] 묻지 않고 고른 글을 읽습니다({why})")
+            speak_text(text)
+            return
+        log_to_console(f"[따라 읽기] 창을 띄웁니다 — 틀={result.get('framework') or '?'} "
+                       f"{'웹 문단 칸' if result.get('web') else '빈 줄 문단'} · 문단 {len(result['para'])}자 · "
+                       f"끝까지 {len(result['all'])}자(아래 {result.get('pieces', 0)}조각"
+                       f"{'' if result.get('complete') else ', 1초에서 끊음'})")
+        _show_follow_dialog(result, text)
+
+    hl.query_follow_text(done)
+
+def _show_follow_dialog(result, text):
+    """(Tk 메인) 따라 읽기 창을 띄우고, 고르면 그 범위로 읽기를 시작한다(형광펜도 그 범위 — begin area)."""
+    global _follow_dialog, _follow_dialog_open
+
+    def choose(choice):
+        global _follow_dialog, _follow_dialog_open
+        if _follow_dialog is dlg:
+            _follow_dialog = None
+            _follow_dialog_open = False
+        if choice == "follow":
+            log_to_console("[따라 읽기] 따라 읽기 — 그 문단부터 글 끝까지")
+            speak_text(result["all"], hl_area=(result["id"], "all"))
+        elif choice == "only":
+            log_to_console("[따라 읽기] 이 말만 읽기 — 그 문단만")
+            speak_text(result["para"], hl_area=(result["id"], "para"))
+        else:
+            log_to_console("[따라 읽기] 닫음 — 읽지 않습니다")
+
+    try:
+        dlg = FollowDialog(root, get_msg("follow_prompt"), get_msg("follow_ok"), get_msg("follow_only"), choose)
+        _follow_dialog = dlg
+        dlg.show(_current_work_area())
+        _follow_dialog_open = dlg.is_open
+    except Exception as e:
+        logging.error(f"따라 읽기 창 오류: {e}")
+        log_to_console(f"[따라 읽기] 창을 띄우지 못해 고른 글을 읽습니다: {e}")
+        _follow_dialog = None
+        _follow_dialog_open = False
+        speak_text(text)
+
 def read_selected_text(from_selection_button=False, _page_checked=False):
     """선택된 텍스트를 읽어옵니다. (Ctrl+C 트릭 사용)
 
@@ -3694,7 +3818,7 @@ def read_selected_text(from_selection_button=False, _page_checked=False):
         # 읽기가 시작되면 빨간 점은 숨긴다(확장 read() 도 점을 숨기고 읽는다 — selection-button.js:203)
         _hide_selection_button()
         log_to_console(f"선택된 텍스트 감지: {new_text[:30]}...")
-        speak_text(new_text)
+        _speak_or_ask_follow(new_text)            # 한 문단 안이면 따라 읽기 창(2026-10-28)
 
     except Exception as e:
         logging.error(f"선택 영역 읽기 오류: {e}")

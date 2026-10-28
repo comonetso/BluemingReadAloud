@@ -103,6 +103,10 @@ MAX_ANCESTOR_STEPS = 8                # 오케스트레이터 지시(VS Code 채
 UIA_DOCUMENT_TYPE = 50030             # UIA_DocumentControlTypeId — 크로미움 웹 문서. 값(Value)에 페이지 주소(2026-10-23 Aside 실측)
 UIA_LIST_ITEM_TYPE = 50007            # UIA_ListItemControlTypeId — 텔레그램 메시지 하나(2026-10-10 실측)
 UIA_MENU_TYPES = (50009, 50011)       # Menu·MenuItem — 텔레그램 우클릭 메뉴가 떠 있는 동안 포커스는 Ui::PopupMenu(50009, 실측)
+FOLLOW_FETCH_S = 1.0                  # 따라 읽기(2026-10-28 리규형님 버튼): 아래 글은 1초 안에 가져온 데까지
+FOLLOW_CHUNK_CHARS = 2000             # 따라 읽기 — 빈 줄 문단 앱(메모장)은 끝점을 이만큼씩 늘려 가져온다(측정 스크립트와 같은 값)
+FOLLOW_WEB_FRAMEWORK = "Chrome"       # FrameworkId — 크로미움(Aside·웨일·크롬·Electron 앱)이면 웹 문단 칸 단위.
+                                      # 2026-10-28 실측: Aside·웨일 모두 "Chrome"(따라 읽기 로그 "틀=")
 TELEGRAM_HISTORY_CLASS = "HistoryInner"   # 텔레그램 메시지 목록의 ClassName("class HistoryInner" 로 온다 — 실측).
                                           # 왼쪽 대화 목록(Dialogs::InnerWidget)의 항목도 "선택됨"이 되므로 이 목록 안만 본다
 
@@ -762,9 +766,10 @@ class _Session:
 class _UiaWorker:
     """UIA 호출을 도맡는 스레드 하나. 요청 큐를 하나씩 처리하고 결과를 post(튜플)로 돌려준다.
 
-    요청: ("begin", gen, source_text, spans, target_pid, own_pid) / ("rects", gen, idx, reveal) / ("end", gen) / ("quit",)
+    요청: ("begin", gen, source_text, spans, target_pid, own_pid, area) / ("rects", gen, idx, reveal) / ("end", gen) / ("quit",)
+          area = None(지금 선택으로 맞춤) 또는 (따라 읽기 번호, "para"|"all") — follow_text 가 남겨 둔 범위로 맞춤
           한 번짜리 조회(읽기 세션과 무관, 토큰 = Tk 쪽 요청 번호): ("caret", 토큰) / ("page_scheme", 토큰)
-          / ("tg_selected", 토큰, x, y, 우클릭 자리 (rx, ry) 또는 None)
+          / ("tg_selected", 토큰, x, y, 우클릭 자리 (rx, ry) 또는 None) / ("follow_text", 토큰)
     결과: ("begin_ok", gen, info) / ("begin_fail", gen, reason) / ("rects", gen, idx, rects, doc_rect, scrolled)
           / ("slow", gen, 설명) / ("lost", gen, 설명) / ("error", gen, 설명)
           / ("caret", 토큰, 결과) — 한 번짜리 조회 세 가지가 모두 이 모양으로 돌려준다
@@ -781,6 +786,8 @@ class _UiaWorker:
         self._U = None
         self._uia_error = None
         self._sess = None
+        self._follow = None       # 마지막 follow_text 가 잡은 범위(_follow_text) — begin(area=…) 이 쓴다
+        self._follow_id = 0
         self.current_gen = 0
         self.call_since = None
         self.thread = threading.Thread(target=self._run, name="SourceHighlightUIA", daemon=True)
@@ -806,6 +813,7 @@ class _UiaWorker:
                 # COM 객체는 만든 이 스레드에서 놓는다(참조를 남기면 나중에 Tk 메인이 워커 객체를 치울 때 다른 스레드에서
                 # Release 가 불린다 — 약속 "COM 객체는 이 스레드 밖으로 내보내지 않는다" 위반)
                 self._sess = None
+                self._follow = None
                 self._uia = None
                 return
             if kind == "end":
@@ -820,6 +828,10 @@ class _UiaWorker:
                 continue
             if kind == "tg_selected":
                 self._one_shot(req[1], "텔레그램 메시지 선택", self._telegram_selected, req[2], req[3], req[4])
+                continue
+            if kind == "follow_text":
+                self._follow = None              # 앞 질의가 잡은 범위는 버린다(새 질의가 실패해도 옛 범위로 칠하지 않게)
+                self._one_shot(req[1], "따라 읽기 글", self._follow_text)
                 continue
             gen = req[1]
             if gen < self.current_gen:
@@ -878,7 +890,9 @@ class _UiaWorker:
         return result
 
     # ── begin: 선택 잡기 + 조각 범위 만들기 ──
-    def _begin(self, gen, source_text, spans, target_pid, own_pid):
+    def _begin(self, gen, source_text, spans, target_pid, own_pid, area=None):
+        """area 가 있으면(따라 읽기) 지금 선택 대신 follow_text 가 남긴 범위(문단 또는 문단~가져온 끝)로 맞춘다.
+        그 범위의 글은 가져올 때 받은 조각을 이어 붙인 것을 쓴다 — 넓은 범위에 GetText 를 다시 부르지 않는다."""
         self._sess = None
         uia = self._get_uia()
         if uia is None:
@@ -893,16 +907,24 @@ class _UiaWorker:
             raise _Fail("own_window")
         if target_pid is not None and pid != target_pid:
             raise _Fail("focus_changed")      # begin 뒤 사이에 다른 앱으로 포커스가 옮겨 감
-        doc, sel, uia_text, why = self._find_selection(focused)
-        if doc is None:
-            raise _Fail(why)
+        if area is None:
+            doc, sel, uia_text, why = self._find_selection(focused)
+            if doc is None:
+                raise _Fail(why)
+            span_range = sel
+        else:
+            f = self._follow
+            if f is None or f["id"] != area[0] or area[1] not in ("para", "all"):
+                raise _Fail("follow_lost")        # 그 뒤 다른 따라 읽기 질의가 범위를 바꿨다
+            doc, sel = f["doc"], f["sel"]
+            span_range, uia_text = f[area[1]]
         alignment = align_source_to_uia(source_text, uia_text)
         if alignment is None:
             raise _Fail("text_mismatch")
         uia_spans = [alignment.span(s, e) for s, e in spans]
         if not any(uia_spans):
             raise _Fail("no_segments")
-        ranges = self._build_ranges(sel, uia_text, uia_spans)
+        ranges = self._build_ranges(span_range, uia_text, uia_spans)
         mapped = [i for i, r in enumerate(ranges) if r is not None]
         if not mapped:
             raise _Fail("range_failed")
@@ -977,6 +999,138 @@ class _UiaWorker:
                 break
             el = parent
         return None
+
+    # ── 따라 읽기(2026-10-28 리규형님): 고른 곳이 든 문단 + 그 아래 글 ──
+    def _follow_text(self):
+        """고른 곳이 든 문단과 그 아래 글(문서 끝까지, FOLLOW_FETCH_S 안)을 가져온다. 범위는 이 스레드에 남긴다(self._follow).
+
+        문단: 크로미움(FrameworkId FOLLOW_WEB_FRAMEWORK)은 UIA 문단 단위 — 웹 블록·<br> 줄·목록 항목 하나(2026-10-28 시험 문서
+              실측, Aside·웨일). 그 밖(메모장 등)은 빈 줄 사이 — 줄 단위로 위·아래로 걸어 빈 줄에서 멈춘다(메모장 실측: UIA 문단
+              단위는 논리 줄이라 쓰지 않는다).
+        아래 글: 크로미움은 범위째 다음 문단으로(Move — 글 끝에서 0. 끝점 늘리기는 글 끝에서 "움직였다"면서 같은 글을 수천 번
+              되풀이했다 — Aside 실측), 그 밖은 끝점을 FOLLOW_CHUNK_CHARS 씩. 걸음마다 출발점이 정말 나아갔는지·같은 글 되풀이를
+              보고 멈춘다. 문서 전체 범위(DocumentRange)는 쓰지 않는다.
+        돌려줌: {"id", "inside", "web", "framework", "para", "all", "complete", "pieces"} 또는 None(선택·글 요소 없음,
+          문단 찾기가 시간 안에 안 끝남). para = 그 문단 글, all = 그 문단부터 가져온 끝까지 — 웹은 문단 칸을 빈 줄로 이어 붙인다
+          (읽기 쪽 문단 = 빈 줄 사이). complete = 글 끝까지 가져왔나(False 면 FOLLOW_FETCH_S 에서 끊김).
+        """
+        U = self._U
+        call = self._call
+        S, E = U.TextPatternRangeEndpoint_Start, U.TextPatternRangeEndpoint_End
+        deadline = self._clock() + FOLLOW_FETCH_S
+        focused = call("GetFocusedElement", self._uia.GetFocusedElement)
+        if not focused:
+            return None
+        doc, sel, _text, _why = self._find_selection(focused)
+        if doc is None:
+            return None
+        framework = call("FrameworkId", doc.GetCurrentPropertyValue, U.UIA_FrameworkIdPropertyId) or ""
+        web = framework == FOLLOW_WEB_FRAMEWORK
+        para = call("Clone", sel.Clone)
+        if web:
+            call("ExpandToEnclosingUnit", para.ExpandToEnclosingUnit, U.TextUnit_Paragraph)
+        elif not self._expand_to_blank_lines(para, deadline):
+            return None
+        inside = (call("CompareEndpoints", para.CompareEndpoints, S, sel, S) <= 0
+                  and call("CompareEndpoints", para.CompareEndpoints, E, sel, E) >= 0)
+        para_raw = call("GetText", para.GetText, -1) or ""
+        if web:
+            pieces, end, complete = self._web_blocks_after(para, deadline)
+        else:
+            pieces, end, complete = self._chunks_after(para, deadline)
+        whole = call("Clone", para.Clone)
+        if end is not None:
+            call("MoveEndpointByRange", whole.MoveEndpointByRange, E, end, E)
+        if web:
+            blocks = [t.strip() for t in [para_raw] + pieces]
+            para_text, all_text = para_raw.strip(), "\n\n".join(t for t in blocks if t)
+        else:
+            para_text, all_text = para_raw, para_raw + "".join(pieces)
+        self._follow_id += 1
+        self._follow = {"id": self._follow_id, "doc": doc, "sel": sel,
+                        "para": (para, para_raw), "all": (whole, para_raw + "".join(pieces))}
+        return {"id": self._follow_id, "inside": inside, "web": web, "framework": framework,
+                "para": para_text, "all": all_text, "complete": complete, "pieces": len(pieces)}
+
+    def _expand_to_blank_lines(self, r, deadline):
+        """r(선택 복제)을 빈 줄 사이 문단으로 넓힌다 — 줄 단위로 위·아래 한 줄씩 보며 빈 줄·글 끝·제자리에서 멈춘다.
+        deadline 을 넘기면 False(문단을 모른다). 메모장 실측: 호출 한 번 0.1~0.3ms, 문단 하나에 20~25번."""
+        U = self._U
+        call = self._call
+        S, E, LINE = U.TextPatternRangeEndpoint_Start, U.TextPatternRangeEndpoint_End, U.TextUnit_Line
+        call("ExpandToEnclosingUnit", r.ExpandToEnclosingUnit, LINE)
+        while True:                                                  # 위로
+            if self._clock() > deadline:
+                return False
+            probe = call("Clone", r.Clone)
+            if call("MoveEndpointByUnit", probe.MoveEndpointByUnit, S, LINE, -1) == 0:
+                break                                                # 글 맨 앞
+            call("MoveEndpointByRange", probe.MoveEndpointByRange, E, probe, S)
+            call("ExpandToEnclosingUnit", probe.ExpandToEnclosingUnit, LINE)
+            if call("CompareEndpoints", probe.CompareEndpoints, S, r, S) >= 0:
+                break                                                # 제자리
+            if not (call("GetText", probe.GetText, -1) or "").strip():
+                break                                                # 빈 줄
+            call("MoveEndpointByRange", r.MoveEndpointByRange, S, probe, S)
+        while True:                                                  # 아래로
+            if self._clock() > deadline:
+                return False
+            probe = call("Clone", r.Clone)
+            call("MoveEndpointByRange", probe.MoveEndpointByRange, S, probe, E)
+            if call("MoveEndpointByUnit", probe.MoveEndpointByUnit, E, LINE, 1) == 0:
+                break                                                # 글 맨 끝
+            call("ExpandToEnclosingUnit", probe.ExpandToEnclosingUnit, LINE)
+            if call("CompareEndpoints", probe.CompareEndpoints, E, r, E) <= 0:
+                break
+            if not (call("GetText", probe.GetText, -1) or "").strip():
+                break
+            call("MoveEndpointByRange", r.MoveEndpointByRange, E, probe, E)
+        return True
+
+    def _web_blocks_after(self, para, deadline):
+        """para 다음 문단 칸부터 하나씩(Move). 돌려줌: (글 목록, 마지막 칸 범위 또는 None, 글 끝까지 왔나)."""
+        U = self._U
+        call = self._call
+        S, PARA = U.TextPatternRangeEndpoint_Start, U.TextUnit_Paragraph
+        cur = call("Clone", para.Clone)
+        pieces, last, prev = [], None, None
+        while self._clock() <= deadline:
+            before = call("Clone", cur.Clone)
+            if call("Move", cur.Move, PARA, 1) == 0:
+                return pieces, last, True
+            call("ExpandToEnclosingUnit", cur.ExpandToEnclosingUnit, PARA)
+            if call("CompareEndpoints", cur.CompareEndpoints, S, before, S) <= 0:
+                return pieces, last, True                            # 글 끝에서 제자리
+            text = call("GetText", cur.GetText, -1) or ""
+            if text == prev:
+                return pieces, last, True                            # 같은 칸 되풀이(글 끝 — Aside 실측)
+            prev = text
+            pieces.append(text)
+            last = call("Clone", cur.Clone)
+        return pieces, last, False
+
+    def _chunks_after(self, para, deadline):
+        """para 끝부터 끝점을 FOLLOW_CHUNK_CHARS 씩 늘려 가져온다. 돌려줌: (글 목록, 마지막 끝 범위 또는 None, 글 끝까지 왔나)."""
+        U = self._U
+        call = self._call
+        S, E, CH = U.TextPatternRangeEndpoint_Start, U.TextPatternRangeEndpoint_End, U.TextUnit_Character
+        cur = call("Clone", para.Clone)
+        call("MoveEndpointByRange", cur.MoveEndpointByRange, S, cur, E)
+        pieces, last = [], None
+        while self._clock() <= deadline:
+            nxt = call("Clone", cur.Clone)
+            if call("MoveEndpointByUnit", nxt.MoveEndpointByUnit, E, CH, FOLLOW_CHUNK_CHARS) == 0:
+                return pieces, last, True
+            if call("CompareEndpoints", nxt.CompareEndpoints, E, cur, E) <= 0:
+                return pieces, last, True
+            pieces.append(call("GetText", nxt.GetText, -1) or "")
+            last = nxt
+            before = cur
+            cur = call("Clone", nxt.Clone)
+            call("MoveEndpointByRange", cur.MoveEndpointByRange, S, cur, E)
+            if call("CompareEndpoints", cur.CompareEndpoints, S, before, S) <= 0:
+                return pieces, last, True
+        return pieces, last, False
 
     def _page_scheme(self):
         """포커스부터 위로 걸어 처음 만나는 문서(Document) 요소의 값 = 페이지 주소에서 주소 종류(url_scheme)만. 모르면 None.
@@ -1724,8 +1878,11 @@ class SourceHighlighter:
         """begin 이 성공해 지금 원문 위 칠하기가 동작 중이면 True."""
         return self._state == "active"
 
-    def begin(self, source_text, segments, on_result):
+    def begin(self, source_text, segments, on_result, area=None):
         """지금 전경 앱의 선택을 잡아 조각 위치를 맞춘다. 결과는 나중에 on_result(ok, reason) (Tk 메인).
+
+        area(따라 읽기, 2026-10-28): (query_follow_text 결과의 "id", "para" 또는 "all") — 선택 대신 그 질의가 잡아 둔
+        범위(문단 / 문단부터 가져온 끝까지)로 맞춘다. 그사이 다른 따라 읽기 질의를 했으면 on_result(False, "follow_lost").
 
         앞 읽기가 남아 있으면 먼저 정리한다(그 읽기의 on_result 는 부르지 않는다).
         함정: 그래서 highlight 는 begin "뒤에" 불러야 한다(begin 앞에 부른 번호는 지워진다). begin 결과가 오기 전에
@@ -1770,7 +1927,7 @@ class SourceHighlighter:
         else:
             self._target_root, self._target_pid = root_hwnd, pid
             self._worker.current_gen = gen
-            self._worker.submit(("begin", gen, source_text or "", spans, pid, self._win.own_pid))
+            self._worker.submit(("begin", gen, source_text or "", spans, pid, self._win.own_pid, area))
         self._schedule_tick()
 
     def highlight(self, idx, caption=None):
@@ -1830,6 +1987,16 @@ class SourceHighlighter:
         """
         self._check_thread("query_telegram_selected")
         self._one_shot_query("tg_selected", (x, y, right_click), on_done)
+
+    def query_follow_text(self, on_done):
+        """(Tk 메인) 따라 읽기 창(2026-10-28)용 — 지금 선택이 든 문단과 그 아래 글을 묻는다(_UiaWorker._follow_text).
+
+        결과는 나중에 Tk 메인에서 on_done(result): {"id", "inside"(한 문단 안에서 골랐나), "web", "framework",
+        "para"(그 문단 글), "all"(그 문단부터 글 끝까지 — 아래 글은 FOLLOW_FETCH_S 안에 가져온 데까지), "complete", "pieces"}.
+        모르면(글 요소·선택 없음, 느림, 막혀 있음) None. 그 범위로 칠하려면 begin(…, area=(result["id"], "para"|"all")).
+        """
+        self._check_thread("query_follow_text")
+        self._one_shot_query("follow_text", (), on_done)
 
     def _one_shot_query(self, kind, args, on_done):
         """(Tk 메인) 한 번짜리 조회 요청을 워커에 넣고 on_done 을 요청 번호로 맡겨 둔다(결과는 _handle 의 "caret")."""
