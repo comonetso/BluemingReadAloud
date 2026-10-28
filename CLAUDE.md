@@ -64,6 +64,13 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   Paseo plugin, this app and the Chrome extension must read the same text the same way, so follow that file when it changes.
   `tests/test_spoken_text.py` holds that repo's test expectations unchanged (86 + 10 cases).
   `spoken_unicode.py` is generated (`node tools/gen_spoken_unicode.cjs > spoken_unicode.py`) — Python `re` has no `\p{...}`.
+  **Dictionary reading** (2026-10-28 user decision, a port of the Chrome extension's `js/spoken-text.js` 287–380
+  `speakNames`…`capitalRuns` → `_speak_names`…`_capital_runs`): `make_spoken_text(text, lang, words)` with the word list
+  turns upper-case words into words the voice can say (`README` → `read me`, `TODO` → `to do`, `IN_PROGRESS` →
+  `in progress`); runs that cannot be split into words (`SSH`, `API`, `HTTP`) stay and are spelled. Korean / English voices
+  only (`(ko|en)(?![a-z])`); without words the result is the Paseo plugin's. The list `data/english-words.js` is the same
+  file as the extension's `js/english-words.js` ({word: SCOWL rank}, `readaloud_text.load_english_words`).
+  `DICT_CASES` in the tests are the extension's own results (122 inputs × ko/en = 244 matched character by character via node).
 - **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
   client are in its header. Voices are Korean only, so "primary language" = Hangul.
 - **messages.py** — Korean/English UI strings. Add every user-facing message to both `ko` and `en`.
@@ -87,7 +94,7 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    GetForegroundWindow → GetWindowThreadProcessId → OpenProcess(QUERY_LIMITED) → QueryFullProcessImageNameW) runs on
    the Tk main thread only (`_handle_selection_button_msg`, start of `read_selected_text`), never in a hook callback.
 2. **`read_selected_text()`** — releases modifier keys, backs up the clipboard, **clears it**,
-   sends Ctrl+C, waits, then reads the clipboard. Three-way branch:
+   sends Ctrl+C, reads the clipboard as soon as text arrives (`_wait_clipboard_text`, at most 0.5 s). Three-way branch:
    selection → hide the red dot + `_speak_or_ask_follow()`; no selection + playing → `stop_tts()`;
    no selection + idle → **nothing** (user decision 2026-09-28). The clipboard is restored when nothing was selected.
    From the red dot (`from_selection_button=True`) an empty selection never stops playback (the extension's dot only reads).
@@ -192,7 +199,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   one-spot UIA calls on the highlighter thread). The dot is shown next to the last selected character only when that
   returns a position; `"none"` (no selection) or `None` (unknown) shows nothing (user decision 2026-09-28: "only when
   text is really selected" — a 4 px drag guess also fired on click jitter at 140 % scaling). A keyboard selection whose
-  end is off-screen falls back to the cursor. Drag guessing alone is used only when UIA is unavailable (module missing
+  end position is unknown (off-screen, or the last character is a line break — Ctrl+A in Notepad) is shown next to the
+  cursor directly (2026-10-28 fix: it used to go back through `"show"`, which asked again and showed nothing). Telegram
+  still goes through `"show"` (selected-message check). Drag guessing alone is used only when UIA is unavailable (module missing
   or `source_highlight_enabled` off). Presses on the dot itself and gestures that start on our own windows are filtered.
   Wheel, keys and other buttons hide it. Clicking the dot → `read_selected_text(from_selection_button=True)`.
   Tray off = hide the dot and stop the mouse hook (setting `selection_button_enabled`, default on like the extension).
@@ -300,7 +309,10 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 - Do not add the U+2200–22FF range to the noise regex in preprocessing (U+2212 minus sign would be lost).
 - `np.frombuffer(...)` is read-only; `.copy()` before writing it to the stream.
 - Keep clearing the clipboard before Ctrl+C in `read_selected_text()`; without it an old clipboard is read
-  when nothing is selected. The ~0.8 s wait on the Tk main thread is accepted by design.
+  when nothing is selected. After Ctrl+C the clipboard is checked every `COPY_POLL_S` (0.02 s) and read as soon as text
+  arrives, up to `COPY_WAIT_S` (0.5 s) (`_wait_clipboard_text`, 2026-10-28 user decision — the follow-read window appeared
+  late; it used to be a fixed 0.5 s). The Tk main thread waits ~0.3 s with a selection and ~0.8 s without (stop hotkey) —
+  accepted by design. Measured after the change: clipboard 0.02 s, follow-read fetch 0.06 s (Notepad).
 - Single-instance port is **51888** (51889 in older docs was wrong). Changing the mutex name or port
   is a user decision — an old exe and a new exe could then run together and both catch the hotkey.
 - Do not register Windows reserved shortcuts (Win+L, Ctrl+Alt+Del, ...) as hotkeys. The code has no filter for this.

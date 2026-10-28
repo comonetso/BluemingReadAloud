@@ -18,8 +18,9 @@ sys.path.insert(0, APP_DIR)
 from selection_button import SelectionGestureDetector  # noqa: E402
 
 _FUNCS = ["_make_selection_hook", "_is_disabled_browser_exe", "_is_telegram_exe", "_is_web_scheme", "_unless_web_page",
-           "_show_dot_if_telegram_selected"]
-_VARS = ["_BROWSER_EXES", "_TELEGRAM_EXES", "TELEGRAM_MENU_RETRY_MS", "TELEGRAM_MENU_RETRY_MAX_S"]
+           "_show_dot_if_telegram_selected", "_handle_selection_button_msg", "_wait_clipboard_text"]
+_VARS = ["_BROWSER_EXES", "_TELEGRAM_EXES", "TELEGRAM_MENU_RETRY_MS", "TELEGRAM_MENU_RETRY_MAX_S",
+         "COPY_WAIT_S", "COPY_POLL_S"]
 
 
 def _load(extra=None):
@@ -266,6 +267,127 @@ class TelegramDotTest(unittest.TestCase):
         # 2026-10-24: 우클릭 자리는 다시 물을 때마다 같이 넘긴다. 점 자리는 그대로 뗀 자리
         self.assertEqual(self.run_case(["menu", False, True], right_click=(3, 4)), (3, [(10, 20)]))
         self.assertEqual(self.hl.right_clicks, [(3, 4)] * 3)
+
+
+class FakeEnd:
+    """query_selection_end 에 answer 로 답한다. later=True 면 on_done 을 쥐고 있다가 시험이 부른다."""
+
+    def __init__(self, answer=None, later=False, scheme=None):
+        self.answer, self.later, self.scheme, self.asked, self.pending = answer, later, scheme, 0, []
+
+    def query_selection_end(self, on_done):
+        self.asked += 1
+        if self.later:
+            self.pending.append(on_done)
+        else:
+            on_done(self.answer)
+
+    def query_page_scheme(self, on_done):
+        on_done(self.scheme)
+
+
+class KeyboardDotTest(unittest.TestCase):
+    """("keyboard",) — 선택 끝 글자 옆, 모르면 마우스 옆에 바로 띄운다(2026-10-28: 예전엔 "show" 로 되넘겨 다시 묻고 안 띄움)."""
+
+    CURSOR = (500, 600)
+
+    def run_case(self, hl, exe="Notepad.exe", browser=None, between=None):
+        self.hl = hl
+        self.shown, self.telegram = [], []
+        ns = _load({
+            "_ensure_source_highlighter": lambda: hl,
+            "source_highlight_enabled": True,
+            "selection_button_enabled": True,
+            "selection_button": types.SimpleNamespace(show_at=lambda x, y: self.shown.append((x, y))),
+            "disable_in_browsers": True,
+            "_no_dot_foreground": lambda: False,
+            "_no_dot_window_at": lambda x, y: False,
+            "_nonclient_at": lambda x, y: False,
+            "_foreground_disabled_browser": lambda: browser,
+            "_foreground_exe_name": lambda: exe,
+            "_cursor_pos": lambda: self.CURSOR,
+            "_safe_ui": lambda label, fn, *a: fn(*a),
+            "_hide_selection_button": lambda: None,
+            "_dot_query_gen": 0,
+            "_tg_right_click": None,
+        })
+        ns["_show_dot_if_telegram_selected"] = lambda x, y, rc=None: self.telegram.append((x, y))
+        handle = ns["_handle_selection_button_msg"]
+        handle("keyboard")
+        if between:
+            handle(*between)                     # 결과를 기다리는 사이 들어온 다른 명령
+        for on_done in hl.pending:
+            on_done(hl.answer)
+        return self.shown
+
+    def test_end_known_shows_next_to_it(self):
+        self.assertEqual(self.run_case(FakeEnd((300, 40))), [(300, 40)])
+        self.assertEqual(self.hl.asked, 1)
+
+    def test_end_unknown_shows_next_to_cursor_without_asking_again(self):
+        # 메모장 Ctrl+A: 끝 글자가 파일 끝 줄바꿈이라 위치를 모른다 → 마우스 옆(2026-09-28 규칙)
+        self.assertEqual(self.run_case(FakeEnd(None)), [self.CURSOR])
+        self.assertEqual(self.hl.asked, 1)
+
+    def test_nothing_selected_shows_nothing(self):
+        self.assertEqual(self.run_case(FakeEnd("none")), [])
+
+    def test_key_while_waiting_drops_late_answer(self):
+        self.assertEqual(self.run_case(FakeEnd((300, 40), later=True), between=("hide",)), [])
+
+    def test_telegram_goes_to_selected_message_check(self):
+        self.assertEqual(self.run_case(FakeEnd((300, 40)), exe="Telegram.exe"), [])
+        self.assertEqual(self.telegram, [(300, 40)])
+
+    def test_web_page_shows_nothing(self):
+        self.assertEqual(self.run_case(FakeEnd((300, 40), scheme="https"), browser="Aside.exe"), [])
+        self.assertEqual(self.hl.asked, 0)
+
+
+class WaitClipboardTest(unittest.TestCase):
+    """_wait_clipboard_text: 글이 들어오면 바로, 비면 COPY_WAIT_S 까지(2026-10-28 — 예전엔 0.5초 고정)."""
+
+    def run_case(self, answers):
+        ns = _load()
+        t = [0.0]
+        self.reads = 0
+
+        def paste():
+            self.reads += 1
+            a = answers[min(self.reads, len(answers)) - 1]
+            if isinstance(a, Exception):
+                raise a
+            return a
+
+        def sleep(s):
+            t[0] += s
+
+        got = ns["_wait_clipboard_text"](paste, clock=lambda: t[0], sleep=sleep)
+        return got, t[0]
+
+    def test_returns_as_soon_as_text_arrives(self):
+        got, took = self.run_case(["", "", "고른 글"])
+        self.assertEqual(got, "고른 글")
+        self.assertAlmostEqual(took, 0.06)
+
+    def test_empty_waits_full_limit(self):
+        got, took = self.run_case([""])
+        self.assertEqual(got, "")
+        self.assertGreaterEqual(took, 0.5)
+        self.assertLess(took, 0.55)
+
+    def test_blank_only_waits_full_limit(self):
+        got, took = self.run_case(["  \n"])
+        self.assertEqual(got, "  \n")
+        self.assertGreaterEqual(took, 0.5)
+
+    def test_read_error_retries(self):
+        got, _ = self.run_case([RuntimeError("열려 있음"), "고른 글"])
+        self.assertEqual(got, "고른 글")
+
+    def test_last_read_error_is_raised(self):
+        with self.assertRaises(RuntimeError):
+            self.run_case([RuntimeError("열려 있음")])
 
 
 if __name__ == "__main__":

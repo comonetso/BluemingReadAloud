@@ -1990,14 +1990,23 @@ def _handle_selection_button_msg(action, *args):
         if not selection_button_enabled or selection_button is None or _no_dot_foreground():
             return
         browser = _foreground_disabled_browser()
+        _dot_query_gen += 1
+        gen = _dot_query_gen
 
         def place(pos):
-            if pos == "none":
-                return                              # 커서만 있다 — 고른 글이 없다
+            # ⚠️ "show" 갈래로 되넘기지 않는다 — 그 갈래는 선택 끝을 다시 묻고 모르면 안 띄워서, 끝 글자 위치를 모를 때
+            #    (Ctrl+A 의 끝 = 파일 끝 줄바꿈·끝이 화면 밖) "마우스 옆" 이 한 번도 안 됐다(2026-10-28 리규형님 메모장 보고)
+            if gen != _dot_query_gen or pos == "none":
+                return                              # 기다리는 사이 다시 누르거나 키를 쳤다 / 커서만 있다 — 고른 글이 없다
+            if not isinstance(pos, tuple):
+                pos = _cursor_pos()                 # 끝 글자 위치를 모른다 → 마우스 옆
             if not pos:
-                pos = _cursor_pos()
-            if pos:
-                _handle_selection_button_msg("show", pos[0], pos[1])
+                return
+            if _is_telegram_exe(_foreground_exe_name()):
+                _handle_selection_button_msg("show", pos[0], pos[1])   # 텔레그램은 "선택한 메시지"로 판단(show 갈래)
+                return
+            if selection_button is not None and selection_button_enabled:
+                _safe_ui("빨간 점 표시", selection_button.show_at, pos[0], pos[1])
 
         def ask_end(_scheme=None):
             hl = _ensure_source_highlighter() if source_highlight_enabled else None
@@ -3629,19 +3638,21 @@ def _speak_or_ask_follow(text):
         return
     _follow_ask_seq += 1
     seq = _follow_ask_seq
+    asked_at = time.monotonic()
 
     def done(result):
         if seq != _follow_ask_seq:
             return                               # 그사이 새 읽기·창 닫기 — 늦은 결과
+        took = time.monotonic() - asked_at       # 문단·아래 글 가져오기(2026-10-28 창이 늦다는 보고 — 어디서 걸리는지 보려고)
         if not result or not result.get("inside") or not (result.get("para") or "").strip():
             why = "모름" if not result else ("한 문단 밖" if not result.get("inside") else "문단 글 없음")
-            log_to_console(f"[따라 읽기] 묻지 않고 고른 글을 읽습니다({why})")
+            log_to_console(f"[따라 읽기] 묻지 않고 고른 글을 읽습니다({why} · {took:.2f}초)")
             speak_text(text)
             return
         log_to_console(f"[따라 읽기] 창을 띄웁니다 — 틀={result.get('framework') or '?'} "
                        f"{'웹 문단 칸' if result.get('web') else '빈 줄 문단'} · 문단 {len(result['para'])}자 · "
                        f"끝까지 {len(result['all'])}자(아래 {result.get('pieces', 0)}조각"
-                       f"{'' if result.get('complete') else ', 1초에서 끊음'})")
+                       f"{'' if result.get('complete') else ', 1초에서 끊음'}) · 가져오기 {took:.2f}초")
         _show_follow_dialog(result, text)
 
     hl.query_follow_text(done)
@@ -3676,11 +3687,35 @@ def _show_follow_dialog(result, text):
         _follow_dialog_open = False
         speak_text(text)
 
+COPY_WAIT_S = 0.5     # Ctrl+C 뒤 클립보드를 기다리는 최대 시간(예전 고정 대기와 같은 값)
+COPY_POLL_S = 0.02    # 그동안 클립보드를 보는 간격(2026-10-28 리규형님 버튼)
+
+
+def _wait_clipboard_text(paste, limit_s=COPY_WAIT_S, poll_s=COPY_POLL_S, clock=None, sleep=None):
+    """Ctrl+C 뒤 클립보드에 글이 들어오면 바로 돌려준다(2026-10-28 리규형님 — 따라 읽기 창이 늦게 뜸. 예전엔 0.5초 고정).
+
+    limit_s 가 지나도 비었으면(고른 글 없음) 마지막으로 한 번 더 읽어 그 값을 돌려준다. 읽기 오류(다른 앱이 클립보드를
+    열고 있음 등)는 기한 전에는 넘기고 다음 확인에서 다시 본다 — 마지막 읽기의 오류만 부르는 쪽으로 올라간다.
+    """
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    deadline = clock() + limit_s
+    while clock() < deadline:
+        sleep(poll_s)
+        try:
+            text = paste()
+        except Exception:
+            continue
+        if text and text.strip():
+            return text
+    return paste()
+
+
 def read_selected_text(from_selection_button=False, _page_checked=False):
     """선택된 텍스트를 읽어옵니다. (Ctrl+C 트릭 사용)
 
     ⚠️ Tk 메인 스레드에서 부른다(단축키·빨간 점 클릭이 root.after 로 부름).
-    흐름: 눌린 수정자 키 떼기 → 클립보드 백업 → 클립보드 비우기 → Ctrl+C 흉내 → 0.5초 기다렸다 읽기
+    흐름: 눌린 수정자 키 떼기 → 클립보드 백업 → 클립보드 비우기 → Ctrl+C 흉내 → 글이 들어오면 바로 읽기(최대 0.5초)
     3방향 분기 (07-27 확정, 3) 은 2026-09-28 사용자 결정으로 바뀜):
       1) 선택한 글이 있다          → 빨간 점 숨김 + speak_text(글) — 읽는 중이어도 새 글로 다시 읽는다
       2) 선택 없음 + 읽는 중       → stop_tts()
@@ -3690,7 +3725,8 @@ def read_selected_text(from_selection_button=False, _page_checked=False):
       뜨므로 창 제목 막대를 끌어도 뜬다 — 그 점을 눌렀다고 읽던 글이 멈추면 안 된다.
     ⚠️ 클립보드를 비우는 단계를 지우지 말 것: 선택이 없으면 Ctrl+C 가 클립보드를 안 바꾸므로, 안 비우면 직전에
        복사해 둔 글을 "선택한 글" 로 착각해 읽는다(07-27 로그 §4-1). 선택 없음일 때는 백업을 되돌려 놓는다.
-    ⚠️ time.sleep 합계 약 0.8초 동안 Tk 메인이 멈춘다(하단 바·리더 창·빨간 점도 그동안 멈춤).
+    ⚠️ time.sleep 합계 — 고른 글이 있으면 약 0.3초, 없으면 약 0.8초 — 동안 Tk 메인이 멈춘다(하단 바·리더 창·빨간 점도
+       그동안 멈춤). 2026-10-28 전에는 0.5초를 고정으로 기다려 늘 약 0.8초였다(_wait_clipboard_text).
        단축키로 멈출 때의 이 지연은 설계상 감수하기로 한 것이다. 이 사이 재생이 스스로 끝나면 tts_playing 이
        False 가 되어 2) 대신 3)(아무것도 안 함) 으로 갈 수 있다(드묾 — 어차피 끝난 읽기라 결과는 같다).
     브라우저에서 비활성화 (2026-09-28 사용자 확정, 켜져 있고 전경 창이 Aside·웨일·크롬일 때) — 맨 처음에 판별한다.
@@ -3782,13 +3818,12 @@ def read_selected_text(from_selection_button=False, _page_checked=False):
         time.sleep(0.05)
         keyboard.release(Key.ctrl)
 
-        # 클립보드 업데이트 대기 (충분히)
-        time.sleep(0.5)
-
-        # 새로운 클립보드 내용 확인
+        # 클립보드에 글이 들어오면 바로 넘어간다 — 비어 있으면 COPY_WAIT_S 까지 기다린다(_wait_clipboard_text)
         new_text = ""
+        copy_t0 = time.monotonic()
         try:
-            new_text = pyperclip.paste()
+            new_text = _wait_clipboard_text(pyperclip.paste)
+            logging.info(f"클립보드 기다림 {time.monotonic() - copy_t0:.2f}초")
         except Exception as e:
             logging.error(f"클립보드 읽기 오류: {e}")
             log_to_console(f"클립보드 읽기 오류: {str(e)}")

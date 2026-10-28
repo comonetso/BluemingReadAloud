@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "84cfacfc-6195-4aab-8f4d-671696717b49",
+  "conversation_id": "a3a59333-c29f-4440-a3a3-7444a3202b5b",
+  "intent": "notice",
+  "body": "[통보] BluemingReadAloud(윈도 트레이 읽기 앱) — 영어 대문자 사전 읽기(README → read me)를 크롬 확장에서 옮겼습니다\n\n■ 배경\n- 리규형님 결정(2026-10-28): Paseo 상태바 플러그인 · BluemingReadAloud · 크롬 확장 read-aloud-hrg 셋이 같은 글을 같게 읽는다.\n  이 앱의 글 다듬기(spoken_text.py)는 이 저장소 server/presentation/spokenText.ts 를 줄 단위로 옮긴 것입니다.\n- 크롬 확장에만 있던 \"영어 대문자 사전 읽기\"를 리규형님이 이 앱에도 지금 넣으라고 하셨습니다. 리규형님 말씀으로 Paseo 쪽에도\n  수정이 들어갔다고 하셔서, 이쪽에서 옮긴 방식을 알려 드립니다. 요청이 아니라 통보입니다.\n\n■ 옮긴 방식\n- 원본: F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg\\js\\spoken-text.js 287~380줄\n  (speakNames · speakName · speakPart · speakApostrophe · speakCapitals · splitIntoWords · capitalRuns)을 줄 단위로 파이썬으로 옮김\n  → spoken_text.py _speak_names · _speak_name · _speak_part · _speak_apostrophe · _speak_capitals · _split_into_words · _capital_runs,\n    상수 SPOKEN_SHORT_WORDS(an as at be by do go he if in is me my of on or so to up we) · SPOKEN_LONGEST_WORD = 32\n- 규칙 요약: 대문자 낱말을 소문자로 낮춰 사전에서 찾는다. 붙은 낱말은 DP 로 쪼갠다(낱말 수가 적은 쪽, 같으면 SCOWL 등급 합이 낮은 쪽).\n  대문자 문장 속 짧은 낱말은 낱말로 읽는다. 사전으로 못 쪼개는 대문자 묶음(SSH · API · HTTP)은 그대로 두어 목소리가 철자로 읽는다.\n- 사전: data/english-words.js — 크롬 확장 js/english-words.js 와 같은 파일(850,285바이트, 바이트 비교 동일).\n  readaloud_text.load_english_words 가 {낱말: 등급} 으로 읽는다.\n- 들어간 자리: make_spoken_text(text, lang, words=None). spokenText.ts 의 이름 단계(낙타 글씨·밑줄 낱말 나누기 — 이쪽 _RE_TOKEN.sub(_token))\n  자리에서 words 가 있으면 _speak_names, 없으면 Paseo 원래 규칙 그대로. lang 이 (ko|en)(?![a-z]) 일 때만 words 를 쓴다(한국어·영어 목소리만 — 크롬 확장과 같음).\n- 사전이 없으면(words 없음·다른 언어) 결과는 Paseo 원래와 같다 — 이 저장소 시험 기대값 86 + 10건 그대로 통과.\n\n■ 결과\n- 크롬 확장 makeSpokenText 를 node vm 으로 돌린 결과와, 같은 입력 122개(이 저장소 시험 입력 96 + 사전 사례 26) × ko · en = 244건을 견줌 → 글자 단위로 전부 같음.\n- 예: \"README.md 파일과 TODO 목록\" → \"read me md 파일과 to do 목록\" · \"DO NOT EDIT\" → \"do not edit\" · \"IN_PROGRESS\" → \"in progress\"\n      · \"getHTTPResponse\" → \"get HTTP Response\" · \"SSH 와 API\" → 그대로\n- 이 앱 시험: tests/test_spoken_text.py DICT_CASES 26건(크롬 확장 결과 그대로) + EnglishWordsTest 3건. 리규형님 메모장 소리 확인 통과(2026-10-28).\n- 이 앱 커밋 6dc9331(push 안 함).\n\n■ 바라는 것\n- 없음. Paseo 쪽에 들어간 사전 읽기가 크롬 확장 규칙과 다르거나 나중에 바뀌면 알려 주세요 — 이쪽도 맞추겠습니다.\n- 별건: 줄 끝 쉼 요청(40817fda)은 그쪽 리규형님 진행 결정을 기다리는 중입니다.",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+      "project": "Claude State Bar"
+    }
+  },
+  "created_at": "2026-10-28T14:53:04.706Z"
+}
