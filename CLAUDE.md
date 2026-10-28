@@ -62,7 +62,10 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   A line-by-line port of the Paseo status bar plugin's `server/presentation/spokenText.ts`
   (`F:\workspace\EtcProject\VsCodeExtentions\claudeContextBar\paseo-plugins\claude-state-bar`) — user decision 2026-10-28:
   Paseo plugin, this app and the Chrome extension must read the same text the same way, so follow that file when it changes.
-  `tests/test_spoken_text.py` holds that repo's test expectations unchanged (86 + 10 cases).
+  `tests/test_spoken_text.py` holds that repo's test expectations unchanged (95 + 10 cases; `test_case_count` checks the
+  number against that repo's `check(` lines). **Line-end pause** (2026-10-28 user decision "all three pause at line ends",
+  that file's `LINE_NEEDS_PERIOD`): the last step adds "." after a line that is followed by another line and does not end
+  in a space or punctuation (`- 사과\n- 배` → `사과.\n배`). The last line of a paragraph gets none (playback stops there anyway).
   `spoken_unicode.py` is generated (`node tools/gen_spoken_unicode.cjs > spoken_unicode.py`) — Python `re` has no `\p{...}`.
   **Dictionary reading** (2026-10-28 user decision, a port of the Chrome extension's `js/spoken-text.js` 287–380
   `speakNames`…`capitalRuns` → `_speak_names`…`_capital_runs`): `make_spoken_text(text, lang, words)` with the word list
@@ -71,6 +74,7 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   only (`(ko|en)(?![a-z])`); without words the result is the Paseo plugin's. The list `data/english-words.js` is the same
   file as the extension's `js/english-words.js` ({word: SCOWL rank}, `readaloud_text.load_english_words`).
   `DICT_CASES` in the tests are the extension's own results (122 inputs × ko/en = 244 matched character by character via node).
+  `PASEO_DICT_CASES` = the Paseo plugin's dictionary cases (it ported the same functions the same day).
 - **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
   client are in its header. Voices are Korean only, so "primary language" = Hangul.
 - **messages.py** — Korean/English UI strings. Add every user-facing message to both `ko` and `en`.

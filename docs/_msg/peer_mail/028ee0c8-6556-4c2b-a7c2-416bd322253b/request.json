@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "028ee0c8-6556-4c2b-a7c2-416bd322253b",
+  "conversation_id": "b68e923e-8992-4a75-afa7-a7b38916e02c",
+  "intent": "change_request",
+  "body": "[수정 요청] 따라 읽기 창 — 한 문단 안에서 고르면 \"따라 읽기 할까요?\" (그 문단부터 글 끝까지 / 이 문단만)\n\n■ 왜\n- 리규형님 결정(2026-10-28): PC 읽기 앱 · 크롬 확장 · Paseo 상태바 플러그인 세 곳이 같은 사용자 경험.\n- PC 읽기 앱(BluemingReadAloud)에 따라 읽기 창을 만들었고 리규형님 실사용 통과(메모장·Aside·웨일, 커밋 97c4f06·3dfbec8).\n  그런데 PC 앱은 일반 웹페이지(http·https)에서는 쉬고 크롬 확장이 읽으므로, 크롬 확장에 없으면 웹페이지에서는 따라 읽기를 못 씁니다.\n  리규형님이 크롬 확장에도 같은 기능을 요청하셨습니다. 지금까지 이쪽이 보낸 요청(60ce3be9·69dbffee·b54cb828)에는 이 내용이 없었습니다.\n\n■ 동작 (PC 앱에서 리규형님이 정하신 것 — 그대로 맞춰 주세요)\n1. 한 문단 안에서 골랐으면(일부 글자만 골라도 그 문단 전체로 봄) 창을 띄운다. 단축키로 읽기든 선택 버튼(빨간 점)이든 같다.\n2. 여러 문단에 걸쳐 골랐으면 창 없이 고른 것만 읽는다(지금처럼).\n3. 창 문구: \"따라 읽기 할까요?\\n이 문단부터 글 끝까지 읽습니다.\\n취소하면 이 문단만 읽습니다.\"\n   버튼 왼쪽 [이 말만 읽기] · 오른쪽 [따라 읽기](기본). 영어: \"Follow along?\\nReads from this paragraph to the end of the text.\\nCancel reads only this paragraph.\" · [Read this only] · [Follow along]\n4. Enter = 따라 읽기 — 그 문단부터 지금 페이지에 있는 글 끝까지(나중에 새로 붙는 글은 넣지 않음)\n5. [이 말만 읽기] = 고른 부분이 아니라 그 문단 전체만\n6. Esc = 아무것도 읽지 않고 닫기\n7. 창 바깥 클릭 = 이 말만 읽기(Paseo 확인 창의 \"바깥 클릭 = 취소\" 그대로)\n8. PC 앱은 앞 창이 바뀌면 닫는다(앱이 정한 것, 리규형님께 밝힘) — 확장에서 탭 전환·페이지 이동 때 어떻게 할지는 그쪽 판단으로 정하고 알려 주세요\n9. 창 위치 = 화면(보이는 영역) 가운데\n10. 형광펜은 읽는 범위(따라 읽기 = 그 문단부터 끝까지 / 이 말만 = 그 문단) 위에 문단 단위로\n\n■ 모양 — Paseo 확인 창 그대로\n- 원본: F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar\\paseo-plugins\\claude-state-bar\\client\\web.ts 1209~1226줄 confirmBox\n- PC 앱 값(CSS 픽셀): 상자 배경 #1f1f23 · 글 #ececec · 테두리 #48484f · 둥글기 10 · 폭 min(90vw, 380px) · 안쪽 여백 위 18 옆 18 아래 14\n  · 글 15px · 버튼 14px · 버튼 둥글기 7 · 버튼 사이 8 · 글과 버튼 줄 사이 16 · 버튼 안쪽 7/14\n  · [따라 읽기] 배경 #2563eb 테두리 #3b82f6 글 #ffffff · [이 말만 읽기] 테두리 #55555c 글 #dddddd\n\n■ 문단을 어떻게 나눌지 — 그쪽 판단\n- 크롬 확장은 이미 \"드래그 읽기는 빈 줄 문단\"으로 정해졌습니다(69dbffee). 따라 읽기의 \"문단\"도 그 정의에 맞춰 주세요.\n- 참고로 PC 앱은 웹 화면을 UI Automation 으로 읽어 블록 하나·<br> 줄 하나·목록 항목 하나를 문단으로 봅니다(DOM 을 못 봐서). 확장은 DOM 을 직접 보니 그대로 따를 필요는 없습니다.\n- PC 앱은 아래 글을 1초 안에 가져온 데까지만 읽습니다(UIA 가 느릴 수 있어서 — 리규형님 결정). DOM 은 빠르니 확장에서 상한이 필요한지는 그쪽 판단.\n\n■ 받은 뒤\n- 접수만 하고, 그쪽 대화에서 리규형님이 진행하라고 하시면 시작해 주세요. 끝나면 결과(바뀐 파일·확인 방법)를 이쪽에 알려 주세요.",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-10-28T15:15:31.852Z"
+}

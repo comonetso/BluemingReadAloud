@@ -370,6 +370,10 @@ _RE_SPACE_BEFORE_MARK = re.compile(r"[ \t\u00a0]+([.,?!])")
 _RE_COMMA_AFTER_STOP = re.compile(r"([.?!]),+")
 _RE_COMMAS = re.compile(r",(?:[ \t\u00a0]*,)+")
 _RE_LINE_HEAD_MARK = re.compile(r"^[ \t\u00a0]*[,.]+", re.M)
+# \uc904 \ub05d \uc27c(2026-10-28 \ub9ac\uaddc\ud615\ub2d8 "\uc138 \uacf3 \ubaa8\ub450 \uc904 \ub05d\uc5d0\uc11c \uc26c\uae30" \u2014 \uae30\uc900 spokenText.ts LINE_NEEDS_PERIOD): \ub2e4\uc74c \uc904\uc774 \uc774\uc5b4\uc9c0\ub294 \uc904\uc758
+# \ub05d \uae00\uc790\uac00 \uacf5\ubc31\u00b7\ubb38\uc7a5 \ubd80\ud638\uac00 \uc544\ub2c8\uba74 \ub9c8\uce68\ud45c\ub97c \ubd99\uc5ec \uc5d4\uc9c4\uc774 \uc26c\uac8c \ud55c\ub2e4. \ubd80\ud638 \ubaa9\ub85d\uc740 \ud06c\ub86c \ud655\uc7a5 js/speech.js needsPeriod \uc640 \uac19\uace0
+# \uc544\ub78d\uc5b4 \uc27c \ubd80\ud638(\u060c \u061b \u061f)\ub97c \ub354\ud588\ub2e4. \ubb38\ub2e8 \ub9c8\uc9c0\ub9c9 \uc904\uc740 \uadf8 \ub4a4\uc5d0\uc11c \uc7ac\uc0dd\uc774 \ub05d\ub098 \uc5b4\ucc28\ud53c \uc26c\ubbc0\ub85c \ubd99\uc774\uc9c0 \uc54a\ub294\ub2e4(\ud55c \uc904 \uae00\uc740 \uadf8\ub300\ub85c)
+_RE_LINE_NEEDS_PERIOD = re.compile("[^" + WS + ".!?,;:\u2026\u3002\uff01\uff1f\u3001\uff0c\uff1b\uff1a\u060c\u061b\u061f](?=\n)")
 
 
 def _camel(token):
@@ -554,4 +558,4 @@ def make_spoken_text(text, lang, words=None):
     spoken = re.sub(r"[ \t\u00a0]+", " ", spoken)
     spoken = re.sub(r" +\n", "\n", spoken)
     spoken = re.sub(r"\n{3,}", "\n\n", spoken)
-    return _js_trim(spoken)
+    return _RE_LINE_NEEDS_PERIOD.sub(r"\g<0>.", _js_trim(spoken))       # 다듬은 뒤의 글로 판정(글머리·표가 지워진 뒤)
