@@ -215,5 +215,58 @@ class ParagraphSplitTest(unittest.TestCase):
         self.assertEqual(text[pieces[2]["src_start"]:pieces[2]["src_end"]], "끝.")
 
 
+# 영어 대문자 낱말 사전 읽기(2026-10-28 — 크롬 확장 js/spoken-text.js speakNames 를 옮김). 기대값은 크롬 확장 함수를
+# node 로 돌린 결과 그대로(한국어 목소리). 같은 날 기준 입력 122개 × 한국어·영어에서 두 함수 결과가 글자까지 같았다.
+DICT_CASES = [
+    ('README 파일을 봅니다', 'read me 파일을 봅니다'),
+    ('README.md 를 엽니다', 'read me md 를 엽니다'),
+    ('TODO 목록', 'to do 목록'),
+    ('DO NOT EDIT', 'do not edit'),
+    ('SSH 와 API', 'SSH 와 API'),
+    ("APIs 와 README's", "APIs 와 read me's"),
+    ('IN_PROGRESS 상태', 'in progress 상태'),
+    ('getHTTPResponse 호출', 'get HTTP Response 호출'),
+    ('CLAUDE 설정', 'claude 설정'),
+    ('READMEs 와 PCs', 'read mes 와 PCs'),
+    ("DON'T PANIC", "don't panic"),
+    ("I'M HERE", "i'm here"),
+    ("USER'S GUIDE", "user's guide"),
+    ('loadREADMEFile 함수', 'load read me File 함수'),
+    ('HTTP 요청과 JSON 응답', 'HTTP 요청과 JSON 응답'),
+    ('THE QUICK BROWN FOX', 'the quick brown fox'),
+    ('OK 버튼과 PC 화면', 'OK 버튼과 PC 화면'),
+    ('AM 9시, IT 부서, NO 답, US 달러', 'AM 9시, IT 부서, NO 답, US 달러'),
+    ('FIXME: 나중에', 'fix me, 나중에'),
+    ('WARNING 이 떴습니다', 'warning 이 떴습니다'),
+    ('MAX_RETRY_COUNT 값', 'max retry count 값'),
+    ('v1.2 README_FIRST.txt', 'v1 2 read me first txt'),
+    ('SELECT * FROM users', 'select from users'),
+    ('README.KR.md 와 CHANGELOG', 'read me KR md 와 change log'),
+    ('Hello WORLD', 'Hello world'),
+    ('HELLO world', 'hello world'),
+]
+
+
+class EnglishWordsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import readaloud_text
+        cls.words = readaloud_text.load_english_words(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "english-words.js"))
+
+    def test_extension_expectations(self):
+        for text, want in DICT_CASES:
+            with self.subTest(text=text):
+                self.assertEqual(make_spoken_text(text, "ko", self.words), want)
+
+    def test_without_words_names_are_only_spaced(self):
+        self.assertEqual(make_spoken_text("README.md 를 엽니다", "ko"), "README md 를 엽니다")
+        self.assertEqual(make_spoken_text("TODO 목록", "ko", None), "TODO 목록")
+
+    def test_other_languages_do_not_use_words(self):
+        self.assertEqual(make_spoken_text("README を開く", "ja", self.words), "README を開く")
+        self.assertEqual(make_spoken_text("README file", "en", self.words), "read me file")
+
+
 if __name__ == "__main__":
     unittest.main()

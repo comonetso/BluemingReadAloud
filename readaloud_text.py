@@ -1025,7 +1025,7 @@ def split_input(text, voice_lang=None, voice_type=None, limit=INPUT_CHUNK_BYTES)
     return chunks
 
 
-def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_whole=None):
+def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_whole=None, words=None):
     """원문 → 읽을 조각 [{"text", "src_start", "src_end", "para"}] — 문단 단위(기준 방식).
 
     text: 음성에 보낼 글(spoken_text.make_spoken_text 뒤, 2000바이트 이하로 나눔).
@@ -1034,6 +1034,7 @@ def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_
       (translation.plan). 번역은 변환 전 글에 하고 변환은 번역 뒤에 한다(translation.make_translating_synthesize).
       raw 에서는 URL 을 "URL" 로 가린다 — 주소가 번역 회사로 나가지 않게(예전 "HTTP URL." 대체와 같은 이유).
     다듬어 빈 글이 된 문단(괄호·기호뿐)은 조각을 만들지 않는다(기준은 무음으로 지나간다 — 듣는 결과는 같다).
+    words: 영어 대문자 낱말 사전(load_english_words) — 글 다듬기에 넘긴다(2026-10-28 사전 읽기). None 이면 띄우기만.
     """
     import spoken_text   # 여기서 부른다 — spoken_text 는 이 모듈을 부르지 않지만, 옛 경로만 쓰는 시험이 이 모듈만 불러도 되게
     lang = spoken_text.speech_lang(voice_lang)
@@ -1041,7 +1042,7 @@ def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_
     para = 0
     for s, e in split_paragraphs(source_text):
         raw = source_text[s:e]
-        spoken = spoken_text.make_spoken_text(raw, lang)
+        spoken = spoken_text.make_spoken_text(raw, lang, words)
         if not spoken:
             continue
         masked = spoken_text.mask_urls(raw)

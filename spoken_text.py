@@ -372,14 +372,151 @@ _RE_COMMAS = re.compile(r",(?:[ \t\u00a0]*,)+")
 _RE_LINE_HEAD_MARK = re.compile(r"^[ \t\u00a0]*[,.]+", re.M)
 
 
+def _camel(token):
+    t = re.sub(r"([a-z])([A-Z])", r"\1 \2", token)
+    return re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", t)
+
+
 def _token(m):
-    t = re.sub(r"([a-z])([A-Z])", r"\1 \2", m.group(0))
-    t = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", t)
-    return re.sub(r"[._/\\-]+", " ", t)
+    return re.sub(r"[._/\\-]+", " ", _camel(m.group(0)))
 
 
-def make_spoken_text(text, lang):
-    """화면 글 → 음성에 보낼 글. lang = "ko"·"en"·… (speech_lang). 숫자를 말로 바꾸는 것은 "ko" 만."""
+# ── 영어 대문자 낱말 사전 읽기(2026-10-28 리규형님 — 크롬 확장 js/spoken-text.js speakNames 287~380줄을 그대로 옮김.
+#    Paseo 기준에도 같게 들어가는 중). README → read me · TODO → to do · DO NOT EDIT → do not edit · SSH·API 그대로.
+#    words = {낱말: SCOWL 등급}(readaloud_text.load_english_words — data/english-words.js, 크롬 확장과 같은 파일).
+#    한국어·영어 목소리만. 사전이 없으면 예전처럼 띄우기만(_token).
+_RE_NAME_WITH_TAIL = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:[./\\-][A-Za-z0-9_]+)*(?:['’](?:[A-Z]+|s)(?![A-Za-z0-9_]))?")
+# 대문자 낱말이 붙어 있거나(TODO → "to do") 대문자 문장(DO NOT EDIT 의 DO)일 때 낱말로 읽는 두 글자.
+# am·it·no·us 는 뺀다 — 대문자면 약어인 때가 많다(AM, IT, NO, US)
+SPOKEN_SHORT_WORDS = frozenset(["an", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "me", "my", "of",
+                                "on", "or", "so", "to", "up", "we"])
+SPOKEN_LONGEST_WORD = 32         # _split_into_words 가 찾는 가장 긴 낱말
+_RE_LETTER_OR_NUMBER = re.compile("[" + _LN + "]")
+
+
+def _speak_names(text, words):
+    tokens = [(m.group(0), m.start()) for m in _RE_NAME_WITH_TAIL.finditer(text)]
+    in_run = _capital_runs(text, tokens, words)
+    return _RE_NAME_WITH_TAIL.sub(lambda m: _speak_name(m.group(0), m.start() in in_run, words), text)
+
+
+def _speak_name(token, in_capital_run, words):
+    parts = re.split(r"[._/\\-]+", token)
+    # 모두 대문자이고 영어 낱말이 든 이름(IN_PROGRESS)은 대문자 문장처럼 읽는다
+    capital_name = (len(parts) > 1 and all(re.fullmatch(r"[A-Z]+", p) for p in parts)
+                    and any(len(p) > 2 and _speak_capitals(p, False, words) != p for p in parts))
+    return " ".join(_speak_part(p, in_capital_run or capital_name, words) for p in parts)
+
+
+def _speak_part(part, in_capital_run, words):
+    if not part:
+        return part
+    apostrophe = re.fullmatch(r"([A-Za-z0-9_]+)(['’][A-Za-z]+)", part)
+    if apostrophe:
+        return _speak_apostrophe(part, apostrophe.group(1), apostrophe.group(2), in_capital_run, words)
+    if re.search(r"[0-9]", part):
+        return _camel(part)
+    # 약어의 복수(APIs, READMEs): 약어 + s. 두 글자(PCs)는 그대로
+    plural = re.fullmatch(r"([A-Z]{2,})s", part)
+    if plural:
+        if len(plural.group(1)) <= 2:
+            return part
+        stem = _speak_capitals(plural.group(1), in_capital_run, words)
+        return part if stem == plural.group(1) else stem + "s"
+    if re.fullmatch(r"[A-Z]+", part):
+        return _speak_capitals(part, in_capital_run, words)
+    # 낙타 표기(getHTTPResponse, loadREADMEFile)는 띄우고, 그 안의 대문자 낱말은 위처럼
+    return " ".join(_speak_capitals(w, False, words) if re.fullmatch(r"[A-Z]{3,}", w) else w
+                    for w in _camel(part).split(" "))
+
+
+def _speak_apostrophe(part, stem, tail, in_capital_run, words):
+    # 따옴표 낱말: 대문자면 줄임말(DON'T, I'M) 또는 낱말 + 's(README's, USER'S)
+    if re.search(r"[0-9]", stem) or stem != stem.upper():
+        return _camel(stem) + tail
+    if part == part.upper() and part.lower().replace("’", "'") in words:
+        return part.lower()
+    if not re.fullmatch(r"['’]s", tail, re.I):
+        return part
+    spoken = _speak_capitals(stem, in_capital_run, words)
+    return spoken + (tail if spoken == stem else tail.lower())
+
+
+def _speak_capitals(word, in_capital_run, words):
+    lower = word.lower()
+    # 대문자 그대로 — 대문자 문장 속 짧은 낱말(DO NOT EDIT 의 DO)만 낱말로
+    if len(word) <= 2:
+        return lower if in_capital_run and lower in SPOKEN_SHORT_WORDS else word
+    # 모음이 없으면 소리(ssh, hmm) — 대문자면 약어(SSH)
+    if not re.search(r"[aeiouy]", lower):
+        return word
+    if lower in words:
+        return lower
+    run = _split_into_words(lower, words)
+    return " ".join(run) if run else word
+
+
+def _split_into_words(w, words):
+    """w 를 이루는 가장 적은 수의 영어 낱말(같으면 더 흔한 쪽 — 낮은 SCOWL 등급). 세 글자 이상이거나 낱말로 읽는 두 글자.
+    못 나누거나 낱말 하나면 None."""
+    best = [None] * (len(w) + 1)
+    best[0] = {"count": 0, "level": 0}
+    for i in range(2, len(w) + 1):
+        for j in range(max(0, i - SPOKEN_LONGEST_WORD), i - 1):
+            if not best[j]:
+                continue
+            part = w[j:i]
+            level = words.get(part) if len(part) > 2 else (0 if part in SPOKEN_SHORT_WORDS else None)
+            if level is None:
+                continue
+            count, total = best[j]["count"] + 1, best[j]["level"] + level
+            if not best[i] or count < best[i]["count"] or (count == best[i]["count"] and total < best[i]["level"]):
+                best[i] = {"from": j, "count": count, "level": total}
+    if not best[len(w)] or best[len(w)]["count"] < 2:
+        return None
+    parts = []
+    i = len(w)
+    while i > 0:
+        parts.insert(0, w[best[i]["from"]:i])
+        i = best[i]["from"]
+    return parts
+
+
+def _capital_runs(text, tokens, words):
+    """붙어 있는(사이에 공백·부호뿐) 대문자 낱말들에 영어 낱말이 하나라도 있으면 대문자 문장 — 그 짧은 낱말도 낱말로 읽는다.
+    돌려줌: 그런 낱말들의 시작 위치 집합."""
+    in_run = set()
+    run = []
+
+    def is_capital_word(tok):
+        return re.fullmatch(r"[A-Z]+(?:['’][A-Z]+)?", tok[0]) is not None
+
+    def lowers(tok):
+        return len(tok[0]) > 2 and _speak_part(tok[0], False, words) != tok[0]
+
+    def flush():
+        if any(lowers(t) for t in run):
+            in_run.update(t[1] for t in run)
+        run.clear()
+
+    for k, tok in enumerate(tokens):
+        if not is_capital_word(tok):
+            flush()
+            continue
+        if run:
+            prev = tokens[k - 1]
+            if _RE_LETTER_OR_NUMBER.search(text[prev[1] + len(prev[0]):tok[1]]):
+                flush()
+        run.append(tok)
+    flush()
+    return in_run
+
+
+def make_spoken_text(text, lang, words=None):
+    """화면 글 → 음성에 보낼 글. lang = "ko"·"en"·… (speech_lang). 숫자를 말로 바꾸는 것은 "ko" 만.
+    words(사전, 2026-10-28): 한국어·영어 목소리면 영어 대문자 낱말을 사전으로 읽는다(_speak_names). 없으면 띄우기만."""
+    if not re.match(r"(ko|en)(?![a-z])", str(lang or ""), re.I):
+        words = None
     spoken = _RE_FENCE.sub("", text)
     spoken = _RE_IMAGE.sub(r"\1", spoken)
     spoken = _RE_LINK.sub(r"\1", spoken)
@@ -399,8 +536,9 @@ def make_spoken_text(text, lang):
     spoken = spoken.replace("|", " ")
     spoken = _RE_ARROW.sub(PAUSE, spoken)
     spoken = _RE_REPEAT.sub(lambda m: m.group(1) * REPEATED_CHARS_MAX, spoken)
-    # 영어 이름 안 기호는 소리로 읽지 않고 띄운다(readaloud_text.py → "readaloud text py"). 대문자 두 글자(PC·OK)는 떼지 않는다
-    spoken = _RE_TOKEN.sub(_token, spoken)
+    # 영어 이름 안 기호는 소리로 읽지 않고 띄운다(readaloud_text.py → "readaloud text py"). 대문자 두 글자(PC·OK)는 떼지 않는다.
+    # 사전이 있으면 대문자 낱말을 낱말로(크롬 확장 speakNames — 2026-10-28)
+    spoken = _speak_names(spoken, words) if words else _RE_TOKEN.sub(_token, spoken)
     # 남은 기호 — 숫자 안 점·콜론·쉼표와 %, 영어 낱말 안 작은따옴표, 문장 끝 부호만 둔다
     spoken = _RE_BULLET.sub(" ", spoken)
     spoken = _RE_LIST_PAUSE.sub(PAUSE, spoken)

@@ -3067,8 +3067,9 @@ def speak_text(text, hl_area=None):
     # 변환 전 글(주소는 "URL" 로 가림)을 번역 경로로 보낸다(translation.mark_for_translation). 규칙은 translation.py 머리 설명.
     use_translation = translate_enabled and translation.supports(lang)
     try:
+        words = _get_english_words()           # 영어 대문자 낱말 사전 읽기(2026-10-28 — 크롬 확장 speakNames)
         segments = readaloud_text.split_paragraphs_for_reading(
-            text, lang, voice_type, keep_whole=translation.plan if use_translation else None)
+            text, lang, voice_type, keep_whole=translation.plan if use_translation else None, words=words)
         raw_texts = translation.mark_for_translation(segments) if use_translation else set()
     except Exception as e:
         logging.error(f"조각 나누기 오류: {e}")
@@ -3094,7 +3095,7 @@ def speak_text(text, hl_area=None):
             # box["session"] 은 아래에서 세션을 만든 뒤 채워진다 — 번역은 start() 뒤에야 일어나므로 늘 채워져 있다.
             spoken_lang = spoken_text.speech_lang(lang)
             synthesize = translation.make_translating_synthesize(
-                synthesize, translator, lambda t: spoken_text.make_spoken_text(t, spoken_lang),
+                synthesize, translator, lambda t: spoken_text.make_spoken_text(t, spoken_lang, words),
                 raw_texts, log=log_to_console,
                 on_translated=lambda t: gui_queue.put(("tts_event", box.get("session"), "translation_ready", t)))
             log_to_console(f"[번역] 번역할 문장이 있는 문단 {sum(1 for s in segments if s['text'] in raw_texts)}개")
