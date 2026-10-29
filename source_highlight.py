@@ -107,6 +107,8 @@ FOLLOW_FETCH_S = 1.0                  # 따라 읽기(2026-10-28 리규형님 �
 FOLLOW_CHUNK_CHARS = 2000             # 따라 읽기 — 빈 줄 문단 앱(메모장)은 끝점을 이만큼씩 늘려 가져온다(측정 스크립트와 같은 값)
 FOLLOW_WEB_FRAMEWORK = "Chrome"       # FrameworkId — 크로미움(Aside·웨일·크롬·Electron 앱)이면 웹 문단 칸 단위.
                                       # 2026-10-28 실측: Aside·웨일 모두 "Chrome"(따라 읽기 로그 "틀=")
+FOLLOW_SKIP_SHORT = 8                 # 따라 읽기(2026-10-29 리규형님 버튼): 한글 없는 이 글자 수(공백 빼고) 이하 칸은 건너뛴다 —
+                                      # 메시지 아래 아이콘 이름·시각(Claude 화면·잔디 실측 2~8자). "OK" 같은 짧은 영어 메시지도 빠진다
 TELEGRAM_HISTORY_CLASS = "HistoryInner"   # 텔레그램 메시지 목록의 ClassName("class HistoryInner" 로 온다 — 실측).
                                           # 왼쪽 대화 목록(Dialogs::InnerWidget)의 항목도 "선택됨"이 되므로 이 목록 안만 본다
 
@@ -134,6 +136,9 @@ def _ignorable(c):
 def _squash(text):
     """무시하는 글자를 모두 뺀 글(범위 검증 비교용)."""
     return "".join(c for c in text if not _ignorable(c))
+
+
+_HANGUL = re.compile("[ᄀ-ᇿ㄰-㆏가-힣]")   # 한글 있음 — translation.py _HANGUL 과 같은 범위(번역 여부와 같은 기준)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -374,6 +379,43 @@ def uia_on_screen(arr, view):
         if x <= vr and x + max(w, 0) >= vl and y < vb and y + h > vt:
             return True
     return False
+
+
+def box_of(rects):
+    """[(왼, 위, 오른, 아래)] → 모두 감싼 상자 하나. 비면 None."""
+    if not rects:
+        return None
+    return (min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects), max(r[3] for r in rects))
+
+
+def follow_block_verdict(base, arr, text):
+    """따라 읽기 — 고른 문단 아래 칸 하나를 읽을지(2026-10-29 리규형님 버튼 "대화 영역 끝 + 아이콘·시각 건너뜀").
+
+    base = 고른 문단의 감싼 상자 (왼, 위, 오른, 아래)(rects_from_uia → box_of) 또는 None, arr = 그 칸의
+    GetBoundingRectangles 원시 배열, text = 그 칸 글.
+    돌려줌: "stop_above"(고른 문단보다 위로 튐) · "stop_aside"(가로로 안 겹침 — 옆 패널) · "skip_short" · "take".
+    왜 위치로 보나: 잔디는 화면 전체가 스크롤 상자 하나라 접근성 정보에 대화 영역 경계가 없다(2026-10-29 실측).
+      Claude 화면(Aside)은 마지막 메시지 뒤로 아이콘 이름 → 위쪽 툴바 → 입력창 → 오른쪽 예약 패널 순으로 이어졌다.
+    위로 튐은 폭 1px 사각형까지 본다: 칸 끝이 다음 칸 첫머리에 걸리면 그 자리에 폭 1px 사각형이 붙는다(머리말).
+      Claude 화면 넷째 칸(아이콘 줄 끝)은 다음 칸이 위쪽 툴바라 그 1px 이 위에 있었다 — 여기서 멈춘다.
+      옆으로 비켜남은 글자 사각형(rects_from_uia — 1px 뺌)만 본다(1px 은 다음 칸 자리라 이 칸의 가로 위치가 아니다).
+    위치를 모르는 칸(화면 밖 — 빈 배열)은 위치를 보지 않는다(스크롤해야 보이는 긴 글을 자르지 않게).
+    짧은 칸: 위치를 본 다음, 한글이 없고 공백 뺀 글자가 FOLLOW_SKIP_SHORT 이하면 건너뛴다(빈 칸 포함).
+    """
+    if base is not None and arr:
+        bl, bt, br, _bb = base
+        vals = list(arr)
+        for k in range(0, len(vals) - 3, 4):
+            y, h = vals[k + 1], vals[k + 3]
+            if h > 0 and y + h <= bt:
+                return "stop_above"
+        box = box_of(rects_from_uia(arr))
+        if box is not None and (box[2] <= bl or box[0] >= br):
+            return "stop_aside"
+    squashed = _squash(text)
+    if len(squashed) <= FOLLOW_SKIP_SHORT and not _HANGUL.search(squashed):
+        return "skip_short"
+    return "take"
 
 
 def clip_rects(rects, bounds):
@@ -1010,7 +1052,7 @@ class _UiaWorker:
         아래 글: 크로미움은 범위째 다음 문단으로(Move — 글 끝에서 0. 끝점 늘리기는 글 끝에서 "움직였다"면서 같은 글을 수천 번
               되풀이했다 — Aside 실측), 그 밖은 끝점을 FOLLOW_CHUNK_CHARS 씩. 걸음마다 출발점이 정말 나아갔는지·같은 글 되풀이를
               보고 멈춘다. 문서 전체 범위(DocumentRange)는 쓰지 않는다.
-        돌려줌: {"id", "inside", "web", "framework", "para", "all", "complete", "pieces"} 또는 None(선택·글 요소 없음,
+        돌려줌: {"id", "inside", "web", "framework", "para", "all", "complete", "pieces", "stop", "skipped"} 또는 None(선택·글 요소 없음,
           문단 찾기가 시간 안에 안 끝남). para = 그 문단 글, all = 그 문단부터 가져온 끝까지 — 웹은 문단 칸을 빈 줄로 이어 붙인다
           (읽기 쪽 문단 = 빈 줄 사이). complete = 글 끝까지 가져왔나(False 면 FOLLOW_FETCH_S 에서 끊김).
         """
@@ -1035,9 +1077,10 @@ class _UiaWorker:
                   and call("CompareEndpoints", para.CompareEndpoints, E, sel, E) >= 0)
         para_raw = call("GetText", para.GetText, -1) or ""
         if web:
-            pieces, end, complete = self._web_blocks_after(para, deadline)
+            pieces, end, complete, stop, skipped = self._web_blocks_after(para, deadline)
         else:
             pieces, end, complete = self._chunks_after(para, deadline)
+            stop, skipped = ("end" if complete else "time"), 0
         whole = call("Clone", para.Clone)
         if end is not None:
             call("MoveEndpointByRange", whole.MoveEndpointByRange, E, end, E)
@@ -1050,7 +1093,8 @@ class _UiaWorker:
         self._follow = {"id": self._follow_id, "doc": doc, "sel": sel,
                         "para": (para, para_raw), "all": (whole, para_raw + "".join(pieces))}
         return {"id": self._follow_id, "inside": inside, "web": web, "framework": framework,
-                "para": para_text, "all": all_text, "complete": complete, "pieces": len(pieces)}
+                "para": para_text, "all": all_text, "complete": complete, "pieces": len(pieces),
+                "stop": stop, "skipped": skipped}
 
     def _expand_to_blank_lines(self, r, deadline):
         """r(선택 복제)을 빈 줄 사이 문단으로 넓힌다 — 줄 단위로 위·아래 한 줄씩 보며 빈 줄·글 끝·제자리에서 멈춘다.
@@ -1088,26 +1132,36 @@ class _UiaWorker:
         return True
 
     def _web_blocks_after(self, para, deadline):
-        """para 다음 문단 칸부터 하나씩(Move). 돌려줌: (글 목록, 마지막 칸 범위 또는 None, 글 끝까지 왔나)."""
+        """para 다음 문단 칸부터 하나씩(Move). 칸마다 화면 위치를 보고(follow_block_verdict — 2026-10-29) 고른 문단보다
+        위로 튀거나 옆으로 비켜난 칸에서 멈추고, 한글 없는 짧은 칸(아이콘 이름·시각)은 건너뛴다.
+        돌려줌: (글 목록, 마지막으로 모은 칸 범위 또는 None, 글 끝까지 왔나, 멈춘 이유, 건너뛴 칸 수).
+        멈춘 이유: "end"(글 끝·제자리·되풀이) · "stop_above" · "stop_aside" · "time"(FOLLOW_FETCH_S)."""
         U = self._U
         call = self._call
         S, PARA = U.TextPatternRangeEndpoint_Start, U.TextUnit_Paragraph
+        base = box_of(rects_from_uia(call("GetBoundingRectangles", para.GetBoundingRectangles)))
         cur = call("Clone", para.Clone)
-        pieces, last, prev = [], None, None
+        pieces, last, prev, skipped = [], None, None, 0
         while self._clock() <= deadline:
             before = call("Clone", cur.Clone)
             if call("Move", cur.Move, PARA, 1) == 0:
-                return pieces, last, True
+                return pieces, last, True, "end", skipped
             call("ExpandToEnclosingUnit", cur.ExpandToEnclosingUnit, PARA)
             if call("CompareEndpoints", cur.CompareEndpoints, S, before, S) <= 0:
-                return pieces, last, True                            # 글 끝에서 제자리
+                return pieces, last, True, "end", skipped            # 글 끝에서 제자리
             text = call("GetText", cur.GetText, -1) or ""
             if text == prev:
-                return pieces, last, True                            # 같은 칸 되풀이(글 끝 — Aside 실측)
+                return pieces, last, True, "end", skipped            # 같은 칸 되풀이(글 끝 — Aside 실측)
             prev = text
+            verdict = follow_block_verdict(base, call("GetBoundingRectangles", cur.GetBoundingRectangles), text)
+            if verdict.startswith("stop"):
+                return pieces, last, True, verdict, skipped
+            if verdict == "skip_short":
+                skipped += 1
+                continue
             pieces.append(text)
             last = call("Clone", cur.Clone)
-        return pieces, last, False
+        return pieces, last, False, "time", skipped
 
     def _chunks_after(self, para, deadline):
         """para 끝부터 끝점을 FOLLOW_CHUNK_CHARS 씩 늘려 가져온다. 돌려줌: (글 목록, 마지막 끝 범위 또는 None, 글 끝까지 왔나)."""
@@ -1992,7 +2046,9 @@ class SourceHighlighter:
         """(Tk 메인) 따라 읽기 창(2026-10-28)용 — 지금 선택이 든 문단과 그 아래 글을 묻는다(_UiaWorker._follow_text).
 
         결과는 나중에 Tk 메인에서 on_done(result): {"id", "inside"(한 문단 안에서 골랐나), "web", "framework",
-        "para"(그 문단 글), "all"(그 문단부터 글 끝까지 — 아래 글은 FOLLOW_FETCH_S 안에 가져온 데까지), "complete", "pieces"}.
+        "para"(그 문단 글), "all"(그 문단부터 글 끝까지 — 아래 글은 FOLLOW_FETCH_S 안에 가져온 데까지), "complete", "pieces",
+        "stop"(멈춘 이유 — "end"·"stop_above"·"stop_aside"·"time", 2026-10-29), "skipped"(건너뛴 짧은 칸 수)}.
+        크로미움은 고른 문단보다 위로 튀거나 옆으로 비켜난 칸에서 멈춘다(follow_block_verdict — 옆 패널·입력창을 읽지 않게).
         모르면(글 요소·선택 없음, 느림, 막혀 있음) None. 그 범위로 칠하려면 begin(…, area=(result["id"], "para"|"all")).
         """
         self._check_thread("query_follow_text")

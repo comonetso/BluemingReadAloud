@@ -357,6 +357,8 @@ class FakeDoc:
         self.calls = []
         self.forbidden = []
         self.hook = None           # hook(이름) — 호출 직전에 불린다(지연·오류 흉내)
+        self.line_dx = {}          # 줄 번호 → 가로로 옮김(옆 패널 흉내 — 따라 읽기 위치 판정)
+        self.line_dy = {}          # 줄 번호 → 세로로 옮김(위로 튀는 칸 흉내)
         self.lock = threading.Lock()
         self.pos = []
         line = col = 0
@@ -392,7 +394,8 @@ class FakeDoc:
             if not (self.scroll <= line < self.scroll + self.VIS):
                 continue            # 화면 밖 줄은 빠진다(크로미움 실측과 같음)
             lo, hi = by_line[line]
-            out += [self.X0 + lo * self.CW, self.Y0 + (line - self.scroll) * self.LH, (hi - lo + 1) * self.CW, self.LH]
+            out += [self.X0 + lo * self.CW + self.line_dx.get(line, 0),
+                    self.Y0 + (line - self.scroll) * self.LH + self.line_dy.get(line, 0), (hi - lo + 1) * self.CW, self.LH]
         return tuple(float(v) for v in out)
 
     def expected_rects(self, s, e):
@@ -1647,6 +1650,87 @@ class FollowTextTest(unittest.TestCase):
         self.hl.begin(r["para"], segs, lambda ok, why: self.results.append((ok, why)), area=(r["id"], "para"))
         self.assertTrue(wait(self.root, lambda: self.results))
         self.assertEqual(self.results[-1], (False, "follow_lost"))
+
+    # 2026-10-29 리규형님 버튼: 대화 영역 끝에서 멈추고 아이콘 이름·시각(한글 없는 짧은 칸)은 건너뛴다
+    PANEL_BLOCKS = ["[문단 1] 첫 문단입니다.", "[문단 2] 둘째 문단입니다.", "Copy", "4:40 PM",
+                    "[문단 3] 셋째 문단입니다.", "[패널] 예약 작업 설명입니다.", "[문단 4] 넷째 문단입니다."]
+
+    def test_web_skips_short_blocks_and_stops_at_side_panel(self):
+        self.make("\n".join(self.PANEL_BLOCKS) + "\n", "첫 문단")
+        self.doc.line_dx[5] = 2000             # 패널 줄 — 오른쪽 패널(가로로 안 겹침)
+        r = self.ask()
+        b = self.PANEL_BLOCKS
+        self.assertEqual(r["all"], "\n\n".join([b[0], b[1], b[4]]), "아이콘 이름·시각은 빼고, 패널 앞에서 멈춘다")
+        self.assertEqual((r["stop"], r["skipped"], r["pieces"], r["complete"]), ("stop_aside", 2, 2, True))
+        self.assertEqual(self.doc.forbidden, [])
+
+    def test_web_stops_when_block_jumps_above(self):
+        self.make("\n".join(self.PANEL_BLOCKS) + "\n", "첫 문단")
+        self.doc.line_dy[5] = -1000            # 패널 줄 — 화면 위쪽(고른 문단보다 위)
+        r = self.ask()
+        self.assertEqual(r["stop"], "stop_above")
+        self.assertNotIn("[패널]", r["all"])
+        self.assertNotIn("[문단 4]", r["all"])
+
+    def test_web_end_reason_without_panel(self):
+        self.make(WEB_UIA, "굵은")
+        r = self.ask()
+        self.assertEqual((r["stop"], r["skipped"]), ("end", 0))
+
+    def test_begin_with_area_after_skipped_blocks(self):
+        self.make("\n".join(self.PANEL_BLOCKS) + "\n", "첫 문단")
+        self.doc.line_dx[5] = 2000
+        r = self.ask()
+        segs = readaloud_text.split_paragraphs_for_reading(r["all"], "ko")
+        self.hl.begin(r["all"], segs, lambda ok, why: self.results.append((ok, why)), area=(r["id"], "all"))
+        self.assertTrue(wait(self.root, lambda: self.results))
+        self.assertEqual(self.results[-1], (True, "ok"), "건너뛴 짧은 칸이 범위 사이에 끼어도 칠할 자리를 찾는다")
+        self.hl.highlight(2)                   # 셋째 문단 = 짧은 칸 둘 뒤
+        s = self.doc.text(0, len(self.doc.units)).index(self.PANEL_BLOCKS[4])
+        want = self.doc.expected_rects(s, s + len(self.PANEL_BLOCKS[4]))
+        self.assertTrue(wait(self.root, lambda: self.overlays and self.overlays[-1].shows
+                             and self.overlays[-1].shows[-1] == want), "셋째 문단을 칠한다")
+
+
+class FollowBlockVerdictTest(unittest.TestCase):
+    """follow_block_verdict — 2026-10-29 실측 위치값(측정 스크립트 probe_follow, 글은 길이만 남겨 글은 지어 넣음).
+    배열은 GetBoundingRectangles 원시 값([왼, 위, 너비, 높이] 이어짐), 폭 1 은 다음 칸 첫머리 자리."""
+
+    CLAUDE_BASE = sh.box_of(rects_from_uia([427, 691, 902, 87]))       # Aside 의 Claude 대화 — 고른 문단(145자)
+    JANDI_BASE = sh.box_of(rects_from_uia([-1484, 817, 87, 16]))       # 잔디 — 고른 메시지(13자)
+
+    def v(self, base, arr, text):
+        return sh.follow_block_verdict(base, arr, text)
+
+    def test_claude_last_message_then_icons_then_toolbar(self):
+        b = self.CLAUDE_BASE
+        self.assertEqual(self.v(b, [427, 757, 915, 96], "가" * 90), "take", "마지막 문단(90자)")
+        self.assertEqual(self.v(b, [436, 832, 38, 21, 473, 832, 1, 21], "Retry"), "skip_short", "아이콘 이름(5자)")
+        self.assertEqual(self.v(b, [462, 832, 51, 21, 482, 821, 1, 19], "4:40 PM"), "skip_short", "시각(7자)")
+        self.assertEqual(self.v(b, [482, 821, 57, 19, 368, 654, 1, 18], "Edit reply"), "stop_above",
+                         "아이콘 줄 끝 칸 — 끝의 1px(다음 칸 첫머리)이 위쪽 툴바")
+        self.assertEqual(self.v(b, [368, 654, 72, 18], "Some title"), "stop_above", "위쪽 툴바")
+
+    def test_claude_routine_panel(self):
+        self.assertEqual(self.v(self.CLAUDE_BASE, [1538, 187, 226, 19], "예약 작업 설명" * 8), "stop_above")
+        top_base = (427, 100, 1329, 150)      # 고른 문단이 화면 맨 위면 패널은 아래 — 옆이라 멈춘다
+        self.assertEqual(self.v(top_base, [1538, 187, 226, 19], "예약 작업 설명" * 8), "stop_aside")
+
+    def test_jandi_time_beside_message(self):
+        self.assertEqual(self.v(self.JANDI_BASE, [-1377, 815, 21, 12], "오후"), "stop_aside", "메시지 옆 시각")
+
+    def test_off_screen_block_has_no_position(self):
+        self.assertEqual(self.v(self.CLAUDE_BASE, [], "화면 밖 긴 문단입니다"), "take", "스크롤해야 보이는 글은 자르지 않는다")
+        self.assertEqual(self.v(self.CLAUDE_BASE, (), "Close"), "skip_short")
+        self.assertEqual(self.v(None, [1538, 187, 226, 19], "고른 문단 위치 모름"), "take")
+
+    def test_short_rule_edges(self):
+        n = sh.FOLLOW_SKIP_SHORT
+        self.assertEqual(n, 8)
+        self.assertEqual(self.v(None, [], "OK thanks"), "skip_short", "공백 빼고 8자")
+        self.assertEqual(self.v(None, [], "OK thanks!"), "take", "9자")
+        self.assertEqual(self.v(None, [], "네"), "take", "한글은 짧아도 읽는다")
+        self.assertEqual(self.v(None, [], " \n "), "skip_short", "빈 칸")
 
 
 if __name__ == "__main__":

@@ -107,7 +107,18 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    at most `FOLLOW_FETCH_S` = 1 s (user decision). Chromium (`FrameworkId` "Chrome" — measured in Aside/Whale) uses UIA
    paragraph units (block, `<br>` line, list item) and walks down with `Move` (stops on 0 / no progress / repeated text —
    Aside repeated the last block thousands of times when the end point was stretched instead); other apps (Notepad) use
-   blank lines (line walk) and 2000-character end-point steps. No `DocumentRange`. If the selection lies inside that
+   blank lines (line walk) and 2000-character end-point steps. No `DocumentRange`.
+   **Where Chromium stops** (2026-10-29 user decision "end of the conversation area + skip icon names and times"): in a chat
+   screen the walk went on past the last message into icon names, the toolbar, the input box and Claude's "Routines" side
+   panel (measured: Claude page in Aside, Jandi). UIA shows no area boundary (Jandi = one scroll box for the whole window),
+   so each block is judged by position (`follow_block_verdict`): stop when any rectangle — the 1 px one included, it marks
+   the next block's start — lies wholly above the chosen paragraph's top (`stop_above`), or when its glyph rectangles do not
+   overlap the chosen paragraph horizontally (`stop_aside`); a block with no rectangles (off screen) is not judged by
+   position. Then a block without Hangul whose text is at most `FOLLOW_SKIP_SHORT` = 8 characters without spaces is skipped
+   (icon names, "4:40 PM"; short English messages such as "OK" too). Result keys `stop` / `skipped`, shown in the
+   `[따라 읽기]` console line. Known limits: an input box right below the chosen paragraph is read; two-column text stops at
+   the end of the first column. The Chrome extension was asked to apply the same rule its own way (peer_mail d65b007f).
+   If the selection lies inside that
    paragraph → the window; choice → `speak_text(all or para, hl_area=(id, ...))` (web blocks joined with blank lines).
    Otherwise (several paragraphs, no TextPattern e.g. Telegram, unknown) → `speak_text(clipboard text)` as before.
 3. **`speak_text()`** — `readaloud_text.split_paragraphs_for_reading()` (2026-10-28, Paseo plugin rules): paragraphs =

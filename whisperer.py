@@ -3625,6 +3625,9 @@ def _follow_dialog_key(key):
     if dlg is not None:
         dlg.press_key(key)
 
+# 따라 읽기 로그의 "멈춤" — SourceHighlighter.query_follow_text 결과 "stop"(2026-10-29)
+_FOLLOW_STOP_TEXT = {"end": "글 끝", "time": "1초", "stop_above": "위로 튐", "stop_aside": "옆으로 비켜남"}
+
 def _speak_or_ask_follow(text):
     """(Tk 메인, read_selected_text 가 부름) 고른 글을 읽는다 — 한 문단 안에서 골랐으면 먼저 따라 읽기 창을 띄운다."""
     global _follow_ask_seq
@@ -3649,10 +3652,12 @@ def _speak_or_ask_follow(text):
             log_to_console(f"[따라 읽기] 묻지 않고 고른 글을 읽습니다({why} · {took:.2f}초)")
             speak_text(text)
             return
+        stop = _FOLLOW_STOP_TEXT.get(result.get("stop"), result.get("stop") or "?")
         log_to_console(f"[따라 읽기] 창을 띄웁니다 — 틀={result.get('framework') or '?'} "
                        f"{'웹 문단 칸' if result.get('web') else '빈 줄 문단'} · 문단 {len(result['para'])}자 · "
                        f"끝까지 {len(result['all'])}자(아래 {result.get('pieces', 0)}조각"
-                       f"{'' if result.get('complete') else ', 1초에서 끊음'}) · 가져오기 {took:.2f}초")
+                       f"{'' if result.get('complete') else ', 1초에서 끊음'}) · 멈춤 {stop}"
+                       f" · 짧은 칸 건너뜀 {result.get('skipped', 0)} · 가져오기 {took:.2f}초")
         _show_follow_dialog(result, text)
 
     hl.query_follow_text(done)

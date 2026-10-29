@@ -1292,7 +1292,7 @@ _GLUE_FUNCS = ["stop_current_playback", "_make_tts_event_handler", "speak_text",
                "_paragraphs_of", "_para_index", "_read_key_action",
                # 따라 읽기 창(2026-10-28) — read_selected_text·키 필터가 부른다
                "_close_follow_dialog", "_follow_dialog_key", "_speak_or_ask_follow", "_show_follow_dialog"]
-_GLUE_VARS = ["_tts_state_lock"]
+_GLUE_VARS = ["_tts_state_lock", "_FOLLOW_STOP_TEXT"]
 
 
 class _HookedGlobals(dict):
