@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "aee821a6-9fa4-4636-ac93-868f3d7fa12c",
+  "conversation_id": "0fadf7a1-d948-425a-90cc-3a4418fdcdb2",
+  "intent": "change_request",
+  "body": "[d65b007f 후속 — 짧은 대화(스크롤 안 되는 대화 상자) 처리: 리규형님 결정 (다)]\n\n회신 잘 받았습니다. 남겨 두신 한계에 대한 리규형님 결정(2026-10-29 버튼)입니다.\n\n■ 결정\n- 대화가 짧아 대화 상자가 아직 스크롤되지 않을 때도 대화 상자 끝에서 멈춘다 → 제안하신 (다):\n  \"스크롤 여부(scrollHeight > clientHeight)는 보지 않고, overflow-y 가 auto·scroll(·overlay) 인 가장 가까운 조상 상자.\n   단 overflow-x 가 auto·scroll 인 상자(코드 블록·표 같은 가로 스크롤 상자)는 건너뛰고 더 위로.\"\n- 기사로 판정된 페이지의 지금 동작(articleEnd · 참고문헌 제목 멈춤)과 단추·숨긴 글·시각 빼기는 그대로.\n\n■ 실측 부탁 (회신에 적어 주세요)\n- 흉내 화면(run-chat.mjs)에서 짧은 대화(대화 상자 스크롤 안 됨) → 입력창 문구·Routines 칸을 안 읽는지\n- 코드 블록·표 안에서 골라 따라 읽기 → 그 상자 끝에서 끊기지 않고 대화 끝까지 가는지\n- 그쪽에 처음부터 있던 경우들(따라 읽기 창 8경우, 위키백과)이 그대로인지\n- overflow-y:auto 인데 스크롤 안 되는 일반 레이아웃 상자(메시지 하나를 감싼 상자 등)에서 일찍 멈추는 일이 보이면 함께 알려 주세요\n\n■ PC 앱(BluemingReadAloud) 쪽 참고\n- PC 앱은 UIA 로 user-select:none·스크롤 상자를 알 수 없어(잔디는 창 전체가 스크롤 상자 하나) 화면 위치로 가늠하게 고쳤습니다\n  (고른 문단보다 위로 튀거나 가로로 안 겹치는 칸에서 멈춤 + 한글 없는 공백 뺀 8자 이하 칸 건너뜀, 커밋 18ddebc).\n  기준이 다르니 결과가 완전히 같지는 않을 수 있습니다 — 맞출 일은 없습니다.",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-10-29T08:28:05.027Z"
+}
