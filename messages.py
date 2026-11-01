@@ -383,6 +383,142 @@ messages = {
     "follow_only": {
         "ko": "이 말만 읽기",
         "en": "Read this only"
+    },
+    # ── 읽기 사용량 (2026-11-01 — tts_usage.py, whisperer.show_usage_dialog) ──
+    # 설정 창 목소리 칸 "Zephyr · Chirp 3 HD · 100만 자 30달러 (이번 달 PC 앱 12,345자)" — Paseo 설정 문구
+    # (client/settingsI18n.ts speechVoicePrice·speechVoiceUsage)와 같은 말, 괄호 안 이름만 이 앱
+    "voice_price": {
+        "ko": "100만 자 {}달러",
+        "en": "${} per 1M chars"
+    },
+    "voice_usage": {
+        "ko": "이번 달 PC 앱 {}자",
+        "en": "this month, PC app {} chars"
+    },
+    "btn_usage": {
+        "ko": "읽기 사용량",
+        "en": "Reading Usage"
+    },
+    "usage_title": {
+        "ko": "읽기 사용량",
+        "en": "Reading Usage"
+    },
+    "usage_heading": {
+        "ko": "이번 달 읽기 사용량 — Google 결제 달 {}",
+        "en": "Reading usage this month — Google billing month {}"
+    },
+    "usage_period": {
+        "ko": "{} ~ {}  (Google 결제 달은 미국 태평양 시간으로 나뉩니다)",
+        "en": "{} – {}  (Google billing months follow US Pacific time)"
+    },
+    "usage_col_kind": {
+        "ko": "종류",
+        "en": "Type"
+    },
+    "usage_col_paseo": {
+        "ko": "Paseo",
+        "en": "Paseo"
+    },
+    "usage_col_app": {
+        "ko": "PC 앱",
+        "en": "PC app"
+    },
+    "usage_col_extension": {
+        "ko": "크롬 확장",
+        "en": "Chrome ext."
+    },
+    "usage_col_total": {
+        "ko": "합계",
+        "en": "Total"
+    },
+    "usage_col_free": {
+        "ko": "월 무료분",
+        "en": "Free / month"
+    },
+    "usage_col_left": {
+        "ko": "남은 무료분",
+        "en": "Free left"
+    },
+    "usage_left": {
+        "ko": "{}자 남음",
+        "en": "{} left"
+    },
+    "usage_over": {
+        "ko": "{}자 넘음 · 약 {}달러",
+        "en": "{} over · about ${}"
+    },
+    "usage_paseo_ok": {
+        "ko": "Paseo — PC·서버 합계, 갱신 {}",
+        "en": "Paseo — PC and servers, updated {}"
+    },
+    "usage_paseo_stale": {
+        "ko": "    못 읽은 서버(지난 값 그대로): {}",
+        "en": "    Servers not reached (last values kept): {}"
+    },
+    "usage_paseo_missing": {
+        "ko": "Paseo — 기록 파일이 없습니다. Paseo PC 데몬이 내보내면 보입니다(합계에서 빠짐).",
+        "en": "Paseo — no usage file yet; it appears once the Paseo PC daemon exports it (left out of the total)."
+    },
+    "usage_paseo_broken": {
+        "ko": "Paseo — 기록 파일을 읽지 못했습니다(합계에서 빠짐).",
+        "en": "Paseo — could not read the usage file (left out of the total)."
+    },
+    "usage_paseo_other_month": {
+        "ko": "Paseo — 아직 이번 달 기록이 없습니다(마지막 {}, 갱신 {} — 합계에서 빠짐).",
+        "en": "Paseo — no record for this month yet (last {}, updated {} — left out of the total)."
+    },
+    "usage_app_note": {
+        "ko": "PC 앱 — 이 PC 의 BluemingReadAloud(개발 모드·설치본 합계)",
+        "en": "PC app — BluemingReadAloud on this PC (dev run and installed app together)"
+    },
+    "usage_ext_heading": {
+        "ko": "크롬 확장 — 브라우저마다",
+        "en": "Chrome extension — per browser"
+    },
+    "usage_ext_row": {
+        "ko": "    {}: {} (받은 때 {})",
+        "en": "    {}: {} (received {})"
+    },
+    "usage_ext_none": {
+        "ko": "크롬 확장 — 이번 달 받은 기록이 없습니다.",
+        "en": "Chrome extension — nothing received this month."
+    },
+    "usage_receiver_on": {
+        "ko": "    받는 창구 {} 열림",
+        "en": "    Receiver {} open"
+    },
+    "usage_receiver_off": {
+        "ko": "    받는 창구를 열지 못했습니다 — 확장 몫을 받을 수 없습니다.",
+        "en": "    The receiver could not open — extension usage cannot be received."
+    },
+    "usage_note": {
+        "ko": "세 곳이 스스로 센 값입니다. 이 기능을 넣기 전에 쓴 양은 빠지고, 실제 청구는 Google Cloud 결제 화면이 정본입니다.",
+        "en": "Counted by the three apps themselves. Usage before this feature is not included; the Google Cloud billing page is the authority."
+    },
+    "usage_refresh": {
+        "ko": "새로고침",
+        "en": "Refresh"
+    },
+    "usage_close": {
+        "ko": "닫기",
+        "en": "Close"
+    },
+    # 사용량 알약(usage_pill.py, tts_usage.pill_text) — {종류} {세 곳 합계} / {월 무료분}. 넘으면 {합계}·{넘친 글자}·{달러}
+    "pill_under": {
+        "ko": "{} {} / {}자",
+        "en": "{} {} / {} chars"
+    },
+    "pill_over": {
+        "ko": "{} {}자 · {}자 넘음 · 약 {}달러",
+        "en": "{} {} chars · {} over · about ${}"
+    },
+    "pill_plain": {
+        "ko": "{} {}자",
+        "en": "{} {} chars"
+    },
+    "pill_no_paseo": {
+        "ko": " · Paseo 빠짐",
+        "en": " · without Paseo"
     }
 }
 

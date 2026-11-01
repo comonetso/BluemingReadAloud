@@ -28,7 +28,8 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   The old specs (`Yeogiaen_WhisperTyper.spec`, `Yeogiaen_STT_Typer*.spec`) are kept on disk until the user decides to remove them.
 - Unit tests: `python -m unittest discover -s tests` (engine, text splitting, whisperer glue extracted by AST —
   the tests never import `whisperer.py`; `tests/test_whisperer_selection.py` extracts the mouse hook and the
-  browser / Telegram checks the same way). Verification order used in this project:
+  browser / Telegram checks the same way; `tests/test_tts_usage.py` covers the billing month, counting, the extension
+  records, Paseo's file and a real receiver on a random port). Verification order used in this project:
   edit → `py_compile` → unit tests → dev run → user checks it for real → build (only after the user says it passed).
 - Check build success by the output file timestamp too, not only the exit code
   (`cmd > log 2>&1; echo ...` returns the exit code of `echo`).
@@ -75,6 +76,34 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   file as the extension's `js/english-words.js` ({word: SCOWL rank}, `readaloud_text.load_english_words`).
   `DICT_CASES` in the tests are the extension's own results (122 inputs × ko/en = 244 matched character by character via node).
   `PASEO_DICT_CASES` = the Paseo plugin's dictionary cases (it ported the same functions the same day).
+- **tts_usage.py** — this month's reading usage and the billing bridge (2026-11-01 user instruction via the Claude State Bar
+  conversation, peer_mail 188410e0): Paseo, this app and the Chrome extension share one Google billing account's free tier
+  (Chirp 3 HD 1M chars/month, then $30 per 1M; WaveNet 4M free, $4 per 1M), so the user wants the three totals in one place
+  to know when to switch Zephyr → WaveNet A. Counting = the Paseo rules (`server/presentation/tts.ts countUsage`): every
+  successful request's sent `text` or `markup` length in code points (spaces, line breaks, pause tags included; a markup
+  rejected with 400 is not counted, the plain retry is), preview included. Kind keys `chirp3hd` / `wavenet` (other voices:
+  type name lower-case). Month = Google billing month in US Pacific time (`billing_month` — DST rule written out, Windows
+  Python has no tzdata; tests hold node `Intl` results). File `%APPDATA%\BluemingReadAloud\tts-usage.json`
+  `{"v":1,"months":{"2026-11":{"chirp3hd":N,"wavenet":N}}}`, 13 months, temp file + rename — shared by the dev run and the
+  installed app (same key). Paseo's share = `~/.paseo/claude-state-bar/tts-usage-all.json` written by the Paseo PC daemon
+  every 5 min (PC + three servers + staff daemons; read only, `state` ok / missing / broken / other_month). The extension's
+  share arrives at **`UsageReceiver` — HTTP on 127.0.0.1:51888 TCP** (same number as the single-instance UDP socket; TCP does
+  not clash), `POST /v1/tts-usage` `{"v":1,"source":"<install id>","label":"Aside","months":{…}}`, accepted only when
+  `Origin` starts with `chrome-extension://` (a web page cannot fake it), 16 KB max, each source's record replaced whole
+  (`%APPDATA%\BluemingReadAloud\tts-usage-extension.json`, at most 20 sources); `GET /v1/health`. Spec agreed with the
+  extension conversation (peer_mail 423b8e9a). `summarize()` → rows for the usage window.
+- **usage_pill.py** — the usage pill (2026-11-01 user request "I want to monitor it — money is going out"): **tray icon
+  left click** toggles it (a hidden `default=True, visible=False` pystray item, so the right-click menu keeps its five items;
+  the on/off state is saved as `usage_pill_visible`). Text = the selected voice kind's three-place total
+  "Chirp 3 HD 18,944 / 1,000,000자", red with chars over + dollars once over the free tier, " · Paseo 빠짐" when Paseo's file
+  is not this month's (`tts_usage.pill_text`). Draggable (system drag threshold), the dropped spot is kept as
+  `usage_pill_position` and clamped into the work area (`pill_position`); a click opens `show_usage_dialog` **right above
+  the pill**, right edges aligned, below it if there is no room (`popup_position` — user screenshot 2026-11-01; it used to
+  open on another monitor). The settings-dialog button opens it centred on the settings dialog's monitor. Window built like
+  the red dot (NOACTIVATE + TOOLWINDOW, `SW_SHOWNOACTIVATE`, no `-alpha`), round ends via `CreateRoundRectRgn`. Refresh: at
+  once on "usage_changed" (this app counted / the receiver accepted), and every `USAGE_TICK_MS` = 5 s while the pill or the
+  usage window is open (the usage window redraws only when its data changed). The receiver logs each rejection reason once
+  per run (`[사용량] 크롬 확장 기록 거절: origin_missing|origin_other|json|source|months|size|path|…`).
 - **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
   client are in its header. Voices are Korean only, so "primary language" = Hangul.
 - **messages.py** — Korean/English UI strings. Add every user-facing message to both `ko` and `en`.
@@ -189,7 +218,17 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 - **Settings dialog** (`show_tts_settings_dialog`): voice + preview, speed step (0.1 / 0.25 — the speed itself is in the
   bottom bar), hotkey, and a "General" group moved
   from the tray: language (한국어 / English — applied on Save, then the tray is rebuilt via `_apply_language`),
-  "Credentials" button (`show_api_key_dialog`), "Open Console" button (`open_console_window`). "Open README" was removed.
+  "Credentials" button (`show_api_key_dialog`), "Open Console" button (`open_console_window`), "Reading Usage" button
+  (`show_usage_dialog`, 2026-11-01). "Open README" was removed.
+  **Voices** (2026-11-01 "match the Paseo settings"): `KOREAN_VOICES` = the Paseo plugin's `FEATURED_GOOGLE_VOICES`, same
+  eight in the same order (Zephyr, Aoede, Callirrhoe, Despina, Kore, Leda, Wavenet-A, Wavenet-B — the last two are the
+  $4 tier); a saved voice outside the list is put first (Paseo `voiceOptions`). Each entry reads like Paseo's button:
+  "Zephyr · Chirp 3 HD · 100만 자 30달러 (이번 달 PC 앱 12,345자)" (`tts_usage.voice_label`, this app's own count per kind).
+  Preview text = Paseo `PREVIEW_TEXT.ko`, and the preview is counted.
+  **Reading Usage window** (`show_usage_dialog`): billing month and its local start/end, a row per kind — Paseo · PC app ·
+  Chrome extension · total · free tier · free left (or chars over + dollars, red) — then Paseo per host (+ hosts it could
+  not reach), the extension per browser, receiver state, and a note that these are self-counted (Google billing is the
+  authority). Not in the tray (fixed to five items).
 - **Red dot** (`selection_button.py` + `setup_selection_button()` / `setup_mouse_listener()` in whisperer.py):
   a pynput **mouse** listener feeds left press/release to `SelectionGestureDetector`; a drag (Windows `SM_CXDRAG`)
   or a double/triple-click release puts `("selection_button", "show", x, y)` on `gui_queue`; a single-click release puts
@@ -264,6 +303,8 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   tray list, so it can only be turned off by editing the file), `translate_enabled` and `translation_overlay_enabled`
   (both default true, in the settings dialog "General"). Boolean keys with non-boolean values are ignored.
   Settings printed to the console go through `_mask_keys` (key prefix + length only).
+- Reading usage is **not** in this file: `%APPDATA%\BluemingReadAloud\tts-usage.json` / `tts-usage-extension.json`
+  (tts_usage.py — shared by the dev run and the installed app).
 - `save_settings()` rewrites the whole file; keep `save_settings()` and `load_settings()` in sync when adding a key.
   Old keys (STT keys, the floating icon's `controller_position` / `controller_hidden`, `google_credentials_path`,
   `tts_settings.volume`) are ignored on load and dropped from the file at the next save.
@@ -330,6 +371,8 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   accepted by design. Measured after the change: clipboard 0.02 s, follow-read fetch 0.06 s (Notepad).
 - Single-instance port is **51888** (51889 in older docs was wrong). Changing the mutex name or port
   is a user decision — an old exe and a new exe could then run together and both catch the hotkey.
+  Since 2026-11-01 the same number is also a **TCP** listener on 127.0.0.1 (the extension usage receiver, tts_usage.py) —
+  the Chrome extension posts to it, so moving it means changing the extension too.
 - Do not register Windows reserved shortcuts (Win+L, Ctrl+Alt+Del, ...) as hotkeys. The code has no filter for this.
 - Keep the pynput `on_press`/`on_release` handlers free of I/O (Windows low-level hook timeout); hand work off with
   `root.after(...)` (keyboard) or `gui_queue.put(...)` (mouse).

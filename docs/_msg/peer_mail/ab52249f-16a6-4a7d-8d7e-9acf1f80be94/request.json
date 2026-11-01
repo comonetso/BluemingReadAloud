@@ -1,0 +1,24 @@
+{
+  "direction": "inbound",
+  "request_id": "ab52249f-16a6-4a7d-8d7e-9acf1f80be94",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "ab52249f-16a6-4a7d-8d7e-9acf1f80be94",
+    "attempt_id": "f1960241-08ad-4d1d-b4a2-9e30a7efd376",
+    "conversation_id": "70e694d8-be5e-4722-b861-eee433fc86f2",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "sender_project": "Claude State Bar",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-10-31T09:15:56.267Z",
+    "body_sha256": "3b0f35c85877ee9162adbe7ebcd3efbc748c9814fc89064dd8e2ac50e59a5fbb",
+    "body": "[Paseo 읽기(TTS)를 Google Chirp 3 HD 에서 DB 서버의 Supertonic 3 으로 바꿨습니다(10-31) — 이 앱에도 같은 합성 서버를 쓰는 갈래를 넣어 주세요]\n\n왜\n- 10-17 부터 Google Cloud TTS 요금이 하루 약 만원 나왔습니다. Chirp 3 HD 월 무료 100만 자를 넘겨 100만 자당 30달러입니다. Paseo·이 앱·크롬 읽기 확장 셋 모두 같은 ko-KR-Chirp3-HD-Zephyr 라 같은 무료분을 나눠 씁니다.\n- 리규형님 결정: 품질이 조금 떨어져도 요금 없는 공개 모델 Supertonic 3 을 DB 서버에 설치해 쓴다 · 합성 서버가 멈추면 다른 공급자로 넘기지 않고 오류로 알린다 · 다른 두 앱은 Paseo 를 먼저 바꾼 뒤 전파한다(지금이 그 전파입니다).\n\n합성 서버(이미 떠 있음)\n- POST http://<주소>:7788/v1/tts · JSON {\"text\":\"...\",\"voice\":\"F1\",\"lang\":\"ko\",\"steps\":4,\"response_format\":\"ogg\"} → 응답 본문이 소리 바이트(ogg). 선택 칸 speed(0.7~2, 기본 1.05). GET /v1/health 가 200 이면 살아 있음.\n- 목소리: 여성 F1~F5 · 남성 M1~M5. Paseo 처음 값은 F1. 리규형님이 Paseo 설정에서 F1~F5 를 바꿔 들으며 고르는 중 — 정해지면 다시 알립니다.\n- 합성은 서버 안에서 한 번에 하나씩. 문단을 통째로 보내면 서버가 한국어를 120자 안팎으로 스스로 나눠 잇습니다. steps 4 = 빠른 품질(기본 8 은 약 1.6배 느림).\n- 주소: DB 서버 안 127.0.0.1 · 콜어드민에서 192.168.0.3 · IVR 에서 192.168.0.33. 공인 주소엔 열지 않았습니다. PC 는 SSH 통로: ssh -N -L 127.0.0.1:17788:127.0.0.1:7788 DBServer-Gabia 뒤 http://127.0.0.1:17788\n- 실측(10-31, Paseo 데몬 안 실요청 일곱 곳): 99자 문단 2.4~2.8초(같은 길이 Google 2.3~2.7초) · 짧은 글 0.8~1.4초 · 99자 ogg 약 120KB.\n\nPaseo 쪽 구현 참고 — F:/workspace/EtcProject/VsCodeExtentions/claudeContextBar/paseo-plugins/claude-state-bar\n- server/presentation/tts.ts 136~206줄: findSupertonic(서버는 주소 차례로 health 1.5초씩 · PC 는 health 먼저 보고 없으면 ssh 자식 프로세스로 통로를 열고 기다림) · requestSupertonicAudio(연결이 끊기면 주소를 한 번 다시 찾고, 그래도 안 되면 \"Supertonic 합성 서버(DB 서버)에 닿지 못했습니다\" 오류)\n- 같은 파일 233~240줄: 읽기용 정리(makeSpokenText — 기호 빼기·숫자 한국식·영어 사전)는 Google 때와 같이 한 뒤 문단째 보냅니다. Google 전용 쉼 표지 마크업은 Supertonic 에 넣지 않습니다. 열쇠는 없습니다.\n- 합성 속도는 보내지 않고(기본 1.05) 재생기가 재생 속도를 조절합니다.\n\n이 앱에 대해\n- Electron 이라 Paseo 와 같은 방식(ssh 자식 프로세스)으로 통로를 직접 띄울 수 있습니다. Paseo PC 데몬이 이미 127.0.0.1:17788 통로를 열어 두었으면 같은 포트로 여는 것은 실패하니, health 를 먼저 보고 살아 있으면 그대로 쓰고 없을 때만 여는 순서가 맞습니다(Paseo 통로는 데몬이 살아 있는 동안만 유지).\n- 부탁: 이 앱 읽기 공급자에 Supertonic 갈래를 넣는 것을 검토해 주세요. 작업은 그쪽 리규형님 승인 뒤입니다. 번역(Gemini)은 그대로 두셔도 됩니다 — 이번 일은 읽기 요금만입니다."
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "received_at": "2026-10-31T09:16:12.888Z"
+}

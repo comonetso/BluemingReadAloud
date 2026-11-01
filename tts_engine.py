@@ -442,7 +442,7 @@ def _markup_supported(tts):
         return False
 
 
-def make_google_synthesize(client, tts, voice_name, sample_rate=SAMPLE_RATE, log=None):
+def make_google_synthesize(client, tts, voice_name, sample_rate=SAMPLE_RATE, log=None, on_sent=None):
     """Google Cloud TTS 로 조각 하나를 합성하는 함수 synthesize(text, rate) 를 만든다 (옛 _synthesize_chunk).
 
     client: texttospeech.TextToSpeechClient,  tts: texttospeech 모듈(요청 객체를 만드는 데 씀).
@@ -453,6 +453,9 @@ def make_google_synthesize(client, tts, voice_name, sample_rate=SAMPLE_RATE, log
         한 번 다시 요청한다. 인증·한도·시간 초과는 바로 실패(예전에는 어떤 예외든 평문으로 다시 요청했다).
     markup 은 readaloud_text.pauses_markup (tts-engines.js:542-550 이식, 기준 pausesMarkup 과 같은 규칙)이 만든다.
     설치된 라이브러리에 markup 필드가 없으면 처음부터 평문만 쓴다.
+    on_sent(sent): 요청이 성공할 때마다 실제로 보낸 글(markup 또는 text)로 부른다 — 이번 달 사용량 세기
+      (2026-11-01, tts_usage.py — Google 이 성공한 요청을 보낸 글자대로 매기는 것과 같게 센다. 거절된 markup 은 안 넘긴다).
+      합성 스레드에서 불린다. 여기서 난 예외는 읽기에 영향을 주지 않게 삼킨다.
     반환: int16 numpy 배열(24kHz) 또는 None(소리 없음). 요청 자체가 실패하면 예외가 올라간다.
     """
     import numpy as np
@@ -461,12 +464,20 @@ def make_google_synthesize(client, tts, voice_name, sample_rate=SAMPLE_RATE, log
     voice_type = voice_type_of(voice_name)
     use_markup = _markup_supported(tts)
 
+    def sent(text):
+        if on_sent is not None:
+            try:
+                on_sent(text)
+            except Exception as e:
+                log(f"[TTS] 사용량 세기 실패(읽기는 그대로): {e}")
+
     def synthesize_one(text, voice, audio_config):
         markup = readaloud_text.pauses_markup(text, voice_lang, voice_type) if use_markup else None
         if markup is not None:
             try:
                 resp = client.synthesize_speech(input=tts.SynthesisInput(markup=markup),
                                                 voice=voice, audio_config=audio_config)
+                sent(markup)
                 return pcm_from_linear16(resp.audio_content)
             except Exception as e:
                 if not _is_bad_request(e):
@@ -474,6 +485,7 @@ def make_google_synthesize(client, tts, voice_name, sample_rate=SAMPLE_RATE, log
                 log(f"[TTS] markup 요청이 거절되어(400) 평문으로 다시 요청합니다: {e}")
         resp = client.synthesize_speech(input=tts.SynthesisInput(text=text),
                                         voice=voice, audio_config=audio_config)
+        sent(text)
         return pcm_from_linear16(resp.audio_content)
 
     def synthesize(text, rate):

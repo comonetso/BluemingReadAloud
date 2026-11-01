@@ -1,0 +1,24 @@
+읽기 요금 브리지 — PC 앱 쪽 완료(코드·시험까지, 커밋·설치 전). 이 대화의 리규형님이 11-01 "멈추지 않고 끝까지"로 승인하셨습니다.
+
+1. Paseo 파일 — 제안 그대로 확정, 바꿀 것 없음
+- 위치 C:/Users/bluec/.paseo/claude-state-bar/tts-usage-all.json · 모양 지금 그대로(v·updatedAt·month·sources·total·stale) · 5분 주기 그대로.
+- 실제 파일(16:38·16:43 판)을 읽어 화면에 띄워 확인했습니다: 이번 달 Chirp 3 HD 9,450 → 9,943자, 서버별 값·갱신 시각이 그대로 보임.
+- PC 앱이 읽는 규칙(tts_usage.py read_paseo_usage): month 가 이번 결제 달과 다르면 합계에서 뺍니다(지난달 값을 이번 달로 보이지 않게, 화면에 "아직 이번 달 기록 없음"). total 을 합계에, sources 는 서버별 줄로, stale 은 "못 읽은 서버(지난 값 그대로)"로 보입니다. openai 칸은 Google 무료분과 무관해 화면에 넣지 않습니다.
+
+2. 크롬 확장에서 넘기는 길(크롬 확장 대화에 규격 보냄 — 요청 423b8e9a, 답 대기)
+- PC 앱이 내 PC 안에서만 열리는 받는 창구를 띄움: POST http://127.0.0.1:51888/v1/tts-usage (TCP — PC 앱 단일 실행 UDP 와 같은 번호, 부딪히지 않음). 확장 manifest 에 이미 "http://*/" 권한이 있어 새 권한 불필요.
+- Origin 이 chrome-extension:// 일 때만 받음(웹페이지가 숫자를 못 바꿔 넣게). 본문 {"v":1,"source":"<설치 id>","label":"Aside","months":{…}} — 확장 자기 누적 기록 그대로, PC 앱은 source 몫을 통째로 바꿔 넣음(브라우저마다 따로 더함).
+
+3. PC 앱 세는 법 = Paseo 와 같음
+- 성공한 요청의 보낸 text/markup 글자 수(코드 포인트), 400 거절 markup 은 안 셈, 미리 듣기 셈. 키 확인은 voices.list 라 글자를 보내지 않음(셀 것 없음).
+- 달 = 태평양 시간(서머타임 규칙 직접 계산 — node Intl 결과 22개와 맞춤). 파일 %APPDATA%\BluemingReadAloud\tts-usage.json, Paseo 와 같은 모양 {"v":1,"months":{…}} — Paseo 가 세 곳 합계를 보고 싶으면 이 파일을 읽으면 됩니다.
+
+4. 설정 UX 맞춤
+- 목소리 목록 = Paseo FEATURED_GOOGLE_VOICES 여덟 개, 같은 차례(남성 WaveNet·Neural2·Standard 는 뺌 — 저장돼 있으면 맨 앞에 붙여 유지).
+- 칸 글 "Zephyr · Chirp 3 HD · 100만 자 30달러 (이번 달 PC 앱 12,345자)", 미리 듣기 문장도 Paseo 와 같게. WaveNet A·B 는 markup 없이 평문(원래 그랬음).
+
+5. 세 곳 합계 화면 — 설정 창 "읽기 사용량" 버튼(트레이는 다섯 항목 고정이라 안 넣음)
+- 결제 달·한국 시각 범위(11-01 16:00 ~ 12-01 17:00), 종류별 Paseo·PC 앱·크롬 확장·합계·월 무료분·남은 무료분(넘으면 넘친 글자·달러, 빨강), 아래에 Paseo 서버별·확장 브라우저별·받는 창구 상태.
+
+끝난 것: tts_usage.py 새로 · tts_engine.make_google_synthesize on_sent · whisperer.py 설정 창·사용량 창·받는 창구 · 시험 411 통과(새 36) · 화면 캡처 한/영 확인.
+남은 것: ① 이쪽 리규형님 실사용 확인 → 설치 파일 → 설치 → 커밋. 설치본이 떠 있어 개발 모드는 아직 못 띄웠습니다. ② 새 설치본 전까지 PC 앱 몫은 0 으로 보입니다(11-01 16:00 이후 옛 설치본이 쓴 양은 빠짐). ③ 크롬 확장 쪽 보내기 구현(423b8e9a). ④ PC 앱 목소리를 WaveNet 으로 바꿀지는 리규형님 몫(지금 Zephyr).

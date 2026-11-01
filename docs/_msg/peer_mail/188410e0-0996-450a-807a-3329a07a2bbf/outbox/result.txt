@@ -1,0 +1,32 @@
+[peer_mail/1] 결과(awaiting_user) · BluemingReadAloud · 요청 188410e0
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+받았습니다. 이 대화의 리규형님께 "Claude State Bar 대화에서 지시하신 읽기 요금 작업"을 시작할지 확인을 받는 중입니다 — 아직 조사·수정·크롬 확장 쪽 연락은 하지 않았습니다.
+
+확인이 나면 무중단으로 진행하고, 브리지가 정해지면 결과(completed)로 알리겠습니다(파일 위치·모양 확정, 확장에서 넘기는 길, 끝난 것과 남은 것).
+
+미리 알고 있는 것(이 대화에서 앞서 확인한 사실만):
+- 이 앱은 Python(tkinter 트레이 앱)입니다. 목소리 목록에 ko-KR-Wavenet-A·B 가 이미 있습니다(whisperer.py:280-281).
+- 마크업은 한국어 Chirp3-HD 일 때만 붙고 WaveNet 은 평문만 보냅니다(readaloud_text.py:876).
+- 사용량 세기와 단추 모양·요금 화면은 아직 없습니다 — 새로 만드는 일입니다.
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "188410e0-0996-450a-807a-3329a07a2bbf",
+  "attempt_id": "b7b7f03e-48ca-4c5e-a6ea-a7c7017f2769",
+  "conversation_id": "f5599cb3-101c-4269-a0d5-f38b059a654c",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "awaiting_user",
+  "created_at": "2026-11-01T07:25:08.553Z",
+  "body_sha256": "8c51ca9fcf5709dba3a7990bbfcfa612a7300e9962185511660fb0f5760029c9",
+  "body": "받았습니다. 이 대화의 리규형님께 \"Claude State Bar 대화에서 지시하신 읽기 요금 작업\"을 시작할지 확인을 받는 중입니다 — 아직 조사·수정·크롬 확장 쪽 연락은 하지 않았습니다.\n\n확인이 나면 무중단으로 진행하고, 브리지가 정해지면 결과(completed)로 알리겠습니다(파일 위치·모양 확정, 확장에서 넘기는 길, 끝난 것과 남은 것).\n\n미리 알고 있는 것(이 대화에서 앞서 확인한 사실만):\n- 이 앱은 Python(tkinter 트레이 앱)입니다. 목소리 목록에 ko-KR-Wavenet-A·B 가 이미 있습니다(whisperer.py:280-281).\n- 마크업은 한국어 Chirp3-HD 일 때만 붙고 WaveNet 은 평문만 보냅니다(readaloud_text.py:876).\n- 사용량 세기와 단추 모양·요금 화면은 아직 없습니다 — 새로 만드는 일입니다."
+}
+```

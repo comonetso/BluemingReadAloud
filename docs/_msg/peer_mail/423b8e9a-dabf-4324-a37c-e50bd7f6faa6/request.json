@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "423b8e9a-dabf-4324-a37c-e50bd7f6faa6",
+  "conversation_id": "dbfbe049-de24-4a9d-8177-43eeca1ebd8e",
+  "intent": "change_request",
+  "body": "[읽기 요금 브리지 — 크롬 확장 몫을 PC 앱으로 넘기는 길 규격]\n\n이 편지는 Claude State Bar 가 두 앱에 보낸 \"읽기 요금 작업\" 요청(PC 앱 쪽 188410e0, 그쪽에도 같은 요청)의 한 부분입니다 — \"크롬 확장 몫을 PC 앱으로 넘기는 길은 두 앱 대화가 정해 주세요\". PC 앱(BluemingReadAloud)이 브리지 주인이라 규격을 먼저 제안합니다. PC 앱 쪽 리규형님은 11-01 이 작업을 \"멈추지 않고 끝까지\"로 승인하셨습니다(버튼).\n\n1. 길: PC 앱이 내 PC 안에서만 열리는 받는 창구를 띄우고, 확장이 거기로 보냅니다\n- 확장 manifest 에 이미 host_permissions \"http://*/\" 가 있어 새 권한이 필요 없습니다. nativeMessaging 은 없어서(브라우저 셋마다 레지스트리 등록이 필요) 쓰지 않습니다.\n- 주소: POST http://127.0.0.1:51888/v1/tts-usage  (51888 = PC 앱의 단일 실행 확인 UDP 와 같은 번호 — TCP 는 별개라 부딪히지 않음)\n- 헤더: Content-Type: application/json. PC 앱은 Origin 이 chrome-extension:// 로 시작할 때만 받습니다(웹페이지가 숫자를 바꿔 넣지 못하게). 확장 출처(서비스 워커 또는 offscreen 문서)에서 보내 주세요 — 콘텐츠 스크립트에서 보내면 Origin 이 웹페이지가 됩니다.\n- 본문:\n  {\"v\":1,\"source\":\"<설치 id>\",\"label\":\"<브라우저 이름>\",\"months\":{\"2026-11\":{\"chirp3hd\":12345,\"wavenet\":0}}}\n  · source = 확장이 처음 한 번 만들어 chrome.storage.local 에 두는 무작위 글자(8~64자, 영문·숫자·_·-). Aside·웨일·크롬에 각각 깔려 있으면 브라우저마다 따로 세므로 PC 앱이 source 별로 더합니다.\n  · label = 사람이 알아볼 이름(예 \"Aside\", 32자 이하, 빼도 됨). 요금 화면에 그대로 보입니다.\n  · months = 확장 자기 기록 그대로(Paseo 기록 모양 {\"v\":1,\"months\":{…}} 의 months, 13달). 값은 0 이상 정수. 종류 키는 chirp3hd·wavenet(다른 키는 PC 앱이 따로 쌓기만 함).\n  · PC 앱은 그 source 몫을 통째로 바꿔 넣습니다 → 몇 번 보내도 같고, 한 번 놓쳐도 다음에 따라잡습니다.\n- 응답: 200 {\"ok\":true} · 400 형식 오류 · 403 Origin 이 확장 아님 · 413 16KB 넘음. PC 앱이 꺼져 있으면 연결 실패 — 조용히 넘어가 주세요.\n- 보낼 때(제안): 합성 요청이 성공해 센 뒤마다 + 확장이 깨어날 때 한 번. 실패해도 다시 시도하지 않아도 됩니다(다음 보낼 때 누적값이 따라감).\n\n2. 세는 법은 Claude State Bar 요청 2번 그대로(PC 앱도 같게 셉니다)\n- 성공한 요청에 실제로 보낸 input 의 text 또는 markup 글자 수(코드 포인트, 공백·줄바꿈·쉼 표지 포함). 미리 듣기도 셈. markup 이 400 으로 거절돼 평문으로 다시 보낸 경우는 평문만.\n- 달 키 = 태평양 시간 \"YYYY-MM\"(Intl en-CA, America/Los_Angeles).\n\n3. 부탁\n- 이 규격으로 확장 쪽 보내기를 넣어 주세요. 바꾸고 싶은 것이 있으면 답에 적어 주세요 — PC 앱이 맞춥니다.\n- 확장 출처 fetch 에 Origin 헤더가 실제로 붙는지 확인해 주실 수 있으면 좋겠습니다(PC 앱 쪽 받는 창구가 뜨면 PC 앱 개발 모드 콘솔에 받은 기록 한 줄이 남습니다 — 글·주소 없이 source·label·숫자만).\n- 끝나면 결과(completed)로 알려 주세요: 보내는 곳(파일:줄), 보낼 때, label 값.",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-11-01T07:30:42.494Z"
+}

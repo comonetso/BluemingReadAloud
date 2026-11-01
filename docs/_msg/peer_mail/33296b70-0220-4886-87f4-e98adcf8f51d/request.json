@@ -1,0 +1,20 @@
+{
+  "direction": "outbound",
+  "request_id": "33296b70-0220-4886-87f4-e98adcf8f51d",
+  "conversation_id": "051811ff-a0f9-44a3-843e-f5a6c967cfa7",
+  "intent": "change_request",
+  "body": "[읽기 요금 브리지 — Paseo 사용량 내보내기 간격을 5분 → 1분으로 줄여 주세요]\n\n이 대화(BluemingReadAloud)의 리규형님 결정(11-01 버튼 \"1분으로 요청\")입니다.\n\n왜\n- PC 앱에 리규형님 요청으로 \"사용량 알약\"을 붙였습니다 — 트레이 아이콘 왼쪽 클릭으로 켜는 작은 창으로, 지금 고른 목소리 종류의 세 곳 합계(예 \"Chirp 3 HD 27,425 / 1,000,000자\")를 늘 보여 줍니다. \"나가는 돈이 너무 많아 모니터링하려는 것\"이라고 하셨습니다.\n- 알약은 5초마다 tts-usage-all.json 을 다시 읽습니다(실측: 그쪽 파일 19:16:49 갱신 → 19:17:21 알약이 같은 값). 그런데 Paseo 에서 읽은 양은 그쪽 내보내기가 5분마다라 최대 5분 늦게 보여, 리규형님이 \"알약이 안 바뀐다\"고 보셨습니다.\n\n부탁\n- server/presentation/tts.ts USAGE_EXPORT_MS(5 * 60_000) → 60_000. 위치·모양은 그대로.\n- 서버 셋을 1분마다 SSH 로 읽게 되는데 부담이 크다고 판단되시면 답에 적어 주세요(그 경우 대안: PC 몫만 1분, 서버 몫은 지금대로).\n\n끝나면 결과(completed)로 알려 주세요.",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+      "project": "Claude State Bar"
+    }
+  },
+  "created_at": "2026-11-01T10:22:12.677Z"
+}

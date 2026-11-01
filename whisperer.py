@@ -127,6 +127,8 @@ from messages import messages, get_message
 import readaloud_text
 import spoken_text      # 말할 글 다듬기 — Paseo 상태바 플러그인 규칙(2026-10-28)
 import tts_engine
+# 읽기 이번 달 사용량 세기 · 세 곳(Paseo·이 앱·크롬 확장) 요금 브리지(2026-11-01) — 표준 라이브러리만 쓴다
+import tts_usage
 # 주 언어가 아닌 문장 번역(2026-09-29) — requests 는 번역기를 만들 때(init_tts_client) 불러온다
 import translation
 
@@ -156,6 +158,15 @@ except Exception as _e:
     SelectionButton = None
     SelectionGestureDetector = None
     _selection_button_import_error = _e
+# 읽기 사용량 알약(usage_pill.py, 2026-11-01) — 빨간 점 모듈의 Win32 도우미를 빌려 쓴다. 실패하면 알약만 없다
+try:
+    from usage_pill import UsagePill, popup_position as _pill_popup_position, POPUP_GAP_PX as _PILL_POPUP_GAP_PX
+    _usage_pill_import_error = None
+except Exception as _e:
+    UsagePill = None
+    _pill_popup_position = None
+    _PILL_POPUP_GAP_PX = 8
+    _usage_pill_import_error = _e
 # 원문 위 형광펜(source_highlight.py — UI Automation 으로 다른 앱의 원문 줄 사각형을 얻어 그 위에 막을 칠한다).
 # 이것도 없어도 앱은 살아야 한다(comtypes 가 없거나 파일이 없거나 import 오류). 실패하면 None →
 # 원문 위 칠하기 없이 예전처럼 리더 창(켜져 있으면)으로만 형광펜을 보인다. 오류는 main() 에서 로그로 남긴다.
@@ -250,8 +261,10 @@ _translation_lookup = None  # (세션, 조각 글 → 번역문 함수). speak_t
 gemini_translator = None   # translation.GeminiTranslator(키가 없거나 못 만들었으면 MissingTranslator). init_tts_client 가 채운다
 tts_hotkey_modifiers = {"ctrl": True, "shift": False, "alt": True} # 기본 TTS 단축키: Ctrl+Alt+D
 tts_hotkey_key = "D"
-# 기본 음성 모델 — 2026-10-28 Paseo 상태바 플러그인·크롬 확장과 같은 목소리로(리규형님 지시, 그 전 기본은 Callirrhoe)
-tts_voice_name = "ko-KR-Chirp3-HD-Zephyr"
+# 기본 음성 모델 — 2026-10-28 Paseo 상태바 플러그인·크롬 확장과 같은 목소리로(리규형님 지시, 그 전 기본은 Callirrhoe).
+# 설정 창에서 고른 칸을 못 찾을 때도 이 값(2026-11-01 Paseo 기준 맞추기 — 그 전엔 옛 기본 Wavenet-A 였다)
+DEFAULT_VOICE = "ko-KR-Chirp3-HD-Zephyr"
+tts_voice_name = DEFAULT_VOICE
 tts_speaking_rate = 1.0   # 재생 속도(기본 1.0). 하단 바 목록·Ctrl+↑/↓ 로 고른다 — 늘 tts_rate_step 간격의 값(tts_engine.snap_rate)
 tts_rate_step = tts_engine.DEFAULT_RATE_STEP   # 속도 간격 0.1(0.5~2배) / 0.25(0.5~5배) — 2026-10-28 Paseo 기준(그 전 10-24 는 0.7~2.0 / 0.5~3.0)
 tts_volume = 1.0          # 재생 볼륨 — 늘 1.0(2026-10-24 사용자 결정: 볼륨 막대 제거, 소리 크기는 윈도우 볼륨으로). 저장·읽기 안 함
@@ -273,22 +286,37 @@ _painted_para = None             # (세션, 문단 번호, 번역문) — 원문
 _english_words = None            # 영어 단어 목록(data/english-words.js). 처음 읽을 때 한 번 불러온다
 _english_words_loaded = False
 
-# 사용 가능한 한국어 TTS 음성 목록 (이름, 성별, 유형, 설명)
+# 설정 창 목소리 목록 — Paseo 상태바 플러그인 FEATURED_GOOGLE_VOICES 와 같은 여덟 개·같은 차례(2026-11-01 리규형님 지시
+# "설정 UX 를 Paseo 와 맞추라"). 맨 위 Zephyr 는 기본값, 나머지 Chirp 3 HD 는 A→Z, 끝의 둘이 100만 자 4달러 칸(WaveNet —
+# 한국어 여성은 A·B 둘뿐). 예전 목록의 남성 WaveNet·Neural2·Standard 는 뺐다 — 그 값이 저장돼 있으면 목록 맨 앞에 붙여 그대로 둔다.
 KOREAN_VOICES = [
-    ("ko-KR-Chirp3-HD-Zephyr", "여성", "Chirp3-HD", "고품질 한/영 여성 목소리 — Paseo·크롬 확장과 같은 기본 (추천)"),
-    ("ko-KR-Chirp3-HD-Callirrhoe", "여성", "Chirp3-HD", "고품질 한/영 자연스러운 여성 목소리"),
-    ("ko-KR-Wavenet-A", "여성", "WaveNet", "밝고 친근한 여성 목소리"),
-    ("ko-KR-Wavenet-B", "여성", "WaveNet", "부드럽고 차분한 여성 목소리"),
-    ("ko-KR-Wavenet-C", "남성", "WaveNet", "신뢰감 있는 남성 목소리"),
-    ("ko-KR-Wavenet-D", "남성", "WaveNet", "젊고 활기찬 남성 목소리"),
-    ("ko-KR-Neural2-A", "여성", "Neural2", "자연스러운 여성 목소리"),
-    ("ko-KR-Neural2-B", "여성", "Neural2", "편안한 여성 목소리"),
-    ("ko-KR-Neural2-C", "남성", "Neural2", "전문적인 남성 목소리"),
-    ("ko-KR-Standard-A", "여성", "Standard", "기본 여성 목소리 (저비용)"),
-    ("ko-KR-Standard-B", "여성", "Standard", "표준 여성 목소리 (저비용)"),
-    ("ko-KR-Standard-C", "남성", "Standard", "기본 남성 목소리 (저비용)"),
-    ("ko-KR-Standard-D", "남성", "Standard", "표준 남성 목소리 (저비용)"),
+    "ko-KR-Chirp3-HD-Zephyr",
+    "ko-KR-Chirp3-HD-Aoede",
+    "ko-KR-Chirp3-HD-Callirrhoe",
+    "ko-KR-Chirp3-HD-Despina",
+    "ko-KR-Chirp3-HD-Kore",
+    "ko-KR-Chirp3-HD-Leda",
+    "ko-KR-Wavenet-A",
+    "ko-KR-Wavenet-B",
 ]
+
+# 읽기 이번 달 사용량(2026-11-01, tts_usage.py). 개발 모드·설치본이 %APPDATA%\BluemingReadAloud 의 같은 파일에 센다
+tts_usage_counter = tts_usage.UsageCounter(log=lambda msg: log_to_console(msg))
+extension_usage_reports = tts_usage.ExtensionReports()   # 크롬 확장이 받는 창구로 보낸 값
+usage_receiver = None   # tts_usage.UsageReceiver — setup_usage_receiver() 가 띄운다(127.0.0.1:51888 TCP)
+# 사용량 알약(usage_pill.py) — 트레이 왼쪽 클릭으로 켜고 끈다. 켬 상태·끌어 옮긴 자리는 whisperer_settings.json 에 남는다
+usage_pill = None              # UsagePill (Tk 메인에서 처음 켤 때 만든다)
+usage_pill_visible = False     # 켜 둔 상태 — 앱을 다시 켜도 유지(2026-11-01 리규형님 버튼)
+usage_pill_position = None     # 끌어 옮긴 자리 [x, y] (None = 주 모니터 오른쪽 아래)
+USAGE_TICK_MS = 5000           # 알약·사용량 창이 떠 있을 때 기록 파일을 다시 읽는 간격(Claude 가 정함 — Paseo 파일은 5분마다 바뀐다)
+_usage_refresh_pending = False
+
+
+def _count_tts_usage(voice_name, sent):
+    """성공한 합성 요청 하나의 보낸 글을 이번 달 사용량에 더한다(합성·미리 듣기 스레드에서 불린다 — Tk 를 만지지 않는다).
+    더한 뒤 알약·사용량 창을 바로 고치라고 gui_queue 에 알린다."""
+    tts_usage_counter.count(tts_usage.usage_kind(voice_name), sent)
+    gui_queue.put("usage_changed")
 
 # 프로그램 다중 실행 방지
 def prevent_multiple_instances():
@@ -641,6 +669,11 @@ def main():
         print("빨간 점(선택 버튼) 설정 중...")
         log_to_console("빨간 점(선택 버튼) 설정 중...")
         setup_selection_button()
+
+        # 크롬 확장 읽기 사용량 받는 창구(127.0.0.1:51888 TCP, 2026-11-01) — 못 열어도 읽기와 무관
+        setup_usage_receiver()
+        # 사용량 알약 — 지난번에 켜 둔 채 끝냈으면 다시 띄운다(트레이 왼쪽 클릭으로 켜고 끔)
+        setup_usage_pill()
 
         # 초기화 완료
         logging.info("초기화 완료")
@@ -1069,7 +1102,10 @@ def save_settings():
             # 주 언어가 아닌 문장 번역 켬/끔 (2026-09-29 추가, 설정 창 "일반" 체크)
             "translate_enabled": translate_enabled,
             # 번역문을 원문 위 막으로 표시 켬/끔 (2026-09-29 추가, 설정 창 "일반" 체크)
-            "translation_overlay_enabled": translation_overlay_enabled
+            "translation_overlay_enabled": translation_overlay_enabled,
+            # 사용량 알약 켬/끔·끌어 옮긴 자리 (2026-11-01 추가, 트레이 왼쪽 클릭)
+            "usage_pill_visible": usage_pill_visible,
+            "usage_pill_position": usage_pill_position
         }
         print(f"저장할 설정: {_mask_keys(settings)}")
         with open('whisperer_settings.json', 'w', encoding='utf-8') as f:
@@ -1102,6 +1138,7 @@ def load_settings():
     global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, tts_rate_step
     global reader_window_enabled, reader_window_geometry, bottom_bar_monitor, selection_button_enabled
     global disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled
+    global usage_pill_visible, usage_pill_position
     try:
         if os.path.exists('whisperer_settings.json'):
             with open('whisperer_settings.json', 'r', encoding='utf-8') as f:
@@ -1149,6 +1186,13 @@ def load_settings():
                     translate_enabled = settings["translate_enabled"]
                 if isinstance(settings.get("translation_overlay_enabled"), bool):
                     translation_overlay_enabled = settings["translation_overlay_enabled"]
+                # 사용량 알약 — 켬/끔은 true/false 만, 자리는 정수 두 개만(아니면 오른쪽 아래)
+                if isinstance(settings.get("usage_pill_visible"), bool):
+                    usage_pill_visible = settings["usage_pill_visible"]
+                pos = settings.get("usage_pill_position")
+                if (isinstance(pos, list) and len(pos) == 2
+                        and all(isinstance(v, int) and not isinstance(v, bool) for v in pos)):
+                    usage_pill_position = pos
 
                 # API 키 두 개 (2026-09-29). 글자가 아니거나 비었으면 없는 것으로 둔다
                 tts_key = settings.get("google_tts_api_key")
@@ -1376,6 +1420,11 @@ def setup_tray_icon():
             if not tray_icon: return
 
             base_items = [
+                # 왼쪽 클릭 = 사용량 알약 켜고 끄기(2026-11-01). pystray 는 왼쪽 클릭에 "기본 항목"을 부른다
+                # (_win32 _on_notify WM_LBUTTONUP → Menu.__call__ → default). visible=False 라 오른쪽 메뉴에는 안 나온다 —
+                # 메뉴는 사용자가 정한 다섯 항목 그대로(2026-11-01 실측: 숨긴 기본 항목도 불린다)
+                pystray.MenuItem("usage pill", lambda icon, item: gui_queue.put("toggle_usage_pill"),
+                                 default=True, visible=False),
                 pystray.MenuItem(get_msg("menu_tts_settings"), open_tts_settings),
                 pystray.Menu.SEPARATOR,
                 # 리더 창 사용 체크 — 켜 두면 "원문 위에 칠할 수 없을 때" 리더 창(원문 + 읽는 줄 형광펜)을 띄운다.
@@ -1428,6 +1477,10 @@ def setup_tray_icon():
                             toggle_selection_button()
                         elif msg == "toggle_disable_in_browsers":
                             toggle_disable_in_browsers()
+                        elif msg == "toggle_usage_pill":
+                            toggle_usage_pill()
+                        elif msg == "usage_changed":
+                            _schedule_usage_refresh()
                         elif isinstance(msg, tuple) and msg and msg[0] == "selection_button":
                             # 마우스·키보드 훅이 넣은 빨간 점 명령 ("show", x, y) / ("hide",)
                             _handle_selection_button_msg(*msg[1:])
@@ -2602,13 +2655,27 @@ def show_tts_settings_dialog():
     voice_frame = ttk.Labelframe(dialog, text=get_msg("label_voice_model"), padding=15)
     voice_frame.pack(fill="x", **padding)
 
+    # 목소리 칸 글 — "Zephyr · Chirp 3 HD · 100만 자 30달러 (이번 달 PC 앱 12,345자)" (2026-11-01 Paseo 와 같은 모양).
+    # 숫자 = 이 앱이 이번 결제 달에 보낸 글자(종류별 — 같은 종류는 같은 숫자). 세 곳 합계는 "읽기 사용량" 창.
+    # 기록을 못 읽으면 괄호를 뺀다. 저장된 목소리가 목록에 없으면 맨 앞에 붙인다(Paseo voiceOptions 와 같게)
+    try:
+        usage_now = tts_usage_counter.month_counts()
+    except Exception:
+        usage_now = None
+    voice_ids = list(KOREAN_VOICES)
+    if tts_voice_name and tts_voice_name not in voice_ids:
+        voice_ids.insert(0, tts_voice_name)
+
     voice_options = []
     voice_map = {}
 
     current_voice_display = ""
 
-    for v_id, v_gender, v_type, v_desc in KOREAN_VOICES:
-        display_str = f"{v_id} ({v_gender}, {v_type}) - {v_desc}"
+    for v_id in voice_ids:
+        used = None if usage_now is None else usage_now.get(tts_usage.usage_kind(v_id), 0)
+        display_str = tts_usage.voice_label(v_id, used, get_msg("voice_price"), get_msg("voice_usage"))
+        if display_str in voice_map:   # 다른 언어의 같은 이름(en-US-Chirp3-HD-Zephyr 등)이 저장돼 있으면 구분
+            display_str = f"{display_str} [{v_id}]"
         voice_options.append(display_str)
         voice_map[display_str] = v_id
         if v_id == tts_voice_name:
@@ -2635,12 +2702,12 @@ def show_tts_settings_dialog():
         ⚠️ 읽는 중에 누르면 두 소리가 겹쳐 난다(옛 동작 그대로).
         """
         selected_disp = voice_var.get()
-        sel_voice_id = voice_map.get(selected_disp, "ko-KR-Wavenet-A")
+        sel_voice_id = voice_map.get(selected_disp, DEFAULT_VOICE)
         # 속도는 지금 저장된 값(하단 바 목록에서 고른 값 — 2026-10-24 설정 창에서 속도 칸을 뺐다)
         # 지금 속도로 들려준다. 서버 허용이 0.25~4.0 이라(2026-10-28 속도 범위가 5배까지 늘어남) 미리듣기만 4.0 에서 자른다
         sel_rate = min(tts_speaking_rate, 4.0)
 
-        text = "안녕하세요. TTS 목소리 미리듣기입니다."
+        text = "안녕하세요. 이 목소리로 글을 읽어 드립니다."   # Paseo PREVIEW_TEXT.ko 와 같은 말(2026-11-01 설정 맞추기)
 
         def _preview():
             # (별도 스레드) 네트워크 요청이 Tk 메인을 멈추지 않게 따로 돈다. 여기서는 Tk 를 만지지 않는다.
@@ -2655,6 +2722,7 @@ def show_tts_settings_dialog():
                 audio_config = google_tts.AudioConfig(audio_encoding=google_tts.AudioEncoding.LINEAR16, sample_rate_hertz=24000, speaking_rate=sel_rate)
 
                 response = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+                _count_tts_usage(sel_voice_id, text)   # 미리 듣기도 Google 이 매긴다 — 읽기와 같이 센다(2026-11-01)
 
                 import numpy as np
                 import sounddevice as sd
@@ -2756,6 +2824,9 @@ def show_tts_settings_dialog():
                bootstyle="info-outline").pack(side="left", padx=5)
     ttk.Button(tool_row, text=get_msg("open_console"), command=open_console_window,
                bootstyle="secondary-outline").pack(side="left", padx=5)
+    # 세 곳(Paseo·이 앱·크롬 확장) 이번 달 읽기 사용량 창(2026-11-01). 트레이는 5항목 고정이라 여기에 둔다
+    ttk.Button(tool_row, text=get_msg("btn_usage"), command=lambda: show_usage_dialog(anchor=_window_center(dialog)),
+               bootstyle="info-outline").pack(side="left", padx=5)
 
     # 5. 저장 버튼 (미리듣기는 위로 이동함)
     button_frame = ttk.Frame(dialog)
@@ -2766,7 +2837,7 @@ def show_tts_settings_dialog():
     def save_tts_settings_action():
         """"저장" 버튼: 창의 값을 전역 설정에 넣고 파일에 저장한 뒤 창을 닫는다.
 
-        글자 칸이 비면 단축키 글자를 None 으로 둔다(→ 단축키가 꺼진다). 음성을 못 찾으면 ko-KR-Wavenet-A(옛 기본값).
+        글자 칸이 비면 단축키 글자를 None 으로 둔다(→ 단축키가 꺼진다). 음성을 못 찾으면 기본값 DEFAULT_VOICE(Zephyr).
         언어가 바뀌었으면 _apply_language 가 전역 언어를 바꾸고 트레이 문구를 새 언어로 다시 만든다. 저장은 아래 한 번.
         """
         global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, translate_enabled
@@ -2779,7 +2850,7 @@ def show_tts_settings_dialog():
         tts_hotkey_key = k if k else None
 
         selected_disp = voice_var.get()
-        tts_voice_name = voice_map.get(selected_disp, "ko-KR-Wavenet-A")
+        tts_voice_name = voice_map.get(selected_disp, DEFAULT_VOICE)
         # 간격이 바뀌면 지금 속도를 새 목록의 가장 가까운 값으로 맞추고(가운데면 빠른 쪽) 하단 바 목록도 바꾼다(2026-10-24).
         # 읽는 중이면 맞춘 속도를 바로 반영한다. 음성은 읽기마다 정해지므로 다음 읽기부터 바뀐다.
         tts_rate_step = current_step()
@@ -2800,6 +2871,7 @@ def show_tts_settings_dialog():
         translation_overlay_enabled = bool(overlay_var.get())
 
         save_settings()
+        _refresh_usage_views()   # 목소리 종류가 바뀌었으면 알약도 그 종류로(2026-11-01)
 
         log_to_console(get_msg("tts_hotkey_updated"))
         # 토스트 알림 (messagebox 대신)
@@ -2823,6 +2895,422 @@ def show_tts_settings_dialog():
         pass
     # 창 크기 자동 조절 및 강제 업데이트 (렌더링 문제 해결)
     dialog.update()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 읽기 사용량 — 세 곳(Paseo·이 앱·크롬 확장) 요금 브리지 (2026-11-01, 계산은 tts_usage.py)
+# ════════════════════════════════════════════════════════════════════
+
+def _usage_time_text(value):
+    """UTC datetime 또는 ISO 문자열 → 이 PC 시각 "11-01 16:05". 못 읽으면 "?"."""
+    try:
+        if isinstance(value, str):
+            value = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value.astimezone().strftime("%m-%d %H:%M")
+    except Exception:
+        return "?"
+
+
+def _usage_counts_text(counts):
+    """{"chirp3hd": 12345, "wavenet": 0} → "Chirp 3 HD 12,345 · WaveNet 0" (늘 보이는 두 종류 + 값이 있는 다른 종류)."""
+    kinds = list(tts_usage.SHOWN_KINDS) + sorted(k for k in counts if k not in tts_usage.SHOWN_KINDS
+                                                 and k not in tts_usage.IGNORED_KINDS and counts.get(k))
+    return " · ".join(f"{tts_usage.KIND_NAME.get(k, k)} {tts_usage.group_digits(counts.get(k, 0))}" for k in kinds)
+
+
+def _window_center(win):
+    """Tk 창 가운데 화면 좌표 (x, y). 못 구하면 None."""
+    try:
+        return (win.winfo_rootx() + win.winfo_width() // 2, win.winfo_rooty() + win.winfo_height() // 2)
+    except Exception:
+        return None
+
+
+def _monitor_area(point):
+    """(x, y) 가 있는 모니터의 작업 영역 (왼, 위, 오른, 아래). 모르면 None(빨간 점 모듈의 Win32 도우미를 빌린다)."""
+    if not point or _selection_button_mod is None:
+        return None
+    try:
+        return _selection_button_mod._work_area_at(*point)
+    except Exception:
+        return None
+
+
+def _center_on_monitor(win, anchor):
+    """창을 anchor (x, y) 가 있는 모니터의 작업 영역 가운데로 옮긴다(2026-11-01 리규형님 "알약이 있는 모니터에").
+    모니터를 모르면 그대로 둔다."""
+    area = _monitor_area(anchor)
+    if not area:
+        return
+    try:
+        win.update_idletasks()
+        w = max(win.winfo_reqwidth(), win.winfo_width())
+        h = max(win.winfo_reqheight(), win.winfo_height())
+        left, top, right, bottom = area
+        win.geometry(f"+{left + max(0, (right - left - w) // 2)}+{top + max(0, (bottom - top - h) // 2)}")
+    except Exception as e:
+        logging.debug(f"창 자리 옮기기 실패: {e}")
+
+
+def _place_near(win, rect):
+    """떠 있는 창을 알약 사각형 (x, y, w, h) 바로 위에 붙인다(오른쪽 끝 맞춤 — usage_pill.popup_position).
+    제목 표시줄·테두리까지 친 바깥 크기는 떠 있는 창에서 잰다(winfo_rootx/y 와 winfo_x/y 의 차)."""
+    if _pill_popup_position is None:
+        return
+    try:
+        win.update_idletasks()
+        side = max(0, win.winfo_rootx() - win.winfo_x())
+        title = max(0, win.winfo_rooty() - win.winfo_y())
+        size = (win.winfo_width() + 2 * side, win.winfo_height() + title + side)
+        gap = int(round(_PILL_POPUP_GAP_PX * float(root.winfo_fpixels("1i")) / 96.0))
+        center = (rect[0] + rect[2] // 2, rect[1] + rect[3] // 2)
+        x, y = _pill_popup_position(rect, size, _monitor_area(center), gap)
+        win.geometry(f"+{x}+{y}")
+    except Exception as e:
+        logging.debug(f"알약 위에 창 붙이기 실패: {e}")
+
+
+def _show_placed(win, anchor=None, near=None):
+    """숨겨 만든 창을 자리 잡아 보인다. near(알약 사각형)면 그 위에, anchor 면 그 점의 모니터 가운데, 둘 다 없으면 Tk 기본 자리.
+    near 는 바깥 크기를 재야 해서 투명하게 띄워 옮긴 뒤 보인다(일반 창이라 -alpha 를 써도 된다 — 금지는 NOACTIVATE 창)."""
+    if near:
+        try:
+            win.attributes("-alpha", 0.0)
+        except Exception:
+            pass
+        win.deiconify()
+        _place_near(win, near)
+        try:
+            win.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+    else:
+        _center_on_monitor(win, anchor)
+        win.deiconify()
+
+
+def show_usage_dialog(anchor=None, near=None):
+    """설정 창 "읽기 사용량" 버튼: 세 곳의 이번 결제 달 읽기 사용량을 종류별로 합쳐 보인다(2026-11-01 리규형님 지시 —
+    "한 곳에서 세 곳 사용량을 볼 수 있게, PC 앱에서"). 무료분 대비 남은 양, 넘쳤으면 넘친 글자와 그 값(달러).
+    자리(2026-11-01 리규형님 "알약이 있는 모니터에 — 자꾸 다른 모니터에 뜬다" + 스크린샷 "이런 식으로"):
+      near = 알약 (x, y, w, h) → 알약 바로 위, 오른쪽 끝 맞춤(이미 열려 있어도 다시 붙인다).
+      anchor = (x, y) → 그 점의 모니터 가운데(설정 창 버튼 = 설정 창 가운데. 이미 열려 있으면 다른 모니터일 때만 옮긴다).
+
+    ⚠️ Tk 메인 스레드에서만. 이미 열려 있으면 앞으로 올린다. 기록 파일 셋(작다)을 열 때·[새로고침] 때·열려 있는 동안
+    USAGE_TICK_MS 마다·이 앱이 세거나 확장 값을 받을 때 다시 읽고, 값이 달라졌을 때만 다시 그린다(_refresh_usage_views)
+    (Paseo 파일은 Paseo PC 데몬이 5분마다 새로 쓴다). 알약을 눌러도 이 창이 뜬다(2026-11-01).
+    숫자는 세 곳이 스스로 센 값 — 실제 청구는 Google 결제 화면이 정본.
+    """
+    existing = getattr(show_usage_dialog, "dialog", None)
+    if existing is not None and existing.winfo_exists():
+        if near:
+            _place_near(existing, near)
+        elif anchor and _monitor_area(_window_center(existing)) != _monitor_area(anchor):
+            _center_on_monitor(existing, anchor)
+        existing.lift()
+        return
+
+    import tkinter.font as tkfont
+    dialog = ttk.Toplevel(root)
+    dialog.withdraw()   # 자리를 잡은 뒤 보인다(_show_placed) — 다른 모니터 기본 자리에 잠깐 떴다 옮겨 가지 않게
+    dialog.title(get_msg("usage_title"))
+    dialog.resizable(False, False)
+    _dark_title_bar(dialog)
+    try:
+        icon_path = _favicon_path()
+        if icon_path:
+            dialog.iconbitmap(icon_path)
+    except Exception:
+        pass
+    show_usage_dialog.dialog = dialog
+    bold = tkfont.nametofont("TkDefaultFont").copy()
+    bold.configure(weight="bold")
+    dialog._bold_font = bold   # 창이 붙들고 있어야 폰트가 사라지지 않는다
+
+    body = ttk.Frame(dialog, padding=20)
+    body.pack(fill="both", expand=True)
+
+    def collect():
+        month = tts_usage.billing_month()
+        paseo = tts_usage.read_paseo_usage(month)
+        ext_rows = extension_usage_reports.month_by_source(month)
+        summary = tts_usage.summarize(tts_usage_counter.month_counts(month), paseo, ext_rows, month)
+        receiver_port = usage_receiver.port if usage_receiver is not None and usage_receiver.running else None
+        return month, paseo, ext_rows, summary, receiver_port
+
+    def fill(data):
+        month, paseo, ext_rows, summary, receiver_port = data
+        for child in body.winfo_children():
+            child.destroy()
+        columns = 7
+
+        row = 0
+        ttk.Label(body, text=get_msg("usage_heading").format(month), font=bold).grid(
+            row=row, column=0, columnspan=columns, sticky="w")
+        row += 1
+        start = tts_usage.month_start_utc(month)
+        end = tts_usage.month_start_utc(tts_usage.next_month(month))
+        ttk.Label(body, text=get_msg("usage_period").format(_usage_time_text(start), _usage_time_text(end))).grid(
+            row=row, column=0, columnspan=columns, sticky="w", pady=(2, 12))
+
+        row += 1
+        heads = ("usage_col_kind", "usage_col_paseo", "usage_col_app", "usage_col_extension",
+                 "usage_col_total", "usage_col_free", "usage_col_left")
+        for col, key in enumerate(heads):
+            ttk.Label(body, text=get_msg(key), font=bold).grid(
+                row=row, column=col, sticky="w" if col == 0 else "e", padx=(0 if col == 0 else 14, 0))
+        for k in summary["kinds"]:
+            row += 1
+            name = k["name"] + (f" ({get_msg('voice_price').format(k['price'])})" if k["price"] else "")
+            if k["free"] is None:
+                left, style = "—", None
+            elif k["over"]:
+                cost = f"{k['cost']:.2f}" if k["cost"] is not None else "?"
+                left, style = get_msg("usage_over").format(tts_usage.group_digits(k["over"]), cost), "danger"
+            else:
+                left, style = get_msg("usage_left").format(tts_usage.group_digits(k["left"])), "success"
+            cells = (name,
+                     "—" if k["paseo"] is None else tts_usage.group_digits(k["paseo"]),
+                     tts_usage.group_digits(k["app"]),
+                     tts_usage.group_digits(k["extension"]),
+                     tts_usage.group_digits(k["total"]),
+                     "—" if k["free"] is None else tts_usage.group_digits(k["free"]),
+                     left)
+            for col, text in enumerate(cells):
+                opts = {"bootstyle": style} if col == len(cells) - 1 and style else {}
+                ttk.Label(body, text=text, **opts).grid(
+                    row=row, column=col, sticky="w" if col == 0 else "e", padx=(0 if col == 0 else 14, 0), pady=2)
+
+        row += 1
+        ttk.Separator(body).grid(row=row, column=0, columnspan=columns, sticky="ew", pady=12)
+
+        lines = []
+        state = paseo.get("state")
+        if state == "ok":
+            lines.append(get_msg("usage_paseo_ok").format(_usage_time_text(paseo.get("updatedAt"))))
+            for host in sorted(paseo["sources"], key=lambda h: (h != "PC", h)):
+                lines.append(f"    {host}: {_usage_counts_text(paseo['sources'][host])}")
+            if paseo["stale"]:
+                lines.append(get_msg("usage_paseo_stale").format(", ".join(paseo["stale"])))
+        elif state == "other_month":
+            lines.append(get_msg("usage_paseo_other_month").format(paseo.get("month"), _usage_time_text(paseo.get("updatedAt"))))
+        elif state == "broken":
+            lines.append(get_msg("usage_paseo_broken"))
+        else:
+            lines.append(get_msg("usage_paseo_missing"))
+        lines.append(get_msg("usage_app_note"))
+        if ext_rows:
+            lines.append(get_msg("usage_ext_heading"))
+            # 같은 이름이 여럿이면(어사이드는 프로필마다 "Chromium") 설치 구분 글자 앞 8자를 덧붙여 가른다(2026-11-01)
+            label_count = {}
+            for r in ext_rows:
+                label_count[r["label"]] = label_count.get(r["label"], 0) + 1
+            for r in ext_rows:
+                name = r["label"] or r["source"][:8]
+                if r["label"] and label_count[r["label"]] > 1:
+                    name = f"{r['label']} ({r['source'][:8]})"
+                lines.append(get_msg("usage_ext_row").format(name, _usage_counts_text(r["counts"]),
+                                                             _usage_time_text(r["updatedAt"])))
+        else:
+            lines.append(get_msg("usage_ext_none"))
+        if receiver_port is not None:
+            lines.append(get_msg("usage_receiver_on").format(f"{tts_usage.RECEIVER_HOST}:{receiver_port}"))
+        else:
+            lines.append(get_msg("usage_receiver_off"))
+        for text in lines:
+            row += 1
+            ttk.Label(body, text=text).grid(row=row, column=0, columnspan=columns, sticky="w", pady=1)
+        row += 1
+        ttk.Label(body, text=get_msg("usage_note"), wraplength=640, justify="left").grid(
+            row=row, column=0, columnspan=columns, sticky="w", pady=(12, 0))
+
+        row += 1
+        buttons = ttk.Frame(body)
+        buttons.grid(row=row, column=0, columnspan=columns, sticky="e", pady=(16, 0))
+        ttk.Button(buttons, text=get_msg("usage_close"), command=dialog.destroy, width=10,
+                   bootstyle="secondary").pack(side="right", padx=(10, 0))
+        # 새로고침 = 이 창과 알약을 함께(2026-11-01 — 창만 바뀌고 알약은 다음 5초 주기까지 옛 숫자였다)
+        ttk.Button(buttons, text=get_msg("usage_refresh"), command=lambda: (refresh(force=True), _refresh_usage_pill()),
+                   width=10, bootstyle="info-outline").pack(side="right")
+
+    last = {"key": None}
+
+    def refresh(force=False):
+        """값을 다시 모아 달라졌을 때만 다시 그린다(5초마다 불려도 깜빡이지 않게 — _refresh_usage_views)."""
+        data = collect()
+        key = json.dumps(data, sort_keys=True, default=str)
+        if force or key != last["key"]:
+            last["key"] = key
+            fill(data)
+
+    dialog._usage_refresh = refresh
+    refresh(force=True)
+    _show_placed(dialog, anchor, near)
+    _schedule_usage_tick()
+
+
+def setup_usage_receiver():
+    """크롬 확장이 이번 달 읽기 사용량을 보내는 받는 창구(127.0.0.1:51888 TCP)를 띄운다(2026-11-01, tts_usage.UsageReceiver).
+
+    포트를 못 열면 로그만 남기고 넘어간다(읽기와 무관 — 사용량 창에 "열지 못했습니다" 로 보인다).
+    콘솔에는 확장 설치(source)마다 이 앱이 켜진 뒤 처음 받을 때 한 줄 — source 앞 8자·label·이번 달 숫자만(글·주소 없음).
+    """
+    global usage_receiver
+    seen = set()
+    rejected = set()
+
+    def on_report(source, label, months):
+        # 받는 창구 스레드에서 불린다 — Tk 를 만지지 않는다(알약·사용량 창은 gui_queue 로)
+        gui_queue.put("usage_changed")
+        if source in seen:
+            return
+        seen.add(source)
+        month = tts_usage.billing_month()
+        counts = months.get(month, {}) if isinstance(months, dict) else {}
+        log_to_console(f"[사용량] 크롬 확장 기록 받음: {label or '-'} ({source[:8]}) {month} {_usage_counts_text(counts)}")
+
+    def on_reject(reason):
+        # 거절 까닭 — 까닭마다 이 앱이 켜진 뒤 처음 한 번만(확장은 셀 때마다 보내 같은 줄이 쌓이지 않게). 값·주소는 안 남긴다
+        if reason in rejected:
+            return
+        rejected.add(reason)
+        log_to_console(f"[사용량] 크롬 확장 기록 거절: {reason}")
+
+    usage_receiver = tts_usage.UsageReceiver(extension_usage_reports, on_report=on_report, log=log_to_console,
+                                             on_reject=on_reject)
+    if usage_receiver.start():
+        log_to_console(f"[사용량] 크롬 확장 받는 창구: {tts_usage.RECEIVER_HOST}:{usage_receiver.port}")
+
+
+# ── 사용량 알약 (usage_pill.py, 2026-11-01 리규형님 버튼) ──
+# 트레이 왼쪽 클릭 = 켜고 끄기(켬 상태 저장) · 끌어 옮긴 자리 저장 · 누르면 show_usage_dialog.
+# 글 = 지금 고른 목소리 종류의 세 곳 합계 "Chirp 3 HD 18,944 / 1,000,000자"(넘으면 빨강 + 넘친 글자·달러).
+# 새로 고치는 때: 이 앱이 셀 때·확장 값을 받을 때 바로("usage_changed"), 그리고 떠 있는 동안 USAGE_TICK_MS 마다(Paseo 파일).
+
+def _usage_pill_text():
+    """지금 고른 목소리 종류의 세 곳 합계 → (알약 글, 무료분 넘음)."""
+    month = tts_usage.billing_month()
+    paseo = tts_usage.read_paseo_usage(month)
+    summary = tts_usage.summarize(tts_usage_counter.month_counts(month), paseo,
+                                  extension_usage_reports.month_by_source(month), month)
+    row = tts_usage.pill_row(summary, tts_usage.usage_kind(tts_voice_name))
+    texts = {k: get_msg("pill_" + k) for k in ("under", "over", "plain", "no_paseo")}
+    return tts_usage.pill_text(row, paseo.get("state") == "ok", texts)
+
+
+def _usage_dialog_open():
+    dialog = getattr(show_usage_dialog, "dialog", None)
+    try:
+        return dialog is not None and bool(dialog.winfo_exists())
+    except Exception:
+        return False
+
+
+def _refresh_usage_pill():
+    """알약이 떠 있으면 지금 값으로 고친다. Tk 메인 전용."""
+    if usage_pill is not None and usage_pill.visible:
+        try:
+            usage_pill.set_text(*_usage_pill_text())
+        except Exception as e:
+            logging.warning(f"사용량 알약 갱신 실패: {e}")
+
+
+def _refresh_usage_views():
+    """알약(떠 있으면)과 사용량 창(열려 있으면)을 지금 값으로 고친다. Tk 메인 전용."""
+    _refresh_usage_pill()
+    if _usage_dialog_open():
+        try:
+            show_usage_dialog.dialog._usage_refresh()
+        except Exception as e:
+            logging.warning(f"사용량 창 갱신 실패: {e}")
+
+
+def _schedule_usage_refresh():
+    """"usage_changed" 가 몰려 와도(읽는 조각마다) 한 번만 다시 읽는다. Tk 메인 전용."""
+    global _usage_refresh_pending
+    if _usage_refresh_pending or not root:
+        return
+    _usage_refresh_pending = True
+
+    def run():
+        global _usage_refresh_pending
+        _usage_refresh_pending = False
+        _refresh_usage_views()
+    root.after_idle(run)
+
+
+_usage_tick_scheduled = False
+
+
+def _schedule_usage_tick():
+    """알약이나 사용량 창이 떠 있는 동안 USAGE_TICK_MS 마다 다시 읽게 한다(이미 돌고 있으면 그대로). Tk 메인 전용."""
+    global _usage_tick_scheduled
+    if _usage_tick_scheduled or not root:
+        return
+    _usage_tick_scheduled = True
+    root.after(USAGE_TICK_MS, _usage_tick)
+
+
+def _usage_tick():
+    global _usage_tick_scheduled
+    _usage_tick_scheduled = False
+    if not ((usage_pill is not None and usage_pill.visible) or _usage_dialog_open()):
+        return   # 둘 다 닫혔으면 멈춘다 — 다시 띄울 때 _schedule_usage_tick 이 다시 건다
+    _refresh_usage_views()
+    _schedule_usage_tick()
+
+
+def _apply_usage_pill():
+    """usage_pill_visible 에 맞춰 알약을 띄우거나 숨긴다(처음 띄울 때 창을 만든다). Tk 메인 전용."""
+    global usage_pill
+    if not usage_pill_visible:
+        if usage_pill is not None:
+            usage_pill.hide()
+        return
+    if UsagePill is None:
+        log_to_console(f"[사용량] 알약을 띄울 수 없습니다(모듈 오류): {_usage_pill_import_error}")
+        return
+    if usage_pill is None:
+        try:
+            usage_pill = UsagePill(root, on_click=_open_usage_from_pill, on_moved=_usage_pill_moved)
+        except Exception as e:
+            log_to_console(f"[사용량] 알약 창을 만들지 못했습니다: {e}")
+            return
+    usage_pill.set_text(*_usage_pill_text())
+    usage_pill.show(tuple(usage_pill_position) if usage_pill_position else None)
+    _schedule_usage_tick()
+
+
+def toggle_usage_pill():
+    """트레이 왼쪽 클릭: 알약을 켜고 끈다. 켬 상태는 저장해 앱을 다시 켜도 유지한다. Tk 메인 전용(gui_queue "toggle_usage_pill")."""
+    global usage_pill_visible
+    usage_pill_visible = not usage_pill_visible
+    _apply_usage_pill()
+    save_settings()
+
+
+def _open_usage_from_pill():
+    """알약을 눌렀다 — 읽기 사용량 창을 알약 바로 위에(같은 모니터) 띄운다."""
+    near = None
+    if usage_pill is not None:
+        try:
+            near = usage_pill.rect()
+        except Exception:
+            near = None
+    show_usage_dialog(near=near)
+
+
+def _usage_pill_moved(x, y):
+    """알약을 끌어 옮겨 놓은 자리를 기억한다(다음에 켤 때·앱을 다시 켤 때 그 자리)."""
+    global usage_pill_position
+    usage_pill_position = [int(x), int(y)]
+    save_settings()
+
+
+def setup_usage_pill():
+    """앱을 켤 때 — 지난번에 알약을 켜 둔 채 끝냈으면 다시 띄운다."""
+    if usage_pill_visible:
+        _apply_usage_pill()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -3096,7 +3584,10 @@ def speak_text(text, hl_area=None):
 
     box = {}
     try:
-        synthesize = tts_engine.make_google_synthesize(google_tts_client, google_tts, tts_voice_name, log=log_to_console)
+        voice_for_usage = tts_voice_name   # 이 읽기의 목소리(설정 창에서 바꿔도 이 읽기는 이 목소리로 센다)
+        synthesize = tts_engine.make_google_synthesize(
+            google_tts_client, google_tts, tts_voice_name, log=log_to_console,
+            on_sent=lambda sent: _count_tts_usage(voice_for_usage, sent))
         if raw_texts:
             # 번역 대상 조각만 번역 → 읽기용 변환 → 합성. 번역 실패는 SegmentFailed → 그 조각 차례에 멈추고 알림
             translator = gemini_translator or translation.MissingTranslator("번역기가 준비되지 않았습니다(인증 전)")

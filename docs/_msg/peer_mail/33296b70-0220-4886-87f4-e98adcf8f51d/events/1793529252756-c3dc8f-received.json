@@ -1,0 +1,7 @@
+{
+  "at": "2026-11-01T10:34:12.755Z",
+  "type": "received",
+  "recipient": "peer",
+  "attempt_id": "dbda2068-b2bc-42af-a7fa-ae88c368223a",
+  "detail": "peer_mail-ack"
+}

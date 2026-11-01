@@ -817,6 +817,38 @@ class TestGoogleSynthesize(unittest.TestCase):
         empty = tts_engine.make_google_synthesize(self.FakeClient(content=b"H" * 44), self.fake_tts(), "ko-KR-Wavenet-A")
         self.assertIsNone(empty("가.", 1.0))
 
+    # ── 사용량 세기(on_sent, 2026-11-01 — Paseo countUsage 와 같게: 성공한 요청에 실제로 보낸 글) ──
+    def test_on_sent_gets_markup_when_markup_succeeds(self):
+        client, sent = self.FakeClient(), []
+        synth = tts_engine.make_google_synthesize(client, self.fake_tts(), "ko-KR-Chirp3-HD-Zephyr", on_sent=sent.append)
+        synth("사과, 배.", 1.0)
+        self.assertEqual(sent, [client.requests[0][0].markup])
+        self.assertIn("[pause short]", sent[0])   # 쉼 표지까지 센다
+
+    def test_on_sent_skips_rejected_markup_and_failures(self):
+        client, sent = self.FakeClient(reject_markup=True), []
+        synth = tts_engine.make_google_synthesize(client, self.fake_tts(), "ko-KR-Chirp3-HD-Zephyr", on_sent=sent.append)
+        synth("사과, 배.", 1.0)
+        self.assertEqual(sent, ["사과, 배."])        # 400 으로 거절된 markup 은 안 세고 평문만
+        client, sent = self.FakeClient(reject_markup=True, reject_code=429), []
+        synth = tts_engine.make_google_synthesize(client, self.fake_tts(), "ko-KR-Chirp3-HD-Zephyr", on_sent=sent.append)
+        with self.assertRaises(TestGoogleSynthesize.ApiError):
+            synth("사과, 배.", 1.0)
+        self.assertEqual(sent, [])                   # 실패한 요청은 안 센다
+
+    def test_on_sent_per_request_and_errors_swallowed(self):
+        client, sent = self.FakeClient(), []
+        synth = tts_engine.make_google_synthesize(client, self.fake_tts(), "ko-KR-Wavenet-A", on_sent=sent.append)
+        sentence = "가" * 300 + "."
+        synth(" ".join([sentence] * 5), 1.0)
+        self.assertEqual(sent, [r[0].text for r in client.requests])   # 나눠 보낸 요청마다 한 번씩
+        self.assertEqual(len(sent), 3)
+
+        def broken(_text):
+            raise RuntimeError("disk full")
+        synth = tts_engine.make_google_synthesize(self.FakeClient(), self.fake_tts(), "ko-KR-Wavenet-A", on_sent=broken)
+        self.assertEqual(synth("가.", 1.0).tolist(), [1, 2, 3])          # 세기 실패는 읽기에 영향 없음
+
     def test_voice_helpers(self):
         self.assertEqual(tts_engine.voice_lang_of("ko-KR-Chirp3-HD-Callirrhoe"), "ko-KR")
         self.assertEqual(tts_engine.voice_type_of("ko-KR-Chirp3-HD-Callirrhoe"), "Chirp3-HD")
@@ -1367,10 +1399,13 @@ def _load_glue(ui_log):
         return open_stream
 
     synth_texts = []   # 합성에 실제로 들어간 글(번역 시험용)
+    counted = []       # 사용량 세기로 넘어간 (목소리, 글)
 
-    def make_synth(client, tts, voice_name, sample_rate=SR, log=None):
+    def make_synth(client, tts, voice_name, sample_rate=SR, log=None, on_sent=None):
         def synth(text, rate):
             synth_texts.append(text)
+            if on_sent is not None:
+                on_sent(text)                                       # 진짜처럼 성공한 요청마다 사용량 세기로
             return np.full(int(SR * 10.0), 1000, dtype=np.int16)   # 조각마다 10초 소리(100블록 ≈ 0.5초)
         return synth
 
@@ -1402,6 +1437,8 @@ def _load_glue(ui_log):
         "translation_overlay_enabled": True, "_translation_lookup": None,
         "_notify_segment_failed": lambda data: ui_log.append(("notify_failed", data)),
         "_synth_texts": synth_texts,
+        # 사용량 세기(2026-11-01): 진짜는 %APPDATA% 파일에 쓴다 — 시험에선 (목소리, 글)만 모은다
+        "_counted": counted, "_count_tts_usage": lambda voice, sent: counted.append((voice, sent)),
         # 따라 읽기 창(2026-10-28): 기본은 "모듈 없음" — 예전 흐름 그대로. 시험할 땐 테스트가 가짜를 넣는다
         "FollowDialog": None, "_follow_dialog": None, "_follow_dialog_open": False, "_follow_ask_seq": 0,
     })
@@ -1659,6 +1696,19 @@ class TestWhispererGlue(EngineTestBase):
         self.assertLess(names.index("bar.show"), names.index("bar.update"))
         self.assertEqual(names[-2:], ["bar.hide", "reader.end"])
         self.assertEqual([c[1] for c in ui if c[0] == "reader.highlight"], [0, 1])
+
+    def test_reading_counts_usage_with_its_voice(self):
+        # 2026-11-01 사용량: 합성한 조각마다 이 읽기의 목소리로 센다(도중에 설정에서 목소리를 바꿔도 이 읽기는 그대로)
+        ui = []
+        ns = self.ns = _load_glue(ui)
+        ns["speak_text"]("첫 번째 줄은 이렇게 조금 길게 써서 육십 바이트를 넘깁니다.\n\n"
+                         "두 번째 줄도 마찬가지로 조금 길게 써서 합쳐지지 않게 합니다.")
+        ns["tts_voice_name"] = "ko-KR-Wavenet-A"
+        self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None, timeout=10))
+        counted = dict.__getitem__(ns, "_counted")
+        self.assertEqual(len(counted), 2)
+        self.assertEqual({v for v, _ in counted}, {"ko-KR-Chirp3-HD-Callirrhoe"})
+        self.assertEqual([s for _, s in counted], dict.__getitem__(ns, "_synth_texts"))
 
     def test_thread_start_failure_does_not_leave_playing_state(self):
         ui = []

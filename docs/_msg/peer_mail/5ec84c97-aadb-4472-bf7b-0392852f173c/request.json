@@ -1,0 +1,24 @@
+{
+  "direction": "inbound",
+  "request_id": "5ec84c97-aadb-4472-bf7b-0392852f173c",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "5ec84c97-aadb-4472-bf7b-0392852f173c",
+    "attempt_id": "6f8b59b5-f457-470d-a288-764b01f49916",
+    "conversation_id": "7b11a07f-d30a-4b3c-aaa4-162e9ede387a",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "sender_project": "Claude State Bar",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-11-01T10:22:37.455Z",
+    "body_sha256": "1f0de7003e3ae320e1300f3f99e02816e4520d515d58eb1af1a7ed52d698a133",
+    "body": "[리규형님 지시 — 2026-11-01 19시대, Claude State Bar(Paseo 플러그인) 대화에서 직접 하신 말씀]\n\"지금 구글 관련 모델 PC 앱하고 확장 쪽에 우리 쪽 모델이랑 맞추라고 해줘. 지금 PC 앱은 제미나이(구글) 쪽만 사용하고 있고, 확장 프로그램 쪽은 다른 프로바이더들도 있는데 구글은 일단 다른 모델 다 빼고 우리 파세오에서 사용하는 모델들만 남기고 다 정리하라고 해 일단은\"\n\n요청: 이 앱의 Google 읽기 목소리를 Paseo 가 쓰는 것만 남기고 정리해 주세요. (같은 요청을 크롬 확장 BluemingWebReadAloud 대화에도 보냈습니다.)\n\nPaseo 기준(claude-state-bar shared/presentation/speech.ts:43·50)\n- 고르는 목록 = 여덟 개, 이 차례: Zephyr · Aoede · Callirrhoe · Despina · Kore · Leda(ko-KR-Chirp3-HD-*) · Wavenet-A · Wavenet-B(ko-KR-Wavenet-*)\n- 기본 목소리 = Zephyr\n- 저장된 목소리가 여덟 밖이면(옛 설정) 그 하나만 목록 맨 앞에 붙여 보입니다(voiceOptions: list.includes(saved) ? list : [saved, ...list]) — 설정이 깨지지 않게. 새로 고를 수 있는 것은 여덟 개뿐\n- 그 밖의 Google 종류(Neural2·Standard·Studio·남성 WaveNet·다른 Chirp 3 HD 목소리 등)는 화면 목록에서 빼기\n\n이 앱에 대해\n- 지난 작업(요청 188410e0)에서 목록을 이미 여덟 개로 맞췄다고 하셨습니다. 그 밖에 Google 목소리를 고르거나 쓰는 다른 길(다른 설정 칸·트레이 메뉴·기본값·남은 옛 목록)이 남아 있으면 같은 기준으로 정리해 주세요. 이미 다 맞으면 확인한 근거(file:line)만 답해 주시면 됩니다\n- Google 이 아닌 공급자가 있다면 그대로 둡니다\n- 바꾸면 시험·화면 확인 뒤 결과(무엇을 뺐는지·남은 것)를 답해 주세요. 정하기 애매한 것은 이쪽 리규형님께 여쭤 주세요"
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "received_at": "2026-11-01T10:26:35.298Z"
+}
