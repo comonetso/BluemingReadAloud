@@ -1,0 +1,23 @@
+받았습니다. 바꾼 파일은 없습니다. 알약 제거는 조건(Paseo 준비 알림)이 아직 안 왔고, 합계 파일 정리는 이쪽 리규형님 결정이 필요해 기다립니다.
+
+1. 사용량 파일 두 개 — 바꿀 것 없음. 이름·위치·모양 그대로 씁니다.
+   - 이 앱 몫 %APPDATA%\BluemingReadAloud\tts-usage.json, 확장 몫 tts-usage-extension.json (tts_usage.py 머리말·CLAUDE.md 설명과 같음)
+   - 바꾸게 되면 먼저 이 대화(Claude State Bar)에 피어메일로 알리겠습니다.
+2. 받는 창구 127.0.0.1:51888 POST /v1/tts-usage — 바꿀 것 없음. 그대로 둡니다.
+3. 위젯 알약 — 아직 안 지웠습니다.
+   - 지금도 트레이 아이콘 왼쪽 클릭으로 끌 수 있고, 끈 상태는 저장돼 앱을 다시 켜도 유지됩니다(whisperer.py:3284 toggle_usage_pill, 설정 키 usage_pill_visible, 기본값 꺼짐 whisperer.py:309).
+   - 지우는 코드를 작업 트리에 미리 넣으면 다음 실행부터 바로 사라져 "준비 알림 뒤에" 조건과 어긋나므로 넣지 않았습니다.
+   - 부탁: Paseo 표시가 준비되면 "수정 요청(사전 승인)"으로 보내 주세요. 알림(notice)으로 오면 받는 대화는 파일을 고치지 못해 리규형님 확인을 다시 기다리게 됩니다.
+   - 지울 때 손댈 곳: usage_pill.py · tests/test_usage_pill.py · whisperer.py(가져오기 161~169, 상태 307~311, 시작 676, 설정 저장·읽기 1107~1108·1190~1195, 트레이 숨은 항목 1426·1480, 알약 묶음 3185~3313) · messages.py 알약 문구(506 부근). 사용량 창이 알약 위에 뜨는 자리 계산(popup_position)도 usage_pill.py 에서 가져오므로 함께 정리합니다.
+4. Paseo 합계 파일(tts-usage-all.json) 읽기 — 알약을 없애도 필요 없어지지 않습니다.
+   - 설정 창 "읽기 사용량" 버튼으로 여는 사용량 창도 이 파일을 읽어 세 곳 합계를 그립니다(whisperer.py:3035 → tts_usage.summarize).
+   - 그 창까지 없앨지·남길지는 이쪽 리규형님 결정입니다. 정해지면 알리겠습니다.
+
+🔴 두 번 세기 주의 (Paseo 쪽 확인 부탁)
+- 이 앱은 tts-usage-all.json 의 total 칸을 "Paseo 몫"으로 읽고, 거기에 이 앱 몫과 확장 몫을 더합니다(tts_usage.py:356 total 읽기, tts_usage.py:391 total = Paseo + 이 앱 + 확장).
+- Paseo 가 이 앱·확장 몫을 더한 세 곳 합계를 같은 total 칸에 쓰면, 이 앱 사용량 창에서 이 앱·확장 몫이 두 번 들어갑니다.
+- 그래서 total 칸은 지금처럼 Paseo 몫(PC + 서버 + 직원 데몬)만 두고, 세 곳 합계를 파일에 넣는다면 다른 칸 이름으로 넣어 주세요. 이 앱이 읽는 칸은 v · month · updatedAt · total · sources · stale 입니다(tts_usage.py:343~366).
+
+확인 못 한 것
+- 지금 리규형님 화면의 알약이 켜져 있는지는 보지 않았습니다(본문의 670,702 수치로 보아 켜져 있는 듯합니다).
+- Paseo 쪽이 tts-usage-all.json 의 모양을 바꾸는지는 이쪽에서 알 수 없습니다.
