@@ -253,6 +253,9 @@ gemini_api_key = None       # Gemini API 를 허용한 키(번역용). 없어도
 # Google Cloud TTS 관련 변수
 google_tts = None          # google.cloud.texttospeech 모듈 (요청 객체를 만들 때 씀). init_tts_client 가 채운다
 google_tts_client = None   # TextToSpeechClient. None 이면 "인증 안 됨" — speak_text 가 읽지 않고 돌아간다
+# 그 클라이언트를 만든 키의 사용량 이름표 {"id","tail"}(tts_usage.key_mark — 키 값 자체는 아님). 클라이언트와 같이 바뀐다.
+# 사용량 기록의 키별 칸에 쓴다(2026-11-12 Claude State Bar 요청 bf23afd1 — Paseo 가 Google 키마다 따로 센다)
+google_tts_key_mark = None
 # 주 언어가 아닌 문장 번역 (2026-09-29, translation.py). 규칙은 translation.py 머리 설명.
 translate_enabled = True   # 설정 창 "일반" 체크. 기본 켬(사용자 결정)
 # 번역된 조각은 원문 위 형광펜 막에 번역문을 쓴다(짙은 회색 바탕 + 흰 글씨, source_highlight caption). 끄면 노랑 형광펜만.
@@ -312,10 +315,11 @@ USAGE_TICK_MS = 5000           # 알약·사용량 창이 떠 있을 때 기록 
 _usage_refresh_pending = False
 
 
-def _count_tts_usage(voice_name, sent):
+def _count_tts_usage(voice_name, sent, key_mark=None):
     """성공한 합성 요청 하나의 보낸 글을 이번 달 사용량에 더한다(합성·미리 듣기 스레드에서 불린다 — Tk 를 만지지 않는다).
+    key_mark = 그 요청을 보낸 클라이언트의 키 이름표(google_tts_key_mark) — 그 키 칸에도 같이 더한다(2026-11-12).
     더한 뒤 알약·사용량 창을 바로 고치라고 gui_queue 에 알린다."""
-    tts_usage_counter.count(tts_usage.usage_kind(voice_name), sent)
+    tts_usage_counter.count(tts_usage.usage_kind(voice_name), sent, key=key_mark)
     gui_queue.put("usage_changed")
 
 # 프로그램 다중 실행 방지
@@ -502,7 +506,7 @@ def init_tts_client(tts_key, gemini_key=None):
       - 2026-06-07 에 키 방식을 버린 이유는 STT v2 의 IAM 제약이었다. STT 를 걷어내 그 제약은 없어졌다.
     전역 google_tts / google_tts_client 는 성공했을 때만 바꾼다 → 실패해도 앞에서 만든 클라이언트는 그대로 남는다.
     """
-    global google_tts, google_tts_client
+    global google_tts, google_tts_client, google_tts_key_mark
 
     if not tts_key:
         raise ValueError("TTS 키가 없습니다")
@@ -520,6 +524,10 @@ def init_tts_client(tts_key, gemini_key=None):
     client = texttospeech.TextToSpeechClient(client_options={"api_key": tts_key})
     google_tts = texttospeech
     google_tts_client = client
+    google_tts_key_mark = tts_usage.key_mark(tts_key)
+    # 사용량 기록에 키별 칸이 없으면(옛 판) 지금 만들고 이번 달 몫을 이 키로 옮긴다 — 아직 안 읽었어도 Paseo 가 바로 키별로
+    # 보게(Paseo 데몬이 뜰 때 하는 것과 같게). 칸이 이미 있으면 아무것도 안 한다(키를 바꿔도 다시 옮기지 않는다)
+    tts_usage_counter.adopt_keys(google_tts_key_mark)
     log_to_console("[TTS] Google Cloud TTS 클라이언트 초기화 성공 (API 키)")
     logging.info("Google Cloud TTS 클라이언트 초기화 완료 (API 키)")
     _init_translator(gemini_key)
@@ -2713,7 +2721,8 @@ def show_tts_settings_dialog():
             # (별도 스레드) 네트워크 요청이 Tk 메인을 멈추지 않게 따로 돈다. 여기서는 Tk 를 만지지 않는다.
             # 속도는 sel_rate 그대로(Cloud TTS 허용 0.25~4.0 안이어야 한다 — 읽기는 늘 1.0 으로 합성), 언어 코드는 ko-KR 고정(한국어 음성 목록뿐).
             try:
-                if not google_tts_client:
+                client, key_for_usage = google_tts_client, google_tts_key_mark   # 합성기와 그 키 이름표를 같이 잡는다
+                if not client:
                     log_to_console("TTS 클라이언트 미초기화")
                     return
 
@@ -2721,8 +2730,8 @@ def show_tts_settings_dialog():
                 voice = google_tts.VoiceSelectionParams(language_code="ko-KR", name=sel_voice_id)
                 audio_config = google_tts.AudioConfig(audio_encoding=google_tts.AudioEncoding.LINEAR16, sample_rate_hertz=24000, speaking_rate=sel_rate)
 
-                response = google_tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
-                _count_tts_usage(sel_voice_id, text)   # 미리 듣기도 Google 이 매긴다 — 읽기와 같이 센다(2026-11-01)
+                response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+                _count_tts_usage(sel_voice_id, text, key_for_usage)   # 미리 듣기도 Google 이 매긴다 — 읽기와 같이 센다(2026-11-01)
 
                 import numpy as np
                 import sounddevice as sd
@@ -3585,9 +3594,10 @@ def speak_text(text, hl_area=None):
     box = {}
     try:
         voice_for_usage = tts_voice_name   # 이 읽기의 목소리(설정 창에서 바꿔도 이 읽기는 이 목소리로 센다)
+        key_for_usage = google_tts_key_mark   # 이 읽기가 쓰는 클라이언트의 키(인증 창에서 키를 바꿔도 이 읽기는 이 키로 센다)
         synthesize = tts_engine.make_google_synthesize(
             google_tts_client, google_tts, tts_voice_name, log=log_to_console,
-            on_sent=lambda sent: _count_tts_usage(voice_for_usage, sent))
+            on_sent=lambda sent: _count_tts_usage(voice_for_usage, sent, key_for_usage))
         if raw_texts:
             # 번역 대상 조각만 번역 → 읽기용 변환 → 합성. 번역 실패는 SegmentFailed → 그 조각 차례에 멈추고 알림
             translator = gemini_translator or translation.MissingTranslator("번역기가 준비되지 않았습니다(인증 전)")

@@ -169,6 +169,103 @@ class TestUsageCounter(TempDirCase):
         self.assertTrue(logs and logs[0].startswith("[사용량]"))
 
 
+class TestKeyMark(unittest.TestCase):
+    # 기대값 = Paseo usageKeyMark 와 같은 계산(node crypto sha256 → hex 앞 12, trim 뒤 끝 4)으로 2026-11-12 에 뽑은 값. 가짜 키
+    CASES = [("  AIzaFakeKeyForTest-1234  ", "c0b1947007b8", "1234"),
+             ("AIzaOtherFakeKeyABCD", "8b9d16888b45", "ABCD"),
+             ("가짜키한글끝", "fe6ff7fce466", "키한글끝")]
+
+    def test_same_as_paseo(self):
+        for key, kid, tail in self.CASES:
+            self.assertEqual(tts_usage.key_mark(key), {"id": kid, "tail": tail}, key)
+
+    def test_empty_or_not_text(self):
+        for key in (None, "", "   ", 123):
+            self.assertIsNone(tts_usage.key_mark(key))
+
+
+class TestUsageCounterKeys(TempDirCase):
+    """키별 칸(2026-11-12 Claude State Bar 요청 bf23afd1) — Paseo countUsage·adoptKeys 와 같게."""
+    NOV = utc("2026-11-02T00:00:00Z")
+    A = tts_usage.key_mark("  AIzaFakeKeyForTest-1234  ")
+    B = tts_usage.key_mark("AIzaOtherFakeKeyABCD")
+
+    def counter(self):
+        return tts_usage.UsageCounter(self.path("tts-usage.json"))
+
+    def read(self):
+        with open(self.path("tts-usage.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def write(self, data):
+        os.makedirs(os.path.dirname(self.path("tts-usage.json")), exist_ok=True)
+        with open(self.path("tts-usage.json"), "w", encoding="utf-8") as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+
+    def test_counts_per_key_and_months_unchanged(self):
+        c = self.counter()
+        c.count("chirp3hd", "가나다", now=self.NOV, key=self.A)
+        c.count("wavenet", "라", now=self.NOV, key=self.A)
+        c.count("chirp3hd", "ab", now=self.NOV, key=self.B)
+        self.assertEqual(self.read(), {
+            "v": 1, "months": {"2026-11": {"chirp3hd": 5, "wavenet": 1}},
+            "keys": {"c0b1947007b8": {"tail": "1234", "months": {"2026-11": {"chirp3hd": 3, "wavenet": 1}}},
+                     "8b9d16888b45": {"tail": "ABCD", "months": {"2026-11": {"chirp3hd": 2}}}}})
+        self.assertEqual(c.month_counts("2026-11"), {"chirp3hd": 5, "wavenet": 1})   # 알약·사용량 창은 그대로 종류별 합
+
+    def test_old_file_moves_only_this_month_once(self):
+        self.write({"v": 1, "months": {"2026-10": {"chirp3hd": 7}, "2026-11": {"chirp3hd": 100, "wavenet": 3}}})
+        c = self.counter()
+        c.count("chirp3hd", "가", now=self.NOV, key=self.A)
+        c.count("chirp3hd", "나나", now=self.NOV, key=self.B)        # 키 칸이 이미 있다 — 다시 옮기지 않는다
+        data = self.read()
+        self.assertEqual(data["months"], {"2026-10": {"chirp3hd": 7}, "2026-11": {"chirp3hd": 103, "wavenet": 3}})
+        self.assertEqual(data["keys"], {
+            "c0b1947007b8": {"tail": "1234", "months": {"2026-11": {"chirp3hd": 101, "wavenet": 3}}},   # 지난달은 안 옮김
+            "8b9d16888b45": {"tail": "ABCD", "months": {"2026-11": {"chirp3hd": 2}}}})
+
+    def test_count_without_key_keeps_key_cells(self):
+        c = self.counter()
+        c.count("chirp3hd", "가", now=self.NOV)
+        self.assertNotIn("keys", self.read())                        # 키를 모르면 옛 모양 그대로
+        c.count("chirp3hd", "가", now=self.NOV, key=self.A)
+        c.count("chirp3hd", "가", now=self.NOV)
+        data = self.read()
+        self.assertEqual(data["months"]["2026-11"], {"chirp3hd": 3})
+        self.assertEqual(data["keys"]["c0b1947007b8"]["months"]["2026-11"], {"chirp3hd": 2})   # 옮긴 1 + 센 1
+
+    def test_key_cells_keep_their_own_13_months(self):
+        # Paseo countUsage 의 pruneMonths(e.months) 와 같게 — 키 칸마다 자기 달 중 최근 13개(전체 달력 기준이 아니다)
+        c = self.counter()
+        c.count("wavenet", "x", now=datetime(2026, 1, 15, tzinfo=UTC), key=self.B)
+        for i in range(14):   # 2027-01 … 2028-02
+            c.count("wavenet", "x", now=datetime(2027 + i // 12, i % 12 + 1, 15, tzinfo=UTC), key=self.A)
+        data = self.read()
+        self.assertEqual(min(data["months"]), "2027-02")             # 종류별 합은 13달
+        self.assertEqual(len(data["keys"]["c0b1947007b8"]["months"]), 13)
+        self.assertEqual(min(data["keys"]["c0b1947007b8"]["months"]), "2027-02")
+        self.assertEqual(data["keys"]["8b9d16888b45"]["months"], {"2026-01": {"wavenet": 1}})
+
+    def test_adopt_keys_when_app_makes_its_client(self):
+        c = self.counter()
+        self.assertFalse(c.adopt_keys(self.A, now=self.NOV))          # 기록이 없으면 만들지 않는다
+        self.assertFalse(os.path.exists(self.path("tts-usage.json")))
+        self.write({"v": 1, "months": {"2026-10": {"chirp3hd": 7}, "2026-11": {"chirp3hd": 100}}})
+        self.assertFalse(c.adopt_keys(None, now=self.NOV))           # 키를 모르면 안 한다
+        self.assertTrue(c.adopt_keys(self.A, now=self.NOV))
+        self.assertEqual(self.read()["keys"], {"c0b1947007b8": {"tail": "1234", "months": {"2026-11": {"chirp3hd": 100}}}})
+        self.assertFalse(c.adopt_keys(self.B, now=self.NOV))         # 키 칸이 이미 있다 — 키를 바꿔도 다시 옮기지 않는다
+        self.write("{깨짐")
+        self.assertFalse(c.adopt_keys(self.A, now=self.NOV))          # 깨진 기록은 건드리지 않는다
+        with open(self.path("tts-usage.json"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "{깨짐")
+
+    def test_broken_key_cells_are_rebuilt_from_this_month(self):
+        self.write({"v": 1, "months": {"2026-11": {"chirp3hd": 50}}, "keys": "x"})
+        self.counter().count("chirp3hd", "가", now=self.NOV, key=self.A)
+        self.assertEqual(self.read()["keys"], {"c0b1947007b8": {"tail": "1234", "months": {"2026-11": {"chirp3hd": 51}}}})
+
+
 class TestExtensionReports(TempDirCase):
     NOV = utc("2026-11-02T00:00:00Z")
 
@@ -234,6 +331,46 @@ class TestExtensionReports(TempDirCase):
             saved = json.load(f)["sources"]["abcdefgh"]["months"]
         self.assertEqual(len(saved), 13)
         self.assertNotIn("2025-01", saved)
+
+    def saved_sources(self):
+        with open(self.path("tts-usage-extension.json"), encoding="utf-8") as f:
+            return json.load(f)["sources"]
+
+    KEYS = {"c0b1947007b8": {"tail": "1234", "months": {"2026-11": {"chirp3hd": 10, "wavenet": 2}}}}
+
+    def test_keeps_keys_from_extension(self):
+        # 2026-11-12 Claude State Bar 요청 bf23afd1 — 확장이 keys 를 보내면 sources[source].keys 에 그대로
+        r = self.reports()
+        p = self.payload()
+        p["keys"] = self.KEYS
+        self.assertEqual(r.accept(p, now=self.NOV), (True, "abcdefgh"))
+        r.accept(self.payload("zzzzzzzz", "Whale"), now=self.NOV)    # 다른 설치를 받아도 앞 설치의 keys 는 남는다
+        sources = self.saved_sources()
+        self.assertEqual(sources["abcdefgh"]["keys"], self.KEYS)
+        self.assertNotIn("keys", sources["zzzzzzzz"])                # 안 보낸 설치는 칸이 없다(Paseo 는 PC 키로 본다)
+        p2 = self.payload()
+        p2["keys"] = None                                           # null = 안 보낸 것
+        self.assertEqual(r.accept(p2, now=self.NOV), (True, "abcdefgh"))
+        self.assertNotIn("keys", self.saved_sources()["abcdefgh"])   # 받을 때마다 통째로 바꾼다
+        self.assertEqual(r.month_by_source("2026-11")[0]["counts"], {"chirp3hd": 10, "wavenet": 2})
+
+    def test_rejects_bad_keys_whole(self):
+        r = self.reports()
+        bad = [
+            "x", [],
+            {"C0B1947007B8": {"tail": "1234", "months": {}}},                     # 대문자
+            {"c0b1947007b": {"tail": "1234", "months": {}}},                      # 11글자
+            {"c0b1947007b8": {"tail": "12345", "months": {}}},                    # 끝 4글자보다 김
+            {"c0b1947007b8": {"tail": 1234, "months": {}}},
+            {"c0b1947007b8": {"tail": "1234", "months": {"2026-11": {"chirp3hd": -1}}}},
+            {"c0b1947007b8": {"tail": "1234", "months": "x"}},
+            {"c0b1947007b8": []},
+        ]
+        for keys in bad:
+            p = self.payload()
+            p["keys"] = keys
+            self.assertEqual(r.accept(p, now=self.NOV), (False, "keys"), keys)
+        self.assertEqual(r.month_by_source("2026-11"), [])
 
 
 class TestPaseoUsage(TempDirCase):

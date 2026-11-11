@@ -14,6 +14,15 @@
 #   - 달 키: Google 결제 달 = 미국 태평양 시간 "YYYY-MM"(billing_month). 2026-11 은 한국 시각 11-01 16:00 부터.
 #   - 기록 모양: {"v":1,"months":{"2026-11":{"chirp3hd":12345,"wavenet":0}}} — 13달만 남김, 임시 파일에 쓰고 이름 바꾸기.
 #
+# 키별 칸 (2026-11-12 Claude State Bar 요청 peer_mail bf23afd1 — Paseo 가 11-12 부터 Google 키마다 따로 센다):
+#   - 기록에 "keys":{"<id>":{"tail":"<키 끝 4글자>","months":{"2026-11":{"chirp3hd":N}}}} 칸을 더한다. months(종류별 합)는 그대로.
+#     id = 키(앞뒤 공백 뗌)를 UTF-8 sha256 → 16진수 앞 12글자(key_mark — Paseo usageKeyMark 와 같은 계산). 키 값은 안 쓴다.
+#   - 성공한 요청마다 months 와 같은 글자 수를 그 요청에 쓴 키 칸에 더한다. 키 칸마다 자기 달 중 최근 13개(Paseo pruneMonths).
+#   - 키 칸이 없는 파일(옛 판)은 키 칸을 처음 만들 때 이번 달 몫을 지금 키로 옮긴다(지난달은 그대로 — Paseo adoptKeys 와 같게).
+#     Paseo 는 키 칸이 있는 파일은 키 칸만 읽으므로(tts.ts keyedMonthCounts), 안 옮기면 이번 달 앞 몫이 Paseo 합계에서 빠진다.
+#   - 크롬 확장 몫(tts-usage-extension.json)은 확장이 보낸 keys 를 그 설치(sources[source]) 칸에 그대로 둔다.
+#   - 이 앱의 알약·사용량 창은 키별로 나누지 않는다(요청 범위 밖 — 나눌지는 리규형님 몫).
+#
 # 세 곳 모으기:
 #   - Paseo 몫: Paseo PC 데몬이 5분마다 내보내는 파일(PC·서버 셋·직원 데몬 합) — PASEO_USAGE_ALL_PATH. 읽기만 한다.
 #   - 크롬 확장 몫: 확장이 셀 때마다 자기 누적값을 이 앱의 받는 창구로 보낸다(UsageReceiver, 127.0.0.1:51888 TCP,
@@ -24,6 +33,7 @@
 # ⚠️ 여기 숫자는 세 곳이 스스로 센 값이다. 이 기능을 넣기 전에 쓴 양·다른 프로그램이 같은 키로 쓴 양은 빠진다.
 #    실제 청구는 Google Cloud 결제 화면이 정본이다.
 
+import hashlib
 import json
 import os
 import re
@@ -53,6 +63,7 @@ _COUNT_MAX = 10 ** 10             # 한 칸 값 상한 — 이보다 크면 잘�
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _KIND_RE = re.compile(r"^[a-z0-9]{1,16}$")
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_KEY_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _UTC = timezone.utc
 
 
@@ -226,13 +237,74 @@ def _clean_months(raw):
     return out
 
 
-def _read_months(path):
-    data = _read_json(path)
-    if isinstance(data, dict) and data.get("v") == 1:
-        months = _clean_months(data.get("months"))
-        if months is not None:
-            return months
-    return {}
+def _prune_months(months):
+    for old in sorted(months)[:-USAGE_KEEP_MONTHS]:
+        del months[old]
+
+
+def key_mark(key):
+    """API 키 → 키별 칸 이름표 {"id","tail"} (Paseo tts.ts usageKeyMark 와 같은 계산). 키가 비었으면 None.
+    id = 앞뒤 공백을 뗀 키의 UTF-8 sha256 16진수 앞 12글자, tail = 끝 4글자. 키 값 자체는 파일에 쓰지 않는다."""
+    if not isinstance(key, str) or not key.strip():
+        return None
+    k = key.strip()
+    return {"id": hashlib.sha256(k.encode("utf-8")).hexdigest()[:12], "tail": k[-4:]}
+
+
+def _clean_keys(raw):
+    """{"<id>":{"tail":"…","months":{...}}} 에서 올바른 칸만. 하나라도 틀린 모양이면 None(통째로 받지 않음 — months 와 같은 규칙).
+    키 칸마다 최근 13달만 두고, 달이 하나도 없는 키 칸은 뺀다."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for kid, entry in raw.items():
+        if not isinstance(kid, str) or not _KEY_ID_RE.match(kid) or not isinstance(entry, dict):
+            return None
+        tail = entry.get("tail", "")
+        if not isinstance(tail, str) or len(tail) > 4 or not tail.isprintable():
+            return None
+        months = _clean_months(entry.get("months"))
+        if months is None:
+            return None
+        if months:
+            out[kid] = {"tail": tail, "months": months}
+    return out
+
+
+def _parse_usage(data):
+    """읽은 앱 사용량 기록 → (months, keys). 쓸 수 없는 모양이면 None.
+    keys = None 은 키 칸이 없는 기록(옛 판, 또는 키 칸만 깨짐) — 키 칸을 처음 만들 때 이번 달 몫을 옮기려고 {} 와 구분한다."""
+    if not isinstance(data, dict) or data.get("v") != 1:
+        return None
+    months = _clean_months(data.get("months"))
+    if months is None:
+        return None
+    keys = _clean_keys(data.get("keys")) if "keys" in data else None
+    return months, keys
+
+
+def _read_usage(path):
+    """없거나 깨진 기록은 처음부터 다시 센다(Paseo readUsage 와 같게) → ({}, None)."""
+    return _parse_usage(_read_json(path)) or ({}, None)
+
+
+def _adopt_keys(months, keys, month, mark):
+    """키 칸이 없는 기록이면 키 칸을 만들고 이번 달 몫을 지금 키(mark) 칸으로 옮긴 keys 를 돌려준다(Paseo adoptKeys 와 같게).
+    지난달은 옮기지 않는다 — 그 사이 키를 바꿨을 수 있다. 키 칸이 이미 있거나 키를 모르면 keys 그대로."""
+    if keys is not None or mark is None:
+        return keys
+    keys = {}
+    now_counts = {k: v for k, v in months.get(month, {}).items() if v}
+    if now_counts:
+        keys[mark["id"]] = {"tail": mark["tail"], "months": {month: now_counts}}
+    return keys
+
+
+def _usage_record(months, keys):
+    record = {"v": 1, "months": months}
+    if keys is not None:
+        record["keys"] = keys
+    return record
 
 
 class UsageCounter:
@@ -244,28 +316,57 @@ class UsageCounter:
         self._lock = threading.Lock()
         self._log = log or (lambda msg: None)
 
-    def count(self, kind, sent, now=None):
+    def count(self, kind, sent, now=None, key=None):
+        """key = 그 요청에 쓴 키의 이름표(key_mark). 주면 months 와 같은 글자 수를 그 키 칸에도 더한다(2026-11-12).
+        안 주면 months 만 더한다(이미 있는 키 칸은 그대로 둔다 — 이 앱은 키 없이 합성하지 않으므로 실제로는 늘 준다)."""
         chars = len(sent or "")
         if chars <= 0:
             return True
         try:
             with self._lock:
-                months = _read_months(self.path)
+                months, keys = _read_usage(self.path)
                 month = billing_month(now)
+                keys = _adopt_keys(months, keys, month, key)   # 더하기 전에 — 옮기는 건 이미 센 몫만
                 m = months.setdefault(month, {})
                 m[kind] = int(m.get(kind, 0)) + chars
-                for old in sorted(months)[:-USAGE_KEEP_MONTHS]:
-                    del months[old]
-                _write_json(self.path, {"v": 1, "months": months})
+                _prune_months(months)
+                if key is not None:
+                    entry = keys.setdefault(key["id"], {"tail": key["tail"], "months": {}})
+                    entry["tail"] = key["tail"]
+                    em = entry["months"].setdefault(month, {})
+                    em[kind] = int(em.get(kind, 0)) + chars
+                for kid in list(keys or ()):
+                    _prune_months(keys[kid]["months"])
+                    if not keys[kid]["months"]:
+                        del keys[kid]
+                _write_json(self.path, _usage_record(months, keys))
             return True
         except Exception as e:
             self._log(f"[사용량] 기록 실패(읽기는 그대로): {e}")
             return False
 
+    def adopt_keys(self, key, now=None):
+        """키 칸이 없는 기록에 키 칸을 만들고 이번 달 몫을 지금 키로 옮긴다 — 앱이 키로 합성기를 만들 때 부른다
+        (Paseo adoptUsageKeysNow 와 같게: 아직 안 읽었어도 Paseo 가 이 앱 몫을 바로 키별로 보게).
+        기록이 없거나 깨졌거나 키 칸이 이미 있거나 키를 모르면 아무것도 쓰지 않는다. 반환 True = 썼다."""
+        if key is None:
+            return False
+        try:
+            with self._lock:
+                parsed = _parse_usage(_read_json(self.path))
+                if parsed is None or parsed[1] is not None:
+                    return False
+                months, _ = parsed
+                _write_json(self.path, _usage_record(months, _adopt_keys(months, None, billing_month(now), key)))
+            return True
+        except Exception as e:
+            self._log(f"[사용량] 키별 칸 만들기 실패(다음에 셀 때 다시 한다): {e}")
+            return False
+
     def month_counts(self, month=None):
         """그달 종류별 글자 수 {"chirp3hd": N, ...}. 기록이 없으면 {}."""
         with self._lock:
-            return dict(_read_months(self.path).get(month or billing_month(), {}))
+            return dict(_read_usage(self.path)[0].get(month or billing_month(), {}))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -281,7 +382,9 @@ def _clean_label(raw):
 class ExtensionReports:
     """확장 설치(source)마다 마지막으로 받은 누적 기록을 둔다 — 받을 때마다 그 source 몫을 통째로 바꾼다.
     그래서 몇 번 받아도 같고, 한 번 놓쳐도 다음에 따라잡는다. 파일 모양:
-    {"v":1,"sources":{"<source>":{"label":"Aside","updatedAt":"<ISO>","months":{"2026-11":{...}}}}}"""
+    {"v":1,"sources":{"<source>":{"label":"Aside","updatedAt":"<ISO>","months":{"2026-11":{...}},
+                                   "keys":{"<id>":{"tail":"…","months":{...}}}}}}
+    keys(2026-11-12) = 확장이 보낸 키별 칸을 그대로 둔다. 안 보낸 설치는 keys 칸이 없다(Paseo 는 그 몫을 PC 키로 본다)."""
 
     def __init__(self, path=EXTENSION_USAGE_PATH):
         self.path = path
@@ -301,6 +404,9 @@ class ExtensionReports:
                 out[sid] = {"label": _clean_label(item.get("label")),
                             "updatedAt": item.get("updatedAt") if isinstance(item.get("updatedAt"), str) else "",
                             "months": months}
+                keys = _clean_keys(item["keys"]) if "keys" in item else None
+                if keys is not None:
+                    out[sid]["keys"] = keys
         return out
 
     def accept(self, payload, now=None):
@@ -313,10 +419,17 @@ class ExtensionReports:
         months = _clean_months(payload.get("months"))
         if months is None:
             return False, "months"
+        keys = None
+        if payload.get("keys") is not None:   # 칸이 없거나 null = 키를 안 보낸 판(받아들인다)
+            keys = _clean_keys(payload["keys"])
+            if keys is None:
+                return False, "keys"
         stamp = _as_utc(now).isoformat().replace("+00:00", "Z")
         with self._lock:
             sources = self._read()
             sources[source] = {"label": _clean_label(payload.get("label")), "updatedAt": stamp, "months": months}
+            if keys is not None:
+                sources[source]["keys"] = keys
             if len(sources) > EXTENSION_MAX_SOURCES:
                 for sid in sorted(sources, key=lambda s: sources[s]["updatedAt"])[:len(sources) - EXTENSION_MAX_SOURCES]:
                     del sources[sid]
@@ -438,7 +551,7 @@ class UsageReceiver:
       속일 수 없어서, 아무 페이지가 숫자를 바꿔 넣지 못한다. 받는 것은 숫자뿐이고 파일 경로·명령은 받지 않는다.
     - 따로 도는 스레드(daemon)라 앱이 끝나면 같이 끝난다. 포트를 다른 프로그램이 쓰고 있으면 start() 가 False.
     - on_report(source, label, months) 는 받은 스레드에서 불린다(Tk 를 만지지 말 것 — 로그 한 줄 정도).
-    - on_reject(reason) — POST 를 거절할 때 까닭 이름만(origin_missing·origin_other·path·length·size·json·v·source·
+    - on_reject(reason) — POST 를 거절할 때 까닭 이름만(origin_missing·origin_other·path·length·size·json·v·source·keys·
       months·write). 숫자·주소·Origin 값은 넘기지 않는다(2026-11-01 리규형님 버튼 "거절하면 까닭을 콘솔에" — 확장 몫이
       0 인 원인 찾기). 받은 스레드에서 불린다.
     """

@@ -85,12 +85,23 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   type name lower-case). Month = Google billing month in US Pacific time (`billing_month` — DST rule written out, Windows
   Python has no tzdata; tests hold node `Intl` results). File `%APPDATA%\BluemingReadAloud\tts-usage.json`
   `{"v":1,"months":{"2026-11":{"chirp3hd":N,"wavenet":N}}}`, 13 months, temp file + rename — shared by the dev run and the
-  installed app (same key). Paseo's share = `~/.paseo/claude-state-bar/tts-usage-all.json` written by the Paseo PC daemon
+  installed app (same key). **Per-key cells** (2026-11-12, Claude State Bar request peer_mail bf23afd1 — Paseo counts per
+  Google key from that day): `"keys":{"<id>":{"tail":"<last 4>","months":{…}}}` next to `months` (kept as is). id = the key
+  (trimmed) UTF-8 sha256, first 12 hex (`key_mark` = Paseo `usageKeyMark`); the key itself is never written. Each counted
+  request adds the same number to the cell of the key whose client sent it (`google_tts_key_mark`, set with the client in
+  `init_tts_client`; a reading / preview keeps the key it started with). A file without `keys` (old build) gets them on the
+  first count or when the client is made (`UsageCounter.adopt_keys`), moving **this month only** to the current key —
+  Paseo reads only `keys` when present (`keyedMonthCounts`), so not moving would drop this month's earlier share. Each key
+  cell keeps its own latest 13 months (Paseo `pruneMonths`). An old installed build rewrites the file without `keys`; the
+  next count by a new build moves this month again. The pill and the usage window stay per kind (per-key display is
+  outside that request). Paseo's share = `~/.paseo/claude-state-bar/tts-usage-all.json` written by the Paseo PC daemon
   every 5 min (PC + three servers + staff daemons; read only, `state` ok / missing / broken / other_month). The extension's
   share arrives at **`UsageReceiver` — HTTP on 127.0.0.1:51888 TCP** (same number as the single-instance UDP socket; TCP does
   not clash), `POST /v1/tts-usage` `{"v":1,"source":"<install id>","label":"Aside","months":{…}}`, accepted only when
   `Origin` starts with `chrome-extension://` (a web page cannot fake it), 16 KB max, each source's record replaced whole
-  (`%APPDATA%\BluemingReadAloud\tts-usage-extension.json`, at most 20 sources); `GET /v1/health`. Spec agreed with the
+  (`%APPDATA%\BluemingReadAloud\tts-usage-extension.json`, at most 20 sources); `GET /v1/health`. A body may also carry
+  `keys` (same shape as above, 2026-11-12) → kept as `sources[source].keys`; missing / `null` = no keys (Paseo counts that
+  source under the PC key); a wrong shape rejects the whole body (reason `keys`), like `months`. Spec agreed with the
   extension conversation (peer_mail 423b8e9a). `summarize()` → rows for the usage window.
 - **usage_pill.py** — the usage pill (2026-11-01 user request "I want to monitor it — money is going out"): **tray icon
   left click** toggles it (a hidden `default=True, visible=False` pystray item, so the right-click menu keeps its five items;

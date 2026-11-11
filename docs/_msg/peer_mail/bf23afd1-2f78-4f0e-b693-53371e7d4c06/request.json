@@ -1,0 +1,24 @@
+{
+  "direction": "inbound",
+  "request_id": "bf23afd1-2f78-4f0e-b693-53371e7d4c06",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "bf23afd1-2f78-4f0e-b693-53371e7d4c06",
+    "attempt_id": "0db8671c-fd93-4456-9f37-cd565a646711",
+    "conversation_id": "597191df-012f-4898-a9fa-aee0c789e47e",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "sender_project": "Claude State Bar",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-11-11T15:24:40.869Z",
+    "body_sha256": "4ae4c5a2240b23e80724bd02bae510d459498cd74e34e1646c774384698ef218",
+    "body": "[배경] Paseo 상태바 플러그인(claude-state-bar)이 11-12 부터 읽기(TTS) 사용량을 Google 키마다 따로 셉니다. 리규형님 결정: 키마다 따로 · 대표님 키도 마찬가지 · 어느 기기에서 그 키로 바꾸든 그 키의 지금까지 숫자에 이어 쌓기.\nPaseo PC 데몬은 1분마다 이 PC 의 두 파일을 읽어 합계에 더합니다 — %APPDATA%\\BluemingReadAloud\\tts-usage.json(앱 몫), tts-usage-extension.json(크롬 확장 몫, sources). 지금 두 파일엔 어느 키로 읽었는지가 없어서, Paseo 는 그 몫을 \"이 PC 의 Paseo 읽기 키\"로 보고 있습니다(리규형님 버튼 — 이쪽에 키 칸이 생길 때까지).\n\n[요청] 두 파일에 키별 칸(keys)을 더해 주세요. 기존 months 칸(종류별 합)은 그대로 둡니다 — Paseo 도 그대로 읽습니다.\n모양(Paseo 의 tts-usage.json 과 같음):\n{ \"v\": 1, \"months\": { \"2026-11\": { \"chirp3hd\": 12551 } },\n  \"keys\": { \"<id>\": { \"tail\": \"<키 끝 4글자>\", \"months\": { \"2026-11\": { \"chirp3hd\": 12551, \"wavenet\": 0 } } } } }\n- id = 키 문자열(앞뒤 공백 제거)을 UTF-8 로 sha256 → 16진수 앞 12글자. tail = 키 끝 4글자. 키 값 자체는 파일에 쓰지 않습니다.\n- 성공한 합성 요청마다, months 에 더하는 것과 같은 시점·같은 글자 수를 그 요청에 쓴 키의 칸에 더합니다. 달은 지금처럼 Google 결제 달(태평양 시간), 13달 보관.\n- 키 칸이 생기기 전에 센 이번 달 몫은 그 시점의 지금 키 칸으로 한 번 옮겨도 됩니다(Paseo 는 이번 달만 옮기고 지난달은 그대로 둠).\n- tts-usage-extension.json 의 sources[<source>] 에도 같은 keys 칸을 둡니다. 크롬 확장이 로컬 창구(POST http://127.0.0.1:51888/v1/tts-usage, 본문 v·source·label·months)로 보내는 본문에 keys 가 오면 sources[source].keys 에 그대로 보관해 주세요. 확장 쪽에 보내는 부분은 BluemingWebReadAloud 대화에 따로 요청했습니다.\n- Paseo 쪽 읽기는 이미 준비돼 있습니다: keys 가 있으면 그것을, 없으면 PC 키로 봅니다. sources 항목에 판 번호(v)가 없어도 읽습니다(claudeContextBar 저장소 paseo-plugins/claude-state-bar/server/presentation/tts.ts — readReadAloudKeyed·keyedMonthCounts, 시험 docs/paseo-plugin-tools/tests-261101/tts_usage/tts_usage_test.cjs \"두 앱 파일 키별\").\n- 이 앱의 사용량 알약(세 곳 합계)을 키별로 바꿀지는 이 요청 범위 밖입니다. 필요하면 리규형님과 따로 정해 주세요."
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "received_at": "2026-11-11T15:24:54.694Z"
+}

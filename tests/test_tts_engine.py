@@ -1399,7 +1399,7 @@ def _load_glue(ui_log):
         return open_stream
 
     synth_texts = []   # 합성에 실제로 들어간 글(번역 시험용)
-    counted = []       # 사용량 세기로 넘어간 (목소리, 글)
+    counted = []       # 사용량 세기로 넘어간 (목소리, 글, 키 이름표)
 
     def make_synth(client, tts, voice_name, sample_rate=SR, log=None, on_sent=None):
         def synth(text, rate):
@@ -1438,7 +1438,9 @@ def _load_glue(ui_log):
         "_notify_segment_failed": lambda data: ui_log.append(("notify_failed", data)),
         "_synth_texts": synth_texts,
         # 사용량 세기(2026-11-01): 진짜는 %APPDATA% 파일에 쓴다 — 시험에선 (목소리, 글)만 모은다
-        "_counted": counted, "_count_tts_usage": lambda voice, sent: counted.append((voice, sent)),
+        "_counted": counted,
+        "_count_tts_usage": lambda voice, sent, key_mark=None: counted.append((voice, sent, key_mark)),
+        "google_tts_key_mark": {"id": "c0b1947007b8", "tail": "1234"},   # 키별 칸(2026-11-12) — 가짜 키의 이름표
         # 따라 읽기 창(2026-10-28): 기본은 "모듈 없음" — 예전 흐름 그대로. 시험할 땐 테스트가 가짜를 넣는다
         "FollowDialog": None, "_follow_dialog": None, "_follow_dialog_open": False, "_follow_ask_seq": 0,
     })
@@ -1697,18 +1699,21 @@ class TestWhispererGlue(EngineTestBase):
         self.assertEqual(names[-2:], ["bar.hide", "reader.end"])
         self.assertEqual([c[1] for c in ui if c[0] == "reader.highlight"], [0, 1])
 
-    def test_reading_counts_usage_with_its_voice(self):
+    def test_reading_counts_usage_with_its_voice_and_key(self):
         # 2026-11-01 사용량: 합성한 조각마다 이 읽기의 목소리로 센다(도중에 설정에서 목소리를 바꿔도 이 읽기는 그대로)
+        # 2026-11-12 키별 칸: 키도 같다 — 읽기를 시작할 때의 클라이언트 키 이름표로 센다(도중에 인증 창에서 키를 바꿔도 그대로)
         ui = []
         ns = self.ns = _load_glue(ui)
         ns["speak_text"]("첫 번째 줄은 이렇게 조금 길게 써서 육십 바이트를 넘깁니다.\n\n"
                          "두 번째 줄도 마찬가지로 조금 길게 써서 합쳐지지 않게 합니다.")
         ns["tts_voice_name"] = "ko-KR-Wavenet-A"
+        ns["google_tts_key_mark"] = {"id": "8b9d16888b45", "tail": "ABCD"}
         self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None, timeout=10))
         counted = dict.__getitem__(ns, "_counted")
         self.assertEqual(len(counted), 2)
-        self.assertEqual({v for v, _ in counted}, {"ko-KR-Chirp3-HD-Callirrhoe"})
-        self.assertEqual([s for _, s in counted], dict.__getitem__(ns, "_synth_texts"))
+        self.assertEqual({v for v, _, _ in counted}, {"ko-KR-Chirp3-HD-Callirrhoe"})
+        self.assertEqual([s for _, s, _ in counted], dict.__getitem__(ns, "_synth_texts"))
+        self.assertEqual([k for _, _, k in counted], [{"id": "c0b1947007b8", "tail": "1234"}] * 2)
 
     def test_thread_start_failure_does_not_leave_playing_state(self):
         ui = []
