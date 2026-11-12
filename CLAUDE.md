@@ -93,8 +93,17 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   first count or when the client is made (`UsageCounter.adopt_keys`), moving **this month only** to the current key —
   Paseo reads only `keys` when present (`keyedMonthCounts`), so not moving would drop this month's earlier share. Each key
   cell keeps its own latest 13 months (Paseo `pruneMonths`). An old installed build rewrites the file without `keys`; the
-  next count by a new build moves this month again. The pill and the usage window stay per kind (per-key display is
-  outside that request). Paseo's share = `~/.paseo/claude-state-bar/tts-usage-all.json` written by the Paseo PC daemon
+  next count by a new build moves this month again. **Key basis** (2026-11-13 user decision — the user moved Paseo to
+  another Google key, and the pill, summing every key, showed 1,002,379 chars "over the free tier" while this app's key had
+  917,476): the pill and the usage window count **only the key this app uses now** (`_usage_summary` →
+  `summarize(..., key_id)`). This app's share = that key's cell (`UsageCounter.month_counts(key=…)`; a file without `keys`
+  → this month's total, as `_adopt_keys` would move it, nothing written); Paseo's share = `keys[id].paseo` in Paseo's file;
+  the extension share = `keys[id].sources["크롬 확장"]` there (Paseo's split — user decision "follow Paseo": the extension
+  sends no key yet, so Paseo files it under the PC key; it shows up when Paseo's file is next written). Paseo's file
+  without `keys` (or any key cell malformed) → Paseo and extension unknown, " · Paseo 빠짐" — never filled with the all-key
+  `total`; key absent from `keys` → 0. No key in this app → the old all-key sum. Other keys are not shown; the key's last
+  four characters appear only in the usage window (user decision). The labels `PASEO_APP_LABEL` / `PASEO_EXT_LABEL` are
+  Paseo's (asked to confirm: peer_mail a0f0861c). Paseo's share = `~/.paseo/claude-state-bar/tts-usage-all.json` written by the Paseo PC daemon
   every 5 min (PC + three servers + staff daemons; read only, `state` ok / missing / broken / other_month). The extension's
   share arrives at **`UsageReceiver` — HTTP on 127.0.0.1:51888 TCP** (same number as the single-instance UDP socket; TCP does
   not clash), `POST /v1/tts-usage` `{"v":1,"source":"<install id>","label":"Aside","months":{…}}`, accepted only when
@@ -104,10 +113,12 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   source under the PC key); a wrong shape rejects the whole body (reason `keys`), like `months`. Spec agreed with the
   extension conversation (peer_mail 423b8e9a). `summarize()` → rows for the usage window.
 - **usage_pill.py** — the usage pill (2026-11-01 user request "I want to monitor it — money is going out"): **tray icon
-  left click** toggles it (a hidden `default=True, visible=False` pystray item, so the right-click menu keeps its five items;
-  the on/off state is saved as `usage_pill_visible`). Text = the selected voice kind's three-place total
-  "Chirp 3 HD 18,944 / 1,000,000자", red with chars over + dollars once over the free tier, " · Paseo 빠짐" when Paseo's file
-  is not this month's (`tts_usage.pill_text`). Draggable (system drag threshold), the dropped spot is kept as
+  left click** toggles it (a hidden `default=True, visible=False` pystray item), and since 2026-11-13 also the right-click
+  check item "읽기 사용량 표시" / "Show Reading Usage" (user request; `toggle_usage_pill` rebuilds the menu so the check
+  follows a left-click toggle too); the on/off state is saved as `usage_pill_visible`. Text = the selected voice kind's three-place total **for this app's
+  key** (Key basis above) "Chirp 3 HD 917,476 / 1,000,000자" — no key shown on the pill —, red with chars over + dollars
+  once over the free tier, " · Paseo 빠짐" when Paseo's file is not this month's or has no per-key counts
+  (`summary["paseo_known"]`, `tts_usage.pill_text`). Draggable (system drag threshold), the dropped spot is kept as
   `usage_pill_position` and clamped into the work area (`pill_position`); a click opens `show_usage_dialog` **right above
   the pill**, right edges aligned, below it if there is no room (`popup_position` — user screenshot 2026-11-01; it used to
   open on another monitor). The settings-dialog button opens it centred on the settings dialog's monitor. Window built like
@@ -217,8 +228,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 ### System Integration
 
 - **Tray**: pystray, runs on its own thread. Menu labels (and on Windows also checked/enabled) are re-evaluated only
-  when `update_tray_menu()` is called. Items (user decision 2026-09-28, exactly these five): "TTS Settings…",
-  "Use Reader Window" (check), "Disable in Browsers" (check), "Read button on selected text" (check), "Exit".
+  when `update_tray_menu()` is called. Items (user decision 2026-09-28, five; the sixth added by the user 2026-11-13 —
+  exactly these six): "TTS Settings…", "Use Reader Window" (check), "Disable in Browsers" (check), "Read button on
+  selected text" (check), "Show Reading Usage" (check — the usage pill), "Exit".
   Check items go through `gui_queue` to the Tk main thread.
 - **Bottom bar** (`bottom_bar.py`, created with `show_settings=False`): the extension's gear button (speed/volume panel)
   is hidden — its code is kept (`_build_panel` …, the default `show_settings=True` is used by `dev_demo_ui.py`).
@@ -236,10 +248,12 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   $4 tier); a saved voice outside the list is put first (Paseo `voiceOptions`). Each entry reads like Paseo's button:
   "Zephyr · Chirp 3 HD · 100만 자 30달러 (이번 달 PC 앱 12,345자)" (`tts_usage.voice_label`, this app's own count per kind).
   Preview text = Paseo `PREVIEW_TEXT.ko`, and the preview is counted.
-  **Reading Usage window** (`show_usage_dialog`): billing month and its local start/end, a row per kind — Paseo · PC app ·
-  Chrome extension · total · free tier · free left (or chars over + dollars, red) — then Paseo per host (+ hosts it could
-  not reach), the extension per browser, receiver state, and a note that these are self-counted (Google billing is the
-  authority). Not in the tray (fixed to five items).
+  **Reading Usage window** (`show_usage_dialog`): billing month and its local start/end, then (2026-11-13) "Google key …ABCD"
+  — the key whose share is counted (Key basis in tts_usage.py above) —, a row per kind — Paseo · PC app ·
+  Chrome extension · total · free tier · free left (or chars over + dollars, red; "—" = unknown) — then Paseo per host on
+  that key (+ hosts it could not reach), the extension per browser (as received, all keys — the receiver check), receiver
+  state, and a note that these are self-counted (Google billing is the authority). The window itself is not in the tray
+  (the tray item only shows / hides the pill; clicking the pill opens this window).
 - **Red dot** (`selection_button.py` + `setup_selection_button()` / `setup_mouse_listener()` in whisperer.py):
   a pynput **mouse** listener feeds left press/release to `SelectionGestureDetector`; a drag (Windows `SM_CXDRAG`)
   or a double/triple-click release puts `("selection_button", "show", x, y)` on `gui_queue`; a single-click release puts

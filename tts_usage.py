@@ -77,6 +77,10 @@ APP_USAGE_PATH = os.path.join(app_data_dir(), "tts-usage.json")
 EXTENSION_USAGE_PATH = os.path.join(app_data_dir(), "tts-usage-extension.json")
 # Paseo 가 내보내는 세 곳 합계용 파일(제안 위치 그대로 — Paseo tts.ts USAGE_ALL_FILE)
 PASEO_USAGE_ALL_PATH = os.path.join(os.path.expanduser("~"), ".paseo", "claude-state-bar", "tts-usage-all.json")
+# 그 파일 extra·keys[id].sources 에서 이 앱·크롬 확장 몫이 붙는 이름(Paseo 가 정함 — 2026-11-12 파일 실측).
+# 키별 기준(2026-11-13)에서 Paseo 장비 몫과 가르고, 확장 몫은 Paseo 가 키별로 나눈 이 칸을 그대로 쓴다
+PASEO_APP_LABEL = "PC 읽기 앱"
+PASEO_EXT_LABEL = "크롬 확장"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -363,10 +367,17 @@ class UsageCounter:
             self._log(f"[사용량] 키별 칸 만들기 실패(다음에 셀 때 다시 한다): {e}")
             return False
 
-    def month_counts(self, month=None):
-        """그달 종류별 글자 수 {"chirp3hd": N, ...}. 기록이 없으면 {}."""
+    def month_counts(self, month=None, key=None, now=None):
+        """그달 종류별 글자 수 {"chirp3hd": N, ...}. 기록이 없으면 {}.
+        key = 키 이름표(key_mark)를 주면 그 키 칸 몫만(2026-11-13 리규형님 버튼 "이 앱이 쓰는 키 몫만"). 키 칸이 없는
+        옛 기록이면 키 칸을 만들 때와 같게(_adopt_keys — 이번 달 몫만 지금 키로) 계산만 하고 파일은 쓰지 않는다."""
+        month = month or billing_month(now)
         with self._lock:
-            return dict(_read_usage(self.path)[0].get(month or billing_month(), {}))
+            months, keys = _read_usage(self.path)
+        if key is None:
+            return dict(months.get(month, {}))
+        keys = _adopt_keys(months, keys, billing_month(now), key) or {}
+        return dict(keys.get(key["id"], {}).get("months", {}).get(month, {}))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -453,9 +464,43 @@ class ExtensionReports:
 # Paseo 몫 — Paseo PC 데몬이 내보낸 파일
 # ════════════════════════════════════════════════════════════════════
 
+def _clean_paseo_keys(raw, extra):
+    """Paseo 합계 파일의 keys 칸(2026-11-12 ~) → {"<id>": {"tail","paseo","extension","hosts"}}.
+    파일 모양 keys[id] = {"tail","counts"(세 곳 전부),"paseo"(Paseo 몫만),"sources":{"<장비 또는 extra 이름>": {...}}}.
+    paseo = 그 키의 Paseo 몫, extension = Paseo 가 그 키로 나눈 크롬 확장 몫(확장이 키를 안 보내면 Paseo 는 PC 키로 본다 —
+    2026-11-13 리규형님 버튼 "Paseo 가 나눈 대로"), hosts = 장비별 그 키 몫(extra 이름은 뺀다).
+    칸이 없거나 하나라도 틀린 모양이면 None — 키 구분 없는 숫자로 메우지 않는다(그 경우 Paseo 몫을 모름으로 본다)."""
+    if not isinstance(raw, dict):
+        return None
+    not_hosts = {PASEO_APP_LABEL, PASEO_EXT_LABEL} | (set(k for k in extra if isinstance(k, str))
+                                                       if isinstance(extra, dict) else set())
+    out = {}
+    for kid, entry in raw.items():
+        if not isinstance(kid, str) or not _KEY_ID_RE.match(kid) or not isinstance(entry, dict):
+            return None
+        tail = entry.get("tail", "")
+        paseo = _clean_counts(entry.get("paseo"))
+        sources = entry.get("sources", {})
+        if not isinstance(tail, str) or len(tail) > 4 or not tail.isprintable() or paseo is None \
+                or not isinstance(sources, dict):
+            return None
+        hosts, extension = {}, {}
+        for label, counts in sources.items():
+            clean = _clean_counts(counts)
+            if not isinstance(label, str) or clean is None:
+                return None
+            if label == PASEO_EXT_LABEL:
+                extension = clean
+            elif label not in not_hosts:
+                hosts[label] = clean
+        out[kid] = {"tail": tail, "paseo": paseo, "extension": extension, "hosts": hosts}
+    return out
+
+
 def read_paseo_usage(month=None, path=PASEO_USAGE_ALL_PATH):
     """Paseo 합계 파일을 읽는다. 반환 dict 의 state:
-    "ok"(이번 달 값 — total·sources·stale·updatedAt) · "missing"(파일 없음) · "broken"(못 읽음·모양 틀림) ·
+    "ok"(이번 달 값 — total·sources·stale·updatedAt, 키별 칸이 올바르면 keys 도 — _clean_paseo_keys) ·
+    "missing"(파일 없음) · "broken"(못 읽음·모양 틀림) ·
     "other_month"(다른 달 파일 — Paseo 데몬이 이번 달에 아직 안 내보냄. 지난달 값을 이번 달로 보이지 않는다)."""
     month = month or billing_month()
     data = _read_json(path)
@@ -476,32 +521,50 @@ def read_paseo_usage(month=None, path=PASEO_USAGE_ALL_PATH):
             if isinstance(host, str) and clean is not None:
                 sources[host] = clean
     stale = [h for h in data.get("stale", []) if isinstance(h, str)] if isinstance(data.get("stale"), list) else []
-    return {"state": "ok", "total": total, "sources": sources, "stale": stale, "updatedAt": updated}
+    result = {"state": "ok", "total": total, "sources": sources, "stale": stale, "updatedAt": updated}
+    keyed = _clean_paseo_keys(data.get("keys"), data.get("extra"))
+    if keyed is not None:
+        result["keys"] = keyed
+    return result
 
 
 # ════════════════════════════════════════════════════════════════════
 # 세 곳 합계 — 요금 화면이 그대로 그린다
 # ════════════════════════════════════════════════════════════════════
 
-def summarize(app_counts, paseo, extension_rows, month):
+def summarize(app_counts, paseo, extension_rows, month, key_id=None):
     """세 곳 값을 종류별로 합친다. paseo 는 read_paseo_usage 결과(state 가 "ok" 가 아니면 합계에서 빠진다).
-    반환 {"month", "kinds": [{"kind","name","price","free","paseo","app","extension","total","left","over","cost"}]}.
-    paseo 칸은 Paseo 값을 모르면 None. left = 남은 무료분, over = 넘친 글자, cost = 넘친 만큼의 값(달러, 가격을 알 때만)."""
-    paseo_total = paseo.get("total") if paseo.get("state") == "ok" else None
-    ext_total = {}
-    for row in extension_rows:
-        for k, v in row["counts"].items():
-            ext_total[k] = ext_total.get(k, 0) + v
-    extra = set(app_counts) | set(ext_total) | set(paseo_total or {})
+    반환 {"month", "key_id", "paseo_known", "kinds": [{"kind","name","price","free","paseo","app","extension","total",
+    "left","over","cost"}]}. paseo 칸은 Paseo 값을 모르면 None. left = 남은 무료분, over = 넘친 글자,
+    cost = 넘친 만큼의 값(달러, 가격을 알 때만).
+
+    key_id = 이 앱이 쓰는 키의 id(2026-11-13 리규형님 버튼 "이 앱이 쓰는 키 몫만" — Paseo 를 다른 키로 옮긴 뒤 키 구분 없는
+    합계가 무료분을 넘긴 것처럼 보였다). 주면: app_counts 는 그 키 몫(UsageCounter.month_counts(key=…))이어야 하고,
+    Paseo 몫·확장 몫은 Paseo 합계 파일 keys[key_id] 에서 꺼낸다(extension_rows 는 쓰지 않는다 — 확장 몫은 Paseo 가 나눈 대로).
+    그 파일에 키별 칸이 없으면 Paseo·확장 둘 다 모름(None). 칸은 있는데 이 키가 없으면 둘 다 0(이번 달 그 키를 아무도 안 씀)."""
+    ok = paseo.get("state") == "ok"
+    if key_id is None:
+        paseo_counts = paseo.get("total") if ok else None
+        ext_counts = {}
+        for row in extension_rows:
+            for k, v in row["counts"].items():
+                ext_counts[k] = ext_counts.get(k, 0) + v
+    elif ok and "keys" in paseo:
+        entry = paseo["keys"].get(key_id) or {}
+        paseo_counts, ext_counts = entry.get("paseo", {}), entry.get("extension", {})
+    else:
+        paseo_counts = ext_counts = None
+    extra = set(app_counts) | set(ext_counts or {}) | set(paseo_counts or {})
     kinds = list(SHOWN_KINDS) + sorted(k for k in extra
                                        if k not in SHOWN_KINDS and k not in IGNORED_KINDS
-                                       and (app_counts.get(k) or ext_total.get(k) or (paseo_total or {}).get(k)))
+                                       and (app_counts.get(k) or (ext_counts or {}).get(k)
+                                            or (paseo_counts or {}).get(k)))
     rows = []
     for kind in kinds:
-        p = None if paseo_total is None else int(paseo_total.get(kind, 0))
+        p = None if paseo_counts is None else int(paseo_counts.get(kind, 0))
         a = int(app_counts.get(kind, 0))
-        e = int(ext_total.get(kind, 0))
-        total = (p or 0) + a + e
+        e = None if ext_counts is None else int(ext_counts.get(kind, 0))
+        total = (p or 0) + a + (e or 0)
         free = KIND_FREE.get(kind)
         price = KIND_PRICE.get(kind)
         over = max(0, total - free) if free is not None else None
@@ -509,7 +572,7 @@ def summarize(app_counts, paseo, extension_rows, month):
                      "paseo": p, "app": a, "extension": e, "total": total,
                      "left": max(0, free - total) if free is not None else None, "over": over,
                      "cost": over * price / 1_000_000 if over is not None and price is not None else None})
-    return {"month": month, "kinds": rows}
+    return {"month": month, "key_id": key_id, "paseo_known": paseo_counts is not None, "kinds": rows}
 
 
 def pill_text(row, paseo_known, texts):

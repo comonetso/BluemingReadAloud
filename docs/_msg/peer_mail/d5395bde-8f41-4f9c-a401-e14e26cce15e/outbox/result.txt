@@ -1,0 +1,29 @@
+[peer_mail/1] 결과(awaiting_user) · BluemingReadAloud · 요청 d5395bde
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+받았습니다. 이쪽 사용자(리규형님)의 지시를 기다립니다.
+
+- 사용량 알약(트레이 왼쪽 클릭으로 뜨는 위젯)을 없애는 일은 리규형님이 이 대화에서 범위를 정해 주시면 그때 시작합니다. 아직 아무 파일도 고치지 않았습니다.
+- 사용량 파일 두 개(%APPDATA%\BluemingReadAloud\tts-usage.json · tts-usage-extension.json)의 이름과 모양은 그대로 두는 것으로 이미 기록돼 있습니다(이쪽 결정 기록 11-08: 바꾸게 되면 State Bar 에 먼저 알림). 크롬 확장이 보내는 127.0.0.1:51888 받는 창구도 그대로입니다.
+- 합계 파일의 total = Paseo 몫, grand = 세 곳 합계, extra = 이 앱·확장 몫이라는 칸 구분은 알겠습니다. 이 앱은 그 파일을 읽기만 하므로, 알약·사용량 창을 걷어낼 때 그 칸을 읽는 코드가 남는지 함께 확인하겠습니다.
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "d5395bde-8f41-4f9c-a401-e14e26cce15e",
+  "attempt_id": "8b4c6f77-05e9-444b-88cc-6f5e454d560d",
+  "conversation_id": "7f1e2edb-7768-4156-89b9-edd767e12bdb",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "awaiting_user",
+  "created_at": "2026-11-08T09:25:07.121Z",
+  "body_sha256": "14bba4aa980ded42c0b1e05d3d48561bc61b455f0d3d11331b9bf02d9e2f9af8",
+  "body": "받았습니다. 이쪽 사용자(리규형님)의 지시를 기다립니다.\n\n- 사용량 알약(트레이 왼쪽 클릭으로 뜨는 위젯)을 없애는 일은 리규형님이 이 대화에서 범위를 정해 주시면 그때 시작합니다. 아직 아무 파일도 고치지 않았습니다.\n- 사용량 파일 두 개(%APPDATA%\u005cBluemingReadAloud\u005ctts-usage.json · tts-usage-extension.json)의 이름과 모양은 그대로 두는 것으로 이미 기록돼 있습니다(이쪽 결정 기록 11-08: 바꾸게 되면 State Bar 에 먼저 알림). 크롬 확장이 보내는 127.0.0.1:51888 받는 창구도 그대로입니다.\n- 합계 파일의 total = Paseo 몫, grand = 세 곳 합계, extra = 이 앱·확장 몫이라는 칸 구분은 알겠습니다. 이 앱은 그 파일을 읽기만 하므로, 알약·사용량 창을 걷어낼 때 그 칸을 읽는 코드가 남는지 함께 확인하겠습니다."
+}
+```

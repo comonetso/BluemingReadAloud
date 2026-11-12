@@ -1413,15 +1413,16 @@ def setup_tray_icon():
                 os._exit(0)
 
         def update_tray_menu():
-            """트레이 메뉴를 지금 상태(언어·체크 항목 3개)에 맞게 새로 만들어 끼운다.
+            """트레이 메뉴를 지금 상태(언어·체크 항목 4개)에 맞게 새로 만들어 끼운다.
 
             pystray 메뉴는 문구가 고정이고, 윈도우판은 checked/enabled 도 메뉴를 "만들 때" 한 번만 읽는다
             (pystray _win32.py _update_menu) → 상태가 바뀔 때마다 이 함수로 통째로 다시 만든다.
             어느 스레드에서 불러도 된다(pystray 메뉴 교체는 Tk 와 무관). 부르는 곳: 읽기 시작/끝, 설정 창의 언어 변경
-            (_apply_language), toggle_reader_window, toggle_selection_button, toggle_disable_in_browsers.
-            체크 항목 세 개는 전부 gui_queue 로 Tk 메인에 넘긴다 — 켬/끔 함수가 창(리더 창·빨간 점)을 만지고
+            (_apply_language), toggle_reader_window, toggle_selection_button, toggle_disable_in_browsers, toggle_usage_pill.
+            체크 항목 네 개는 전부 gui_queue 로 Tk 메인에 넘긴다 — 켬/끔 함수가 창(리더 창·빨간 점·알약)을 만지고
             save_settings 를 부르기 때문(한 스레드에서만 저장하게).
-            항목 순서는 사용자가 정한 목록 순서 그대로다(2026-09-28). 구분선 위치는 임의(설정 / 체크 3개 / 종료).
+            항목 순서는 사용자가 정한 목록 순서 그대로다(2026-09-28 다섯 항목 + 2026-11-13 "읽기 사용량 표시"를 종료 위에).
+            구분선 위치는 임의(설정 / 체크 4개 / 종료).
             """
             global tray_icon
 
@@ -1429,8 +1430,8 @@ def setup_tray_icon():
 
             base_items = [
                 # 왼쪽 클릭 = 사용량 알약 켜고 끄기(2026-11-01). pystray 는 왼쪽 클릭에 "기본 항목"을 부른다
-                # (_win32 _on_notify WM_LBUTTONUP → Menu.__call__ → default). visible=False 라 오른쪽 메뉴에는 안 나온다 —
-                # 메뉴는 사용자가 정한 다섯 항목 그대로(2026-11-01 실측: 숨긴 기본 항목도 불린다)
+                # (_win32 _on_notify WM_LBUTTONUP → Menu.__call__ → default). visible=False 라 오른쪽 메뉴에는 안 나온다
+                # (2026-11-01 실측: 숨긴 기본 항목도 불린다). 오른쪽 메뉴의 켬/끔은 아래 "읽기 사용량 표시"(2026-11-13)
                 pystray.MenuItem("usage pill", lambda icon, item: gui_queue.put("toggle_usage_pill"),
                                  default=True, visible=False),
                 pystray.MenuItem(get_msg("menu_tts_settings"), open_tts_settings),
@@ -1451,6 +1452,11 @@ def setup_tray_icon():
                                  lambda icon, item: gui_queue.put("toggle_selection_button"),
                                  checked=lambda item: selection_button_enabled,
                                  enabled=lambda item: SelectionButton is not None),
+                # 읽기 사용량 표시(알약) 켬/끔 체크 — 왼쪽 클릭과 같은 일(2026-11-13 리규형님 지시 "오른쪽 메뉴에서도 끄고 켜게",
+                # 버튼: 이름 "읽기 사용량 표시" · 자리 체크 항목 셋 아래·종료 위). 메뉴가 여섯 항목이 됐다
+                pystray.MenuItem(get_msg("menu_usage_pill"),
+                                 lambda icon, item: gui_queue.put("toggle_usage_pill"),
+                                 checked=lambda item: usage_pill_visible),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(get_msg("exit"), exit_program)
             ]
@@ -3001,6 +3007,7 @@ def _show_placed(win, anchor=None, near=None):
 def show_usage_dialog(anchor=None, near=None):
     """설정 창 "읽기 사용량" 버튼: 세 곳의 이번 결제 달 읽기 사용량을 종류별로 합쳐 보인다(2026-11-01 리규형님 지시 —
     "한 곳에서 세 곳 사용량을 볼 수 있게, PC 앱에서"). 무료분 대비 남은 양, 넘쳤으면 넘친 글자와 그 값(달러).
+    2026-11-13 부터 이 앱이 쓰는 키 몫만(_usage_summary — 리규형님 버튼), 제목 아래에 그 키 끝 네 자리.
     자리(2026-11-01 리규형님 "알약이 있는 모니터에 — 자꾸 다른 모니터에 뜬다" + 스크린샷 "이런 식으로"):
       near = 알약 (x, y, w, h) → 알약 바로 위, 오른쪽 끝 맞춤(이미 열려 있어도 다시 붙인다).
       anchor = (x, y) → 그 점의 모니터 가운데(설정 창 버튼 = 설정 창 가운데. 이미 열려 있으면 다른 모니터일 때만 옮긴다).
@@ -3041,14 +3048,14 @@ def show_usage_dialog(anchor=None, near=None):
 
     def collect():
         month = tts_usage.billing_month()
-        paseo = tts_usage.read_paseo_usage(month)
-        ext_rows = extension_usage_reports.month_by_source(month)
-        summary = tts_usage.summarize(tts_usage_counter.month_counts(month), paseo, ext_rows, month)
+        paseo, ext_rows, summary = _usage_summary(month)
         receiver_port = usage_receiver.port if usage_receiver is not None and usage_receiver.running else None
-        return month, paseo, ext_rows, summary, receiver_port
+        key_tail = google_tts_key_mark["tail"] if summary["key_id"] else None
+        return month, paseo, ext_rows, summary, receiver_port, key_tail
 
     def fill(data):
-        month, paseo, ext_rows, summary, receiver_port = data
+        month, paseo, ext_rows, summary, receiver_port, key_tail = data
+        key_id = summary["key_id"]
         for child in body.winfo_children():
             child.destroy()
         columns = 7
@@ -3060,7 +3067,12 @@ def show_usage_dialog(anchor=None, near=None):
         start = tts_usage.month_start_utc(month)
         end = tts_usage.month_start_utc(tts_usage.next_month(month))
         ttk.Label(body, text=get_msg("usage_period").format(_usage_time_text(start), _usage_time_text(end))).grid(
-            row=row, column=0, columnspan=columns, sticky="w", pady=(2, 12))
+            row=row, column=0, columnspan=columns, sticky="w", pady=(2, 0 if key_id else 12))
+        if key_id:
+            # 어느 키 몫인지 — 키 끝 네 자리는 이 창에만(2026-11-13 리규형님 버튼 "사용량 창에만"; 알약은 그대로)
+            row += 1
+            ttk.Label(body, text=get_msg("usage_key_basis").format(key_tail)).grid(
+                row=row, column=0, columnspan=columns, sticky="w", pady=(2, 12))
 
         row += 1
         heads = ("usage_col_kind", "usage_col_paseo", "usage_col_app", "usage_col_extension",
@@ -3081,7 +3093,7 @@ def show_usage_dialog(anchor=None, near=None):
             cells = (name,
                      "—" if k["paseo"] is None else tts_usage.group_digits(k["paseo"]),
                      tts_usage.group_digits(k["app"]),
-                     tts_usage.group_digits(k["extension"]),
+                     "—" if k["extension"] is None else tts_usage.group_digits(k["extension"]),
                      tts_usage.group_digits(k["total"]),
                      "—" if k["free"] is None else tts_usage.group_digits(k["free"]),
                      left)
@@ -3096,9 +3108,19 @@ def show_usage_dialog(anchor=None, near=None):
         lines = []
         state = paseo.get("state")
         if state == "ok":
-            lines.append(get_msg("usage_paseo_ok").format(_usage_time_text(paseo.get("updatedAt"))))
-            for host in sorted(paseo["sources"], key=lambda h: (h != "PC", h)):
-                lines.append(f"    {host}: {_usage_counts_text(paseo['sources'][host])}")
+            updated = _usage_time_text(paseo.get("updatedAt"))
+            if not key_id:
+                lines.append(get_msg("usage_paseo_ok").format(updated))
+                hosts = paseo["sources"]
+            elif "keys" in paseo:
+                # 장비별도 이 키 몫만(Paseo 파일 keys[id].sources — 다른 키 몫은 보이지 않는다)
+                lines.append(get_msg("usage_paseo_ok_key").format(updated))
+                hosts = paseo["keys"].get(key_id, {}).get("hosts", {})
+            else:
+                lines.append(get_msg("usage_paseo_no_keys").format(updated))
+                hosts = {}
+            for host in sorted(hosts, key=lambda h: (h != "PC", h)):
+                lines.append(f"    {host}: {_usage_counts_text(hosts[host])}")
             if paseo["stale"]:
                 lines.append(get_msg("usage_paseo_stale").format(", ".join(paseo["stale"])))
         elif state == "other_month":
@@ -3107,9 +3129,10 @@ def show_usage_dialog(anchor=None, near=None):
             lines.append(get_msg("usage_paseo_broken"))
         else:
             lines.append(get_msg("usage_paseo_missing"))
-        lines.append(get_msg("usage_app_note"))
+        lines.append(get_msg("usage_app_note_key" if key_id else "usage_app_note"))
         if ext_rows:
-            lines.append(get_msg("usage_ext_heading"))
+            # 설치별 줄은 받는 창구가 받았는지 보는 줄 — 키 기준에서도 받은 값 그대로(위 합계의 확장 몫은 Paseo 가 키별로 나눈 값)
+            lines.append(get_msg("usage_ext_heading_key" if key_id else "usage_ext_heading"))
             # 같은 이름이 여럿이면(어사이드는 프로필마다 "Chromium") 설치 구분 글자 앞 8자를 덧붙여 가른다(2026-11-01)
             label_count = {}
             for r in ext_rows:
@@ -3194,17 +3217,28 @@ def setup_usage_receiver():
 # ── 사용량 알약 (usage_pill.py, 2026-11-01 리규형님 버튼) ──
 # 트레이 왼쪽 클릭 = 켜고 끄기(켬 상태 저장) · 끌어 옮긴 자리 저장 · 누르면 show_usage_dialog.
 # 글 = 지금 고른 목소리 종류의 세 곳 합계 "Chirp 3 HD 18,944 / 1,000,000자"(넘으면 빨강 + 넘친 글자·달러).
+# 2026-11-13 부터 이 앱이 쓰는 키 몫만(_usage_summary) — 키 끝 네 자리는 사용량 창에만 보인다.
 # 새로 고치는 때: 이 앱이 셀 때·확장 값을 받을 때 바로("usage_changed"), 그리고 떠 있는 동안 USAGE_TICK_MS 마다(Paseo 파일).
 
-def _usage_pill_text():
-    """지금 고른 목소리 종류의 세 곳 합계 → (알약 글, 무료분 넘음)."""
-    month = tts_usage.billing_month()
+def _usage_summary(month):
+    """알약·사용량 창이 같이 쓰는 합계 → (Paseo 읽은 결과, 확장 설치별 줄, 합계).
+    이 앱에 키가 있으면 그 키 몫만(2026-11-13 리규형님 버튼 "이 앱이 쓰는 키 몫만" — Paseo 를 다른 키로 옮긴 뒤 키 구분 없는
+    합계가 무료분을 넘긴 것처럼 보였다). 키가 없으면(인증 창에 키를 안 넣음) 예전처럼 키 구분 없이."""
+    key = google_tts_key_mark
     paseo = tts_usage.read_paseo_usage(month)
-    summary = tts_usage.summarize(tts_usage_counter.month_counts(month), paseo,
-                                  extension_usage_reports.month_by_source(month), month)
+    ext_rows = extension_usage_reports.month_by_source(month)
+    summary = tts_usage.summarize(tts_usage_counter.month_counts(month, key=key), paseo, ext_rows, month,
+                                  key_id=key["id"] if key else None)
+    return paseo, ext_rows, summary
+
+
+def _usage_pill_text():
+    """지금 고른 목소리 종류의 이 앱 키 몫(세 곳) → (알약 글, 무료분 넘음)."""
+    month = tts_usage.billing_month()
+    _paseo, _ext_rows, summary = _usage_summary(month)
     row = tts_usage.pill_row(summary, tts_usage.usage_kind(tts_voice_name))
     texts = {k: get_msg("pill_" + k) for k in ("under", "over", "plain", "no_paseo")}
-    return tts_usage.pill_text(row, paseo.get("state") == "ok", texts)
+    return tts_usage.pill_text(row, summary["paseo_known"], texts)
 
 
 def _usage_dialog_open():
@@ -3291,11 +3325,17 @@ def _apply_usage_pill():
 
 
 def toggle_usage_pill():
-    """트레이 왼쪽 클릭: 알약을 켜고 끈다. 켬 상태는 저장해 앱을 다시 켜도 유지한다. Tk 메인 전용(gui_queue "toggle_usage_pill")."""
+    """트레이 왼쪽 클릭·오른쪽 메뉴 "읽기 사용량 표시"(2026-11-13): 알약을 켜고 끈다. 켬 상태는 저장해 앱을 다시 켜도
+    유지한다. Tk 메인 전용(gui_queue "toggle_usage_pill"). 끝에 메뉴를 새로 만든다 — 윈도우판 pystray 는 체크 표시를
+    메뉴를 만들 때만 읽어서(update_tray_menu 설명), 왼쪽 클릭으로 켜고 끈 뒤에도 오른쪽 메뉴 체크가 맞게."""
     global usage_pill_visible
     usage_pill_visible = not usage_pill_visible
     _apply_usage_pill()
     save_settings()
+    try:
+        update_tray_menu()
+    except NameError:
+        pass   # 트레이 설정이 실패했으면 update_tray_menu 가 없다(setup_tray_icon 설명)
 
 
 def _open_usage_from_pill():

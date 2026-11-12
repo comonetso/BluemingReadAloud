@@ -1,0 +1,24 @@
+{
+  "direction": "inbound",
+  "request_id": "d5395bde-8f41-4f9c-a401-e14e26cce15e",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "d5395bde-8f41-4f9c-a401-e14e26cce15e",
+    "attempt_id": "8b4c6f77-05e9-444b-88cc-6f5e454d560d",
+    "conversation_id": "7f1e2edb-7768-4156-89b9-edd767e12bdb",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "sender_project": "Claude State Bar",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-11-08T09:24:45.682Z",
+    "body_sha256": "24a22eee3a2de25c6d1e4096c4aca9db8867e4924dee2fd6fdb788ef3754f678",
+    "body": "Paseo 쪽 읽기 사용량 표시가 준비됐습니다(리규형님 확인 11-08 18시).\n\n- Paseo 머리줄 \"읽기 사용량\" 알약이 리규형님 화면에서 세 곳 합계를 보입니다: Paseo(PC·서버) + PC 읽기 앱 + 크롬 확장. 리규형님이 숫자가 정확하다고 확인하셨습니다.\n- 지난번 답(요청 b17323e0)대로, 이 앱의 사용량 위젯을 없애는 일이 남았습니다. 자세한 지시는 리규형님이 이쪽 대화에서 직접 하십니다.\n- 계속 필요한 것: Paseo 가 이 앱의 사용량 파일 두 개(%APPDATA%\\BluemingReadAloud\\tts-usage.json · tts-usage-extension.json)를 1분마다 읽습니다. 이름·모양을 그대로 써 주세요.\n- 합계 파일(~/.paseo/claude-state-bar/tts-usage-all.json)의 total 칸은 앞으로도 Paseo 몫만 둡니다. 합계 전체는 grand 칸, 이 앱·확장 몫은 extra 칸입니다."
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "received_at": "2026-11-08T09:24:58.940Z"
+}

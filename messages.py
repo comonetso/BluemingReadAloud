@@ -399,6 +399,11 @@ messages = {
         "ko": "읽기 사용량",
         "en": "Reading Usage"
     },
+    # 트레이 오른쪽 메뉴 체크 항목 — 사용량 알약 켬/끔(2026-11-13 리규형님 지시·버튼 "읽기 사용량 표시", 왼쪽 클릭과 같은 일)
+    "menu_usage_pill": {
+        "ko": "읽기 사용량 표시",
+        "en": "Show Reading Usage"
+    },
     "usage_title": {
         "ko": "읽기 사용량",
         "en": "Reading Usage"
@@ -450,6 +455,27 @@ messages = {
     "usage_paseo_ok": {
         "ko": "Paseo — PC·서버 합계, 갱신 {}",
         "en": "Paseo — PC and servers, updated {}"
+    },
+    # 키 기준(2026-11-13 리규형님 버튼 "이 앱이 쓰는 키 몫만" · 키 끝 네 자리는 이 창에만)
+    "usage_key_basis": {
+        "ko": "이 PC 앱이 지금 쓰는 Google 키 …{} 로 읽은 몫만 셉니다 (다른 키 몫은 빠짐)",
+        "en": "Counts only usage on Google key …{} — the key this PC app uses now (other keys left out)"
+    },
+    "usage_paseo_ok_key": {
+        "ko": "Paseo — PC·서버 중 이 키 몫, 갱신 {}",
+        "en": "Paseo — PC and servers on this key, updated {}"
+    },
+    "usage_paseo_no_keys": {
+        "ko": "Paseo — 기록 파일에 키별 칸이 없습니다(갱신 {} — Paseo·크롬 확장 몫이 합계에서 빠짐).",
+        "en": "Paseo — the usage file has no per-key counts (updated {} — Paseo and extension left out of the total)."
+    },
+    "usage_app_note_key": {
+        "ko": "PC 앱 — 이 PC 의 BluemingReadAloud 중 이 키 몫(개발 모드·설치본 합계)",
+        "en": "PC app — BluemingReadAloud on this PC, this key only (dev run and installed app together)"
+    },
+    "usage_ext_heading_key": {
+        "ko": "크롬 확장 — 브라우저마다 받은 값(키 구분 없음 · 위 표의 확장 몫은 Paseo 가 키별로 나눈 값)",
+        "en": "Chrome extension — received per browser (all keys · the table's extension share is Paseo's per-key split)"
     },
     "usage_paseo_stale": {
         "ko": "    못 읽은 서버(지난 값 그대로): {}",
@@ -503,7 +529,8 @@ messages = {
         "ko": "닫기",
         "en": "Close"
     },
-    # 사용량 알약(usage_pill.py, tts_usage.pill_text) — {종류} {세 곳 합계} / {월 무료분}. 넘으면 {합계}·{넘친 글자}·{달러}
+    # 사용량 알약(usage_pill.py, tts_usage.pill_text) — {종류} {이 앱 키의 세 곳 합계} / {월 무료분}. 넘으면 {합계}·{넘친 글자}·{달러}
+    # (2026-11-13 부터 이 앱이 쓰는 키 몫만 — 키가 없으면 키 구분 없이)
     "pill_under": {
         "ko": "{} {} / {}자",
         "en": "{} {} / {} chars"

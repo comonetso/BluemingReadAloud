@@ -211,7 +211,27 @@ class TestUsageCounterKeys(TempDirCase):
             "v": 1, "months": {"2026-11": {"chirp3hd": 5, "wavenet": 1}},
             "keys": {"c0b1947007b8": {"tail": "1234", "months": {"2026-11": {"chirp3hd": 3, "wavenet": 1}}},
                      "8b9d16888b45": {"tail": "ABCD", "months": {"2026-11": {"chirp3hd": 2}}}}})
-        self.assertEqual(c.month_counts("2026-11"), {"chirp3hd": 5, "wavenet": 1})   # 알약·사용량 창은 그대로 종류별 합
+        self.assertEqual(c.month_counts("2026-11"), {"chirp3hd": 5, "wavenet": 1})   # 키를 안 주면 종류별 합
+
+    def test_month_counts_per_key(self):
+        # 알약·사용량 창의 이 앱 몫 = 지금 키 칸만(2026-11-13 리규형님 버튼 "이 앱이 쓰는 키 몫만")
+        c = self.counter()
+        c.count("chirp3hd", "가나다", now=self.NOV, key=self.A)
+        c.count("chirp3hd", "ab", now=self.NOV, key=self.B)
+        self.assertEqual(c.month_counts("2026-11", key=self.A, now=self.NOV), {"chirp3hd": 3})
+        self.assertEqual(c.month_counts("2026-11", key=self.B, now=self.NOV), {"chirp3hd": 2})
+        self.assertEqual(c.month_counts("2026-10", key=self.A, now=self.NOV), {})
+        other = tts_usage.key_mark("가짜키한글끝")
+        self.assertEqual(c.month_counts("2026-11", key=other, now=self.NOV), {})       # 이번 달 안 쓴 키
+
+    def test_month_counts_per_key_old_file(self):
+        # 키 칸 없는 옛 기록 — 키 칸을 만들 때처럼 이번 달 몫만 지금 키 몫으로 본다. 파일은 그대로
+        old = {"v": 1, "months": {"2026-10": {"chirp3hd": 7}, "2026-11": {"chirp3hd": 100}}}
+        self.write(old)
+        c = self.counter()
+        self.assertEqual(c.month_counts("2026-11", key=self.A, now=self.NOV), {"chirp3hd": 100})
+        self.assertEqual(c.month_counts("2026-10", key=self.A, now=self.NOV), {})       # 지난달은 옮기지 않는다
+        self.assertEqual(self.read(), old)
 
     def test_old_file_moves_only_this_month_once(self):
         self.write({"v": 1, "months": {"2026-10": {"chirp3hd": 7}, "2026-11": {"chirp3hd": 100, "wavenet": 3}}})
@@ -403,6 +423,44 @@ class TestPaseoUsage(TempDirCase):
         self.assertEqual(sorted(got["sources"]), ["DBServer-Gabia", "PC"])
         self.assertEqual(got["stale"], ["Calladmin-Gabia"])
         self.assertEqual(got["updatedAt"], "2026-11-01T07:30:00.000Z")
+        self.assertNotIn("keys", got)                                  # 키별 칸이 없는 판
+
+    # 2026-11-12 Paseo 가 키별로 센 뒤의 모양(2026-11-13 실제 파일과 같은 칸·숫자, 키 표식과 장비 이름은 가짜)
+    KEYED = {"v": 1, "updatedAt": "2026-11-12T17:50:09.587Z", "month": "2026-11",
+             "sources": {"PC": {"chirp3hd": 407_994}, "Calladmin-Gabia": {"chirp3hd": 500_538}},
+             "total": {"chirp3hd": 976_557}, "stale": [],
+             "extra": {"PC 읽기 앱": {"chirp3hd": 15_263}, "크롬 확장": {"chirp3hd": 10_559}},
+             "grand": {"chirp3hd": 1_002_379},
+             "keys": {"c0b1947007b8": {"tail": "1234", "counts": {"chirp3hd": 917_476}, "paseo": {"chirp3hd": 902_213},
+                                       "sources": {"PC": {"chirp3hd": 401_675}, "Calladmin-Gabia": {"chirp3hd": 500_538},
+                                                   "PC 읽기 앱": {"chirp3hd": 15_263}}},
+                      "8b9d16888b45": {"tail": "ABCD", "counts": {"chirp3hd": 142_968}, "paseo": {"chirp3hd": 132_409},
+                                       "sources": {"PC": {"chirp3hd": 6_319}, "DBServer-Gabia 대표님": {"chirp3hd": 126_090},
+                                                   "크롬 확장": {"chirp3hd": 10_559}}}},
+             "keySources": {}}
+
+    def test_keys_from_paseo(self):
+        # 키별 기준(2026-11-13 리규형님 버튼) — Paseo 몫·확장 몫(Paseo 가 나눈 대로)·장비별을 키마다
+        self.write(self.KEYED)
+        keys = self.read()["keys"]
+        self.assertEqual(keys["c0b1947007b8"], {
+            "tail": "1234", "paseo": {"chirp3hd": 902_213}, "extension": {},
+            "hosts": {"PC": {"chirp3hd": 401_675}, "Calladmin-Gabia": {"chirp3hd": 500_538}}})   # 이 앱 몫은 장비가 아니다
+        self.assertEqual(keys["8b9d16888b45"]["extension"], {"chirp3hd": 10_559})
+        self.assertEqual(sorted(keys["8b9d16888b45"]["hosts"]), ["DBServer-Gabia 대표님", "PC"])
+
+    def test_keys_wrong_shape_left_out(self):
+        # 키 칸 하나라도 틀리면 키별 칸 전체를 안 쓴다(키 구분 없는 숫자로 메우지 않음 — 합계는 그대로 ok)
+        bad = json.loads(json.dumps(self.KEYED))
+        bad["keys"]["8b9d16888b45"]["paseo"] = {"chirp3hd": "x"}
+        self.write(bad)
+        got = self.read()
+        self.assertEqual(got["state"], "ok")
+        self.assertNotIn("keys", got)
+        bad = json.loads(json.dumps(self.KEYED))
+        bad["keys"]["NOT-A-KEY-ID"] = bad["keys"].pop("8b9d16888b45")
+        self.write(bad)
+        self.assertNotIn("keys", self.read())
 
 
 class TestSummarize(unittest.TestCase):
@@ -429,6 +487,45 @@ class TestSummarize(unittest.TestCase):
         n2 = s["kinds"][2]
         self.assertEqual((n2["free"], n2["left"], n2["over"], n2["cost"]), (None, None, None, None))
 
+    # 키 기준(2026-11-13 리규형님 버튼 "이 앱이 쓰는 키 몫만") — read_paseo_usage 가 돌려주는 keys 모양
+    PASEO_KEYED = {"state": "ok", "total": {"chirp3hd": 976_557}, "sources": {}, "stale": [], "updatedAt": "",
+                   "keys": {"aaaaaaaaaaaa": {"tail": "1234", "paseo": {"chirp3hd": 902_213}, "extension": {}, "hosts": {}},
+                            "bbbbbbbbbbbb": {"tail": "ABCD", "paseo": {"chirp3hd": 132_409},
+                                             "extension": {"chirp3hd": 10_559}, "hosts": {}}}}
+    EXT_ALL = [{"counts": {"chirp3hd": 10_559}}]   # 확장 설치별 값(키 구분 없음) — 키 기준에서는 쓰지 않는다
+
+    def test_key_basis(self):
+        s = tts_usage.summarize({"chirp3hd": 15_263}, self.PASEO_KEYED, self.EXT_ALL, "2026-11", key_id="aaaaaaaaaaaa")
+        chirp = s["kinds"][0]
+        self.assertEqual((s["key_id"], s["paseo_known"]), ("aaaaaaaaaaaa", True))
+        self.assertEqual((chirp["paseo"], chirp["app"], chirp["extension"], chirp["total"]), (902_213, 15_263, 0, 917_476))
+        self.assertEqual((chirp["left"], chirp["over"]), (82_524, 0))
+        s = tts_usage.summarize({}, self.PASEO_KEYED, self.EXT_ALL, "2026-11", key_id="bbbbbbbbbbbb")
+        chirp = s["kinds"][0]
+        self.assertEqual((chirp["paseo"], chirp["app"], chirp["extension"], chirp["total"]), (132_409, 0, 10_559, 142_968))
+
+    def test_key_basis_key_not_in_paseo(self):
+        # 키별 칸은 있는데 이 키가 없다 = 이번 달 Paseo·확장이 이 키를 안 씀 → 0(모름이 아님)
+        s = tts_usage.summarize({"chirp3hd": 7}, self.PASEO_KEYED, self.EXT_ALL, "2026-11", key_id="cccccccccccc")
+        chirp = s["kinds"][0]
+        self.assertTrue(s["paseo_known"])
+        self.assertEqual((chirp["paseo"], chirp["extension"], chirp["total"]), (0, 0, 7))
+
+    def test_key_basis_without_paseo_keys(self):
+        # Paseo 파일에 키별 칸이 없거나(옛 판·틀린 모양) 파일이 없으면 Paseo·확장 몫 모름 — 키 구분 없는 total 로 메우지 않는다
+        no_keys = {k: v for k, v in self.PASEO_KEYED.items() if k != "keys"}
+        for paseo in (no_keys, {"state": "missing"}, {"state": "other_month", "month": "2026-10", "updatedAt": ""}):
+            s = tts_usage.summarize({"chirp3hd": 15_263}, paseo, self.EXT_ALL, "2026-11", key_id="aaaaaaaaaaaa")
+            chirp = s["kinds"][0]
+            self.assertFalse(s["paseo_known"])
+            self.assertEqual((chirp["paseo"], chirp["extension"], chirp["total"]), (None, None, 15_263))
+
+    def test_no_key_keeps_old_sum(self):
+        # 이 앱에 키가 없으면 예전처럼 키 구분 없는 합계
+        s = tts_usage.summarize({"chirp3hd": 15_263}, self.PASEO_KEYED, self.EXT_ALL, "2026-11")
+        self.assertEqual((s["key_id"], s["paseo_known"]), (None, True))
+        self.assertEqual(s["kinds"][0]["total"], 976_557 + 15_263 + 10_559)
+
 
 class TestPillText(unittest.TestCase):
     def texts(self, lang="ko"):
@@ -447,6 +544,17 @@ class TestPillText(unittest.TestCase):
         # 무료분을 모르는 종류(목록 밖 저장값 Neural2)는 글자만
         row = tts_usage.pill_row(tts_usage.summarize({}, {"state": "missing"}, [], "2026-11"), "neural2")
         self.assertEqual(tts_usage.pill_text(row, True, self.texts()), ("neural2 0자", False))
+
+    def test_key_basis_pill(self):
+        # 2026-11-13 리규형님 스크린샷: 키 두 개 합계 "1,002,379자 · 2,379자 넘음" → 이 앱 키 몫만
+        paseo = TestSummarize.PASEO_KEYED
+        s = tts_usage.summarize({"chirp3hd": 15_263}, paseo, TestSummarize.EXT_ALL, "2026-11", key_id="aaaaaaaaaaaa")
+        self.assertEqual(tts_usage.pill_text(tts_usage.pill_row(s, "chirp3hd"), s["paseo_known"], self.texts()),
+                         ("Chirp 3 HD 917,476 / 1,000,000자", False))
+        no_keys = {k: v for k, v in paseo.items() if k != "keys"}
+        s = tts_usage.summarize({"chirp3hd": 15_263}, no_keys, [], "2026-11", key_id="aaaaaaaaaaaa")
+        self.assertEqual(tts_usage.pill_text(tts_usage.pill_row(s, "chirp3hd"), s["paseo_known"], self.texts()),
+                         ("Chirp 3 HD 15,263 / 1,000,000자 · Paseo 빠짐", False))
 
 
 class TestUsageReceiver(TempDirCase):
