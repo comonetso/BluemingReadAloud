@@ -129,6 +129,8 @@ import spoken_text      # 말할 글 다듬기 — Paseo 상태바 플러그인 
 import tts_engine
 # 읽기 이번 달 사용량 세기 · 세 곳(Paseo·이 앱·크롬 확장) 요금 브리지(2026-11-01) — 표준 라이브러리만 쓴다
 import tts_usage
+# 크롬 확장 대신 OpenAI 노을로 읽어 주는 길(2026-11-18, 51888 POST /v1/tts/noeul) — 표준 라이브러리만 쓴다
+import noeul_live
 # 주 언어가 아닌 문장 번역(2026-09-29) — requests 는 번역기를 만들 때(init_tts_client) 불러온다
 import translation
 
@@ -3186,6 +3188,7 @@ def setup_usage_receiver():
 
     포트를 못 열면 로그만 남기고 넘어간다(읽기와 무관 — 사용량 창에 "열지 못했습니다" 로 보인다).
     콘솔에는 확장 설치(source)마다 이 앱이 켜진 뒤 처음 받을 때 한 줄 — source 앞 8자·label·이번 달 숫자만(글·주소 없음).
+    같은 창구에 POST /v1/tts/noeul(2026-11-18) — 확장이 보낸 글을 OpenAI 노을로 읽어 WAV 로 돌려준다(noeul_live.py).
     """
     global usage_receiver
     seen = set()
@@ -3208,8 +3211,14 @@ def setup_usage_receiver():
         rejected.add(reason)
         log_to_console(f"[사용량] 크롬 확장 기록 거절: {reason}")
 
+    def on_noeul(payload, cancelled):
+        # 크롬 확장 대신 노을로 읽기(2026-11-18) — 창구 스레드(요청마다 하나)에서 불린다. Tk 를 만지지 않는다.
+        # 키 = Paseo 키 파일의 OPENAI_API_KEY(요청마다 다시 읽음). 사용량은 이 앱이 세지 않는다 — 확장이 자기 기록에 센다.
+        # cancelled() = 확장이 요청을 끊었나 — 참이면 라이브 연결을 닫는다(멈춤·건너뛰기, 과금 줄이기)
+        return noeul_live.handle_extension_request(payload, cancelled, log=log_to_console)
+
     usage_receiver = tts_usage.UsageReceiver(extension_usage_reports, on_report=on_report, log=log_to_console,
-                                             on_reject=on_reject)
+                                             on_reject=on_reject, noeul=on_noeul)
     if usage_receiver.start():
         log_to_console(f"[사용량] 크롬 확장 받는 창구: {tts_usage.RECEIVER_HOST}:{usage_receiver.port}")
 

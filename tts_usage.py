@@ -56,6 +56,7 @@ IGNORED_KINDS = ("openai",)             # Paseo 합계에 있는 OpenAI 몫 — 
 RECEIVER_HOST = "127.0.0.1"
 RECEIVER_PORT = 51888
 RECEIVER_PATH = "/v1/tts-usage"
+NOEUL_PATH = "/v1/tts/noeul"      # 확장 대신 노을로 읽어 WAV 를 돌려주는 길(2026-11-18, noeul_live.py)
 RECEIVER_MAX_BYTES = 16 * 1024
 EXTENSION_MAX_SOURCES = 20        # 확장 설치가 이보다 많으면 가장 오래 소식 없는 것부터 버린다(Claude 가 정함)
 _COUNT_MAX = 10 ** 10             # 한 칸 값 상한 — 이보다 크면 잘못 보낸 값으로 보고 받지 않는다
@@ -607,6 +608,20 @@ def pill_row(summary, kind):
 # 받는 창구 — 크롬 확장이 자기 누적값을 보낸다 (127.0.0.1 에만 열림)
 # ════════════════════════════════════════════════════════════════════
 
+def peer_closed(sock):
+    """요청을 보낸 쪽이 연결을 닫았나 — 기다리지 않고 본다(노을 길: 확장이 멈춤·건너뛰기로 요청을 끊으면 라이브 연결도 닫으려고).
+    본문을 다 읽은 뒤라 읽을 거리가 생겼다면 닫힘(FIN → 엿보기 b"") 이나 끊김(RST → 오류)뿐이다."""
+    import select
+    import socket
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+        if not readable:
+            return False
+        return sock.recv(1, socket.MSG_PEEK) == b""
+    except (OSError, ValueError):
+        return True
+
+
 class UsageReceiver:
     """POST http://127.0.0.1:51888/v1/tts-usage 로 확장 기록을 받는다(GET /v1/health 는 살아 있는지만).
 
@@ -617,14 +632,21 @@ class UsageReceiver:
     - on_reject(reason) — POST 를 거절할 때 까닭 이름만(origin_missing·origin_other·path·length·size·json·v·source·keys·
       months·write). 숫자·주소·Origin 값은 넘기지 않는다(2026-11-01 리규형님 버튼 "거절하면 까닭을 콘솔에" — 확장 몫이
       0 인 원인 찾기). 받은 스레드에서 불린다.
+    - noeul(payload, cancelled) — POST /v1/tts/noeul(2026-11-18, 크롬 확장 대신 노을로 읽기 —
+      noeul_live.handle_extension_request) → (상태 번호, Content-Type, 본문 bytes, 머리글 dict). 없으면 그 길은 404.
+      cancelled() = 확장이 그 요청 연결을 닫았나(peer_closed). Origin 검사·크기 상한은 사용량 길과 같고, 거절 본문은
+      {"ok":false,"code","error"}(확장이 error 를 화면에 그대로 쓴다). 요청마다 스레드가 따로라 겹쳐도 동시에 처리된다
+      (노을 연결 상한 12 는 noeul_live). 거절 까닭은 log 로 한 줄(on_reject 는 사용량 길 전용).
     """
 
-    def __init__(self, reports, host=RECEIVER_HOST, port=RECEIVER_PORT, on_report=None, log=None, on_reject=None):
+    def __init__(self, reports, host=RECEIVER_HOST, port=RECEIVER_PORT, on_report=None, log=None, on_reject=None,
+                 noeul=None):
         self.reports = reports
         self.host = host
         self.port = port
         self.on_report = on_report
         self.on_reject = on_reject
+        self.noeul = noeul
         self._log = log or (lambda msg: None)
         self._server = None
         self._thread = None
@@ -662,7 +684,58 @@ class UsageReceiver:
                         pass
                 self._reply(code, {"ok": False, "reason": reason})
 
+            def _send(self, code, content_type, raw, headers=None):
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(raw)))
+                    for name, value in (headers or {}).items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass   # 확장이 먼저 끊었다(기다림 초과 등) — 받은 소리는 버린다
+
+            def _noeul_refuse(self, status, code, reason):
+                receiver._log(f"[노을] 크롬 확장 요청 거절: {reason}")
+                raw = json.dumps({"ok": False, "code": code, "error": f"요청이 올바르지 않습니다({reason})"},
+                                 ensure_ascii=False).encode("utf-8")
+                self._send(status, "application/json", raw)
+
+            def _post_noeul(self):
+                # 본문을 먼저 다 읽고 Origin 을 본다 — 읽지 않고 답한 뒤 닫으면 보내던 쪽엔 403 대신 연결 끊김으로 보일 수 있다
+                try:
+                    length = int(self.headers.get("Content-Length", ""))
+                except ValueError:
+                    self._noeul_refuse(400, "bad_request", "length")
+                    return
+                if length < 0 or length > RECEIVER_MAX_BYTES:
+                    self._noeul_refuse(413, "size", "size")
+                    return
+                raw_body = self.rfile.read(length)
+                origin = str(self.headers.get("Origin", ""))
+                if not origin.startswith("chrome-extension://"):
+                    self._noeul_refuse(403, "origin", "origin_other" if origin else "origin_missing")
+                    return
+                try:
+                    payload = json.loads(raw_body.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    self._noeul_refuse(400, "bad_request", "json")
+                    return
+                connection = self.connection
+                try:
+                    status, content_type, raw, headers = receiver.noeul(payload, lambda: peer_closed(connection))
+                except Exception as e:
+                    receiver._log(f"[노을] 크롬 확장 요청 처리 오류: {type(e).__name__}")
+                    raw = json.dumps({"ok": False, "code": "internal", "error": "PC 읽기 앱 내부 오류"},
+                                     ensure_ascii=False).encode("utf-8")
+                    status, content_type, headers = 500, "application/json", {}
+                self._send(status, content_type, raw, headers)
+
             def do_POST(self):
+                if self.path == NOEUL_PATH and receiver.noeul is not None:
+                    self._post_noeul()
+                    return
                 if self.path != RECEIVER_PATH:
                     self._reject(404, "path")
                     return
