@@ -172,11 +172,20 @@ def group_digits(n):
     return f"{int(round(n)):,}"
 
 
-def voice_label(voice_name, used=None, price_text="{}", usage_text="{}"):
+def voice_label(voice_name, used=None, price_text="{}", usage_text="{}", language="ko"):
     """설정 창 목소리 칸 글 — "Zephyr · Chirp 3 HD · 100만 자 30달러 (이번 달 PC 앱 12,345자)" (Paseo speechProviders.tsx voiceLabel).
     price_text·usage_text 는 messages.py 문구("100만 자 {}달러", "이번 달 PC 앱 {}자"). used 가 None 이면 괄호를 뺀다.
     같은 종류 목소리는 같은 숫자다(무료분이 종류마다 따로라)."""
     kind = usage_kind(voice_name)
+    if kind == "openai":
+        # 가격 출처: Paseo server/presentation/tts.ts:19 (분당 0.05달러, 글자 요금 아님).
+        # 수정 허용 파일 안에서 ko/en 을 함께 둔다. Google 가격 문구(100만 자)는 재사용하지 않는다.
+        labels = {"ko": "노을 · OpenAI 라이브 · 분당 0.05달러",
+                  "en": "Noeul · OpenAI Live · $0.05 per minute"}
+        label = labels.get(language, labels["ko"])
+        if used is not None:
+            label += " (" + usage_text.format(group_digits(used)) + ")"
+        return label
     name = KIND_NAME.get(kind) or voice_type_of(voice_name) or kind
     price = KIND_PRICE.get(kind)
     label = f"{short_voice_name(voice_name)} · {name}"
@@ -732,10 +741,23 @@ class UsageReceiver:
                     status, content_type, headers = 500, "application/json", {}
                 self._send(status, content_type, raw, headers)
 
+            def _read_body_first(self):
+                """거절하기 전에 보낸 본문을 먼저 읽어 둔다. 읽지 않은 데이터가 남은 채 닫으면 Windows 가 연결을 끊어(RST)
+                보낸 쪽엔 404·403 대신 연결 끊김이 간다(11-18 시험 실측 — 기준본 14번 중 0번, 노을 직접 읽기를 더한 뒤
+                17번 중 6번 실패). 길이가 없거나 틀렸거나 상한을 넘으면 읽지 않는다(None). 거절 순서·까닭은 그대로다."""
+                try:
+                    length = int(self.headers.get("Content-Length", ""))
+                except ValueError:
+                    return None
+                if length < 0 or length > RECEIVER_MAX_BYTES:
+                    return None
+                return self.rfile.read(length)
+
             def do_POST(self):
                 if self.path == NOEUL_PATH and receiver.noeul is not None:
                     self._post_noeul()
                     return
+                body = self._read_body_first()
                 if self.path != RECEIVER_PATH:
                     self._reject(404, "path")
                     return
@@ -752,7 +774,7 @@ class UsageReceiver:
                     self._reject(413, "size")
                     return
                 try:
-                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    payload = json.loads(body.decode("utf-8"))   # 길이가 맞으면 _read_body_first 가 이미 읽었다
                 except (ValueError, UnicodeDecodeError):
                     self._reject(400, "json")
                     return

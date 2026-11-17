@@ -303,6 +303,7 @@ KOREAN_VOICES = [
     "ko-KR-Chirp3-HD-Leda",
     "ko-KR-Wavenet-A",
     "ko-KR-Wavenet-B",
+    tts_engine.NOEUL_VOICE,
 ]
 
 # 읽기 이번 달 사용량(2026-11-01, tts_usage.py). 개발 모드·설치본이 %APPDATA%\BluemingReadAloud 의 같은 파일에 센다
@@ -1503,6 +1504,9 @@ def setup_tray_icon():
                         elif isinstance(msg, tuple) and msg and msg[0] == "tts_event":
                             # 재생 엔진 알림 (session, kind, data) → 하단 바·리더 창
                             _handle_tts_event(*msg[1:])
+                        elif isinstance(msg, tuple) and msg and msg[0] == "tts_preview_failed":
+                            if msg[1] is tts_preview_session:
+                                _notify_segment_failed(msg[2])
                     except Exception as e:
                         logging.error(f"GUI 큐 처리 오류 ({msg if isinstance(msg, str) else msg[:3]}): {e}")
                         import traceback
@@ -2689,7 +2693,8 @@ def show_tts_settings_dialog():
 
     for v_id in voice_ids:
         used = None if usage_now is None else usage_now.get(tts_usage.usage_kind(v_id), 0)
-        display_str = tts_usage.voice_label(v_id, used, get_msg("voice_price"), get_msg("voice_usage"))
+        display_str = tts_usage.voice_label(v_id, used, get_msg("voice_price"), get_msg("voice_usage"),
+                                          language=current_language)
         if display_str in voice_map:   # 다른 언어의 같은 이름(en-US-Chirp3-HD-Zephyr 등)이 저장돼 있으면 구분
             display_str = f"{display_str} [{v_id}]"
         voice_options.append(display_str)
@@ -2713,8 +2718,8 @@ def show_tts_settings_dialog():
     def preview_tts():
         """"미리듣기" 버튼: 고른 음성·속도로 정해진 문장을 합성해 별도 스레드에서 들려준다.
 
-        읽기 엔진(TtsSession)을 쓰지 않고 sd.play 로 한 번 튼다 → 하단 바·형광펜 없음.
-        멈춤은 stop_current_playback 의 sd.stop() 이 맡는다(sd.play 에는 sd.stop 이 듣는다).
+        Google 은 기존 sd.play, 노을은 별도 TtsSession 으로 스트리밍한다. 둘 다 하단 바·형광펜 없음.
+        stop_current_playback 은 Google 의 sd.play 와 노을 미리 듣기 세션을 함께 멈춘다.
         ⚠️ 읽는 중에 누르면 두 소리가 겹쳐 난다(옛 동작 그대로).
         """
         selected_disp = voice_var.get()
@@ -2724,6 +2729,13 @@ def show_tts_settings_dialog():
         sel_rate = min(tts_speaking_rate, 4.0)
 
         text = "안녕하세요. 이 목소리로 글을 읽어 드립니다."   # Paseo PREVIEW_TEXT.ko 와 같은 말(2026-11-01 설정 맞추기)
+
+        preview = globals().get("tts_preview_session")
+        if preview is not None:
+            preview.stop()
+        if sel_voice_id == tts_engine.NOEUL_VOICE:
+            _start_noeul_preview(text, tts_speaking_rate)
+            return
 
         def _preview():
             # (별도 스레드) 네트워크 요청이 Tk 메인을 멈추지 않게 따로 돈다. 여기서는 Tk 를 만지지 않는다.
@@ -3383,6 +3395,7 @@ tts_paused = False    # 지금 읽기가 일시정지인가 — 엔진 state 알
 tts_stop_event = threading.Event()  # 옛 파일 재생(play_tts_file) 전용. 읽기 엔진은 세션마다 자기 멈춤 신호를 쓴다
 tts_current_file = None  # 현재 재생 파일 경로 (play_tts_file 전용 — 지금은 채우는 곳이 없다)
 tts_session = None    # 지금 읽고 있는 tts_engine.TtsSession (없으면 None). Tk 메인 스레드에서만 바꾼다
+tts_preview_session = None   # 노을 미리 듣기도 스트리밍 OutputStream 을 쓰므로 sd.stop 대신 세션을 멈춘다.
 # tts_session·tts_playing·tts_paused 를 "확인하고 고치기" 한 덩어리로 묶는 락.
 # 왜 필요한가: 옛 읽기의 재생 스레드가 끝 알림(_make_tts_event_handler)에서 "내가 지금 세션이면 tts_playing=False"
 #   를 하는 사이에, Tk 메인의 speak_text 가 새 세션을 넣고 tts_playing=True 로 만들면 → 옛 스레드가 뒤늦게 False 로
@@ -3415,6 +3428,9 @@ def stop_current_playback():
             session.stop()
         except Exception as e:
             logging.warning(f"읽기 세션 정지 오류: {e}")
+    preview = globals().get("tts_preview_session")
+    if preview is not None:
+        preview.stop()
     try:
         sd.stop()   # TTS 설정 창 미리듣기(sd.play) 멈춤
     except Exception:
@@ -3588,6 +3604,33 @@ def _make_tts_event_handler(box):
         gui_queue.put(("tts_event", session, kind, data))
     return on_event
 
+def _start_noeul_preview(text, rate):
+    """(Tk 메인) 하단 바·형광펜 없는 노을 미리 듣기. 실패 알림만 gui_queue 를 거친다."""
+    import noeul_live
+    import tts_usage as usage
+    global tts_preview_session
+    key = noeul_live.read_paseo_openai_key()
+    mark = usage.key_mark(key) if key else None
+    synthesize = tts_engine.make_noeul_synthesize(
+        key, log=log_to_console,
+        on_sent=lambda sent: _count_tts_usage(tts_engine.NOEUL_VOICE, sent, mark))
+    previous = tts_preview_session
+    if previous is not None:
+        previous.stop()
+    box = {}
+
+    def on_event(kind, data):
+        if kind == "segment_failed":
+            gui_queue.put(("tts_preview_failed", box["session"], data))
+
+    session = tts_engine.TtsSession(
+        text, [{"text": text, "para": 0}], synthesize, tts_engine.sounddevice_stream_factory(),
+        on_event, rate=rate, previous=previous, log=log_to_console)
+    box["session"] = tts_preview_session = session
+    sd.stop()   # 앞 Google 미리 듣기(sd.play)도 멈춘다.
+    session.start()
+
+
 def speak_text(text, hl_area=None):
     """선택한 글을 읽기 시작한다. ⚠️ Tk 메인 스레드에서만 부른다(read_selected_text 가 root.after 로 부름).
 
@@ -3597,7 +3640,7 @@ def speak_text(text, hl_area=None):
     1) readaloud_text.split_for_reading — 확장 드래그 읽기와 같은 규칙으로 줄 단위 조각 + 원문 위치를 만든다.
        lang/voice_lang 은 음성 이름 앞 두 덩어리(ko-KR). 영어 단어 목록은 data/english-words.js.
     2) 앞 읽기를 멈추고(세션 abort), 하단 바를 붙일 모니터를 지금(전경 창 기준) 정한다.
-    3) 새 TtsSession 을 만들어 시작한다. 합성은 Google Cloud TTS(make_google_synthesize), 출력은 sounddevice.
+    3) 새 TtsSession 을 만들어 시작한다. Google 은 완성 배열, 노을은 문단별 수신 중 PCM, 출력은 sounddevice.
        새 세션은 앞 세션의 재생 스레드가 스트림을 닫을 때까지 기다린 뒤 비프음 → 재생한다(previous=).
        시작 직전에 원문 위 형광펜을 시작한다(_begin_source_highlight — 결과는 나중에 Tk 메인으로 온다).
     4) 엔진 알림 → gui_queue → _handle_tts_event 가 하단 바·형광펜(원문 위 또는 리더 창)을 움직인다.
@@ -3610,7 +3653,8 @@ def speak_text(text, hl_area=None):
         log_to_console("[TTS] 텍스트 없음")
         return
 
-    if not google_tts_client or not google_tts:
+    is_noeul = tts_voice_name == tts_engine.NOEUL_VOICE
+    if not is_noeul and (not google_tts_client or not google_tts):
         log_to_console("[TTS] 초기화 안됨")
         return
 
@@ -3624,7 +3668,8 @@ def speak_text(text, hl_area=None):
     try:
         words = _get_english_words()           # 영어 대문자 낱말 사전 읽기(2026-10-28 — 크롬 확장 speakNames)
         segments = readaloud_text.split_paragraphs_for_reading(
-            text, lang, voice_type, keep_whole=translation.plan if use_translation else None, words=words)
+            text, lang, voice_type, keep_whole=translation.plan if use_translation else None, words=words,
+            streaming=is_noeul)
         raw_texts = translation.mark_for_translation(segments) if use_translation else set()
     except Exception as e:
         logging.error(f"조각 나누기 오류: {e}")
@@ -3643,10 +3688,19 @@ def speak_text(text, hl_area=None):
     box = {}
     try:
         voice_for_usage = tts_voice_name   # 이 읽기의 목소리(설정 창에서 바꿔도 이 읽기는 이 목소리로 센다)
-        key_for_usage = google_tts_key_mark   # 이 읽기가 쓰는 클라이언트의 키(인증 창에서 키를 바꿔도 이 읽기는 이 키로 센다)
-        synthesize = tts_engine.make_google_synthesize(
-            google_tts_client, google_tts, tts_voice_name, log=log_to_console,
-            on_sent=lambda sent: _count_tts_usage(voice_for_usage, sent, key_for_usage))
+        if is_noeul:
+            import noeul_live
+            import tts_usage as usage
+            key = noeul_live.read_paseo_openai_key()
+            key_for_usage = usage.key_mark(key) if key else None
+            synthesize = tts_engine.make_noeul_synthesize(
+                key, log=log_to_console,
+                on_sent=lambda sent: _count_tts_usage(voice_for_usage, sent, key_for_usage))
+        else:
+            key_for_usage = google_tts_key_mark   # 클라이언트와 그 키의 이름표를 읽기 시작 때 함께 고정한다.
+            synthesize = tts_engine.make_google_synthesize(
+                google_tts_client, google_tts, tts_voice_name, log=log_to_console,
+                on_sent=lambda sent: _count_tts_usage(voice_for_usage, sent, key_for_usage))
         if raw_texts:
             # 번역 대상 조각만 번역 → 읽기용 변환 → 합성. 번역 실패는 SegmentFailed → 그 조각 차례에 멈추고 알림
             translator = gemini_translator or translation.MissingTranslator("번역기가 준비되지 않았습니다(인증 전)")
@@ -4120,7 +4174,7 @@ def _caption_for(session, idx):
         return None
 
 def _notify_segment_failed(data):
-    """(Tk 메인) 번역 실패로 읽기가 멈췄다고 경고 창으로 알린다(앱이 이미 쓰는 messagebox — 창이 포커스를 가져간다).
+    """(Tk 메인) 번역/노을 실패로 읽기가 멈췄다고 경고 창으로 알린다(기존 messagebox).
 
     창은 root.after 로 미뤄 연다 — 지금은 check_gui_queue 가 엔진 알림을 처리하는 중이라, 여기서 바로 모달 창을 열면
     뒤이은 session_end(하단 바 숨기기 등) 처리가 그 창 뒤로 밀린다.
@@ -4128,6 +4182,9 @@ def _notify_segment_failed(data):
     data = data if isinstance(data, dict) else {}
     idx = data.get("index")
     reason = data.get("message") or ""
+    if data.get("provider") == "noeul":
+        root.after(0, lambda: messagebox.showwarning(get_msg("dialog_tts_title"), reason))
+        return
     log_to_console(f"[번역] 조각 {idx + 1 if isinstance(idx, int) else '?'} 번역 실패로 읽기를 멈춤: {reason}")
     root.after(0, lambda: messagebox.showwarning(get_msg("translate_failed_title"),
                                                  get_msg("translate_failed_body", reason)))

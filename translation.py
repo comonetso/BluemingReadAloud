@@ -281,9 +281,9 @@ def make_translating_synthesize(synthesize, translate, prepare, raw_texts, log=N
     cache = {}      # 조각 글(raw) → (번역문, 읽기용 변환한 글)
     lock = threading.Lock()
 
-    def synth(text, rate):
+    def prepared(text):
         if text not in raw_texts:
-            return synthesize(text, rate)
+            return text
         with lock:
             done = cache.get(text)
         if done is None:
@@ -300,7 +300,16 @@ def make_translating_synthesize(synthesize, translate, prepare, raw_texts, log=N
                     on_translated(text)
                 except Exception as e:
                     log(f"[번역] 도착 알림 처리 오류: {e}")
-        return synthesize(done[1], rate)
+        return done[1]
+
+    def synth(text, rate):
+        return synthesize(prepared(text), rate)
+
+    if getattr(synthesize, "stream", None) is not None:
+        def stream(text, plan_rate, *, cancelled, wake):
+            # 계획 속도·취소·PCM 도착 알림은 번역 감싸기를 지나도 그대로 넘긴다.
+            return synthesize.stream(prepared(text), plan_rate, cancelled=cancelled, wake=wake)
+        synth.stream = stream
 
     def translated_of(text):
         with lock:

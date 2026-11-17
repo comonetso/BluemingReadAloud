@@ -4,7 +4,8 @@
 왜: 세 읽기 앱(Paseo·이 앱·크롬 확장)의 OpenAI 읽기 목소리는 노을 하나다(11-17 리규형님). 노을은 라이브 모델(gpt-live-1)
 전용이라 웹소켓으로 붙어야 하는데, 라이브 웹소켓은 키를 Authorization 머리글로만 받고 브라우저는 웹소켓에 머리글을 못 붙인다
 (크롬 확장 대화 11-18 실측). 그래서 확장이 글을 127.0.0.1:51888 POST /v1/tts/noeul 로 보내면 이 앱이 대신 노을로 읽어 WAV 를
-돌려준다(리규형님 11-18 버튼 "확장의 노을은 읽기 앱에 맡긴다", 요청 peer_mail 91cd11f0). 이 앱 자신의 읽기는 여전히 Google 이다.
+돌려준다(리규형님 11-18 버튼 "확장의 노을은 읽기 앱에 맡긴다", 요청 peer_mail 91cd11f0).
+앱 직접 읽기는 sink 로 PCM 을 오는 대로 넘긴다. 확장 창구는 예전처럼 완성 WAV 를 받으며 여기서 사용량을 세지 않는다.
 
 순서·지시문·값 = Paseo 상태바 플러그인 server/presentation/tts.ts 의 liveRead (11-18 판 — 리규형님 버튼 "Paseo 최신 방식"):
   1) 연결되면 session.start(instructions = 낭독 정책만, 목소리 noeul, PCM 24kHz)
@@ -84,6 +85,7 @@ MESSAGES = {
     "no_audio": "OpenAI 노을이 소리를 보내지 않았습니다",
     "not_started": "OpenAI 노을이 30초 안에 읽기를 시작하지 않았습니다",
     "connect": "OpenAI 라이브 연결 오류",
+    "server": "OpenAI 노을 서버 오류",
     "internal": "PC 읽기 앱 내부 오류",
     "cancelled": "확장이 요청을 끊어 노을 연결을 닫았습니다",
 }
@@ -460,17 +462,20 @@ class _Retry(Exception):
 
 
 def read_noeul(text, key, lang="ko", *, url=LIVE_URL, voice=LIVE_VOICE, log=None, opener=LiveSocket,
-               clock=time.monotonic, close_delay=CLOSE_DELAY_S, cancelled=None):
+               clock=time.monotonic, close_delay=CLOSE_DELAY_S, cancelled=None, sink=None):
     """text 를 노을로 읽혀 앞뒤 무음을 자른 PCM(16비트·한 채널·24kHz) bytes 를 돌려준다. 실패는 NoeulError.
     text 는 다듬지 않는다(확장이 이미 읽기용으로 다듬은 글). cancelled() 가 참이 되면(확장이 요청을 끊음) 0.1초 안에
     라이브 연결을 닫고 NoeulError("cancelled"). opener·clock·close_delay 는 시험용.
     다시 시도 = Paseo requestOpenaiAudio(11-18): 연결 자리(동시 12) 안에서 최대 LIVE_TRIES 번, 시작까지 합쳐 30초.
-    이 앱은 소리를 다 모은 뒤 한꺼번에 돌려주니(Paseo 의 sink 없는 경우) 소리를 일부 받은 뒤의 오류도 마지막 시도가
-    아니면 다시 시도한다. 다만 OpenAI 가 키·IP 를 거절하면 다시 해도 같아서 바로 실패시킨다(Paseo 는 이 둘을 못 가려 다시 한다)."""
+    sink(pcm) 를 주면 첫머리 확인 후 오는 대로 넘기고, 한 번 넘긴 뒤에는 재시도하지 않는다
+    (Paseo server/presentation/tts.ts:341-347). sink 가 없으면 기존 완성 PCM 계약 그대로다.
+    OpenAI 가 키·IP 를 거절하면 다시 해도 같아서 바로 실패시킨다."""
     if not key:
         raise NoeulError("no_key")
     log = log or (lambda msg: None)
     cancelled = cancelled or (lambda: False)
+    if cancelled():
+        raise NoeulError("cancelled")
     start = clock()
     deadline = start + live_timeout_s(text)
     while not _slots.acquire(timeout=PUMP_S):     # 자리를 기다리는 동안에도 끊김·시간을 본다
@@ -483,12 +488,14 @@ def read_noeul(text, key, lang="ko", *, url=LIVE_URL, voice=LIVE_VOICE, log=None
         checkable = lang == "ko" and bool(_HANGUL_HEAD.match(LIVE_PLAIN.sub("", text)))
         attempt = 1
         while True:
+            if cancelled():
+                raise NoeulError("cancelled")
             remain = start_deadline - clock()
             last = attempt >= LIVE_TRIES or remain <= LIVE_REPLY_S
             reply_s = max(remain, 1.0) if last else LIVE_REPLY_S
             try:
                 return _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, deadline, reply_s,
-                                  checkable and not last, last, cancelled)
+                                  checkable and not last, last, cancelled, sink)
             except _Retry as retry:
                 attempt += 1
                 log(f"[노을] 다시 시도 {attempt}/{LIVE_TRIES} — {retry.reason} · 원문 {len(text)}자")
@@ -496,13 +503,14 @@ def read_noeul(text, key, lang="ko", *, url=LIVE_URL, voice=LIVE_VOICE, log=None
         _slots.release()
 
 
-def _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, deadline, reply_s, check, last, cancelled):
+def _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, deadline, reply_s, check, last, cancelled, sink):
     """한 번의 시도(Paseo liveRead). reply_s 안에 실제 소리가 없으면 다시 시도, check 면 받아쓴 글 첫머리를 원문과 견준다.
     다시 시도할 일이면 _Retry, 마지막 시도거나 끊겼으면 NoeulError."""
     begin = clock()
+    sent = False
 
     def fail(code, message=None, retry=False):
-        if retry and not last and not cancelled():
+        if retry and not last and not sent and not cancelled():
             return _Retry(message or MESSAGES.get(code, code))
         return NoeulError(code, message)
 
@@ -520,6 +528,27 @@ def _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, dea
     spoken = ""
     started = complete = False
     checking = check
+    pending, held = [], []
+
+    # Paseo server/presentation/tts.ts:341-347, 372-375, 397-407:
+    # 앞 무음 한 조각, 중간 무음은 다음 소리와, 끝 무음 한 조각. 확인 전 소리는 재시도 때 버린다.
+    def deliver(pcm):
+        nonlocal sent
+        if sink is None:
+            return
+        if checking:
+            pending.append(pcm)
+        else:
+            sent = True
+            sink(pcm)
+
+    def pass_head():
+        nonlocal checking
+        checking = False
+        for pcm in pending:
+            deliver(pcm)
+        pending.clear()
+
     check_until = None     # 첫 소리 뒤 이 시각까지 받아쓴 글이 모자라면 견주지 않고 넘긴다
     next_pump = 0.0
     failure = None
@@ -541,7 +570,7 @@ def _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, dea
                            fail("no_audio", f"OpenAI 노을이 {reply_s:g}초 안에 읽기를 시작하지 않음", retry=True))
                 break
             if checking and check_until is not None and now >= check_until:
-                checking = False     # 첫 소리 뒤 1.5초 — 받아쓴 글이 모자라 못 견줌, 그냥 넘긴다
+                pass_head()     # 첫 소리 뒤 1.5초 — 받아쓴 글이 모자라 못 견줌, 그냥 넘긴다
             quiet = LIVE_END_QUIET_DONE_S if complete else LIVE_END_QUIET_S
             if last_loud >= 0 and now - last_loud_at >= quiet:
                 break     # 다 읽음
@@ -586,10 +615,19 @@ def _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, dea
                 if pcm_peak(piece) > LIVE_LOUD:
                     if first < 0:
                         first = len(chunks) - 1
+                        for pre in chunks[max(0, first - 1):first]:
+                            deliver(pre)
                         if checking:
                             check_until = clock() + LIVE_CHECK_WAIT_S
+                    else:
+                        for pause in held:
+                            deliver(pause)
+                    held.clear()
+                    deliver(piece)
                     last_loud = len(chunks) - 1
                     last_loud_at = clock()
+                elif first >= 0:
+                    held.append(piece)
             elif kind == "session.output_transcript.delta" and isinstance(event.get("delta"), str):
                 delta = event["delta"]
                 if complete:
@@ -606,7 +644,7 @@ def _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, dea
                             log(f"[노을] 원문이 아닌 말로 시작함 — 원문 {len(text)}자")
                             failure = fail("no_audio", "OpenAI 노을이 원문이 아닌 말로 시작함", retry=True)
                             break
-                        checking = False
+                        pass_head()
                 if last_loud >= 0 and read_all(spoken, text):
                     complete = True
             elif kind == "error":
@@ -630,6 +668,9 @@ def _read_once(text, key, lang, url, voice, log, opener, clock, close_delay, dea
         raise fail("no_audio", retry=True)
     if spoken and not same_words(spoken, text):
         log(f"[노을] 원문과 다르게 읽음 — 원문 {len(text)}자 · 읽은 글 {len(spoken)}자")
+    pass_head()
+    for tail in held[:1]:
+        deliver(tail)
     return b"".join(chunks[max(0, first - 2): last_loud + 3])
 
 

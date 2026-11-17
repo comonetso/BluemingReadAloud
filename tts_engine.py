@@ -7,7 +7,8 @@ stop_current_playback 의 스트림 멈춤 부분)를 옮겨 와서 클래스 �
 
 소리 없이 테스트할 수 있게 바깥 의존성은 전부 "주입"받는다.
   - synthesize(text, rate) -> numpy int16 배열(24kHz 모노) 또는 None. 실패하면 예외를 던져도 된다.
-      실제 앱에서는 make_google_synthesize() 가 만든 함수(Google Cloud TTS)를 넣는다.
+      Google 은 make_google_synthesize() 의 완성 배열을 쓴다. 노을은 선택적 .stream(text, plan_rate,
+      cancelled=..., wake=...) 가 GrowingAudio 를 돌려준다(합성 속도 1.0 과 계획 속도를 분리).
       보통 예외·None 은 "그 조각만 건너뛰기" 다. SegmentFailed 를 던지면 건너뛰지 않고, 그 조각을 읽을 차례가
       왔을 때 읽기를 멈춘다(번역 실패 — translation.py, 2026-09-29 사용자 결정 "그 조각 차례에 멈춤").
   - open_stream() -> start/write/stop/abort/close 가 있는 출력 스트림.
@@ -106,6 +107,8 @@ import re
 import threading
 import time
 import traceback
+from bisect import bisect_right
+from collections import deque
 
 import readaloud_text
 
@@ -113,7 +116,8 @@ __all__ = [
     "SAMPLE_RATE", "BLOCK_SAMPLES", "PREFETCH_AHEAD", "SYNTH_CACHE_SIZE", "MOVE_DELAY", "RESTART_AFTER", "LOADING_DELAY",
     "STATE_TICK", "DRAIN_SECONDS", "PRODUCER_JOIN_TIMEOUT", "RATE_MIN", "RATE_MAX", "VOLUME_MIN", "VOLUME_MAX",
     "RATE_STEPS", "DEFAULT_RATE_STEP", "normalize_rate_step", "rate_choices", "snap_rate", "format_rate",
-    "TtsSession", "SegmentFailed", "make_google_synthesize", "sounddevice_stream_factory", "play_start_beep",
+    "TtsSession", "SegmentFailed", "make_google_synthesize", "make_noeul_synthesize", "GrowingAudio", "NOEUL_VOICE",
+    "sounddevice_stream_factory", "play_start_beep",
     "voice_lang_of", "voice_type_of", "clamp_rate", "clamp_volume", "is_silent_segment", "count_spoken_chars",
     "apply_gain", "pcm_from_linear16",
 ]
@@ -289,6 +293,285 @@ def apply_gain(block, gain):
 
 # 합성 요청에 넣는 속도 — 늘 1.0. 실제 속도는 재생할 때 _Stretcher 가 적용한다(모듈 설명 "속도 즉시 반영")
 SYNTH_RATE = 1.0
+NOEUL_VOICE = "ko-KR-OpenAI-noeul"  # 앱 저장용 이름: 기존 언어·종류 판정은 ko-KR / OpenAI 를 얻는다.
+
+
+class GrowingAudio:
+    """아직 수신 중인 한 문단. 빈 입력과 완료를 구별하고, 이동 재생을 위해 받은 PCM 은 보존한다.
+
+    append/finish 는 네트워크 스레드, read 는 재생 스레드. wake 는 버퍼 락을 놓고 호출한다.
+    start_sec 는 Paseo streamStartSec, 취소는 플래그만 바꾼다(네트워크 스레드가 session.close).
+    """
+
+    def __init__(self, start_sec, *, cancelled=None, wake=None):
+        self.start_samples = math.ceil(start_sec * SAMPLE_RATE)
+        self._lock = threading.Lock()
+        self._chunks, self._starts = [], []
+        self._length = 0
+        self._done = False
+        self._error = None
+        self._cancel_event = threading.Event()
+        self._external_cancelled = cancelled or (lambda: False)
+        self._wake = wake or (lambda: None)
+
+    def __len__(self):
+        with self._lock:
+            return self._length
+
+    @property
+    def done(self):
+        with self._lock:
+            return self._done
+
+    @property
+    def error(self):
+        with self._lock:
+            return self._error
+
+    @property
+    def cancelled(self):
+        return self._cancel_event.is_set() or self._external_cancelled()
+
+    def cancel(self):
+        self._cancel_event.set()
+        self._wake()
+
+    def append(self, pcm):
+        import numpy as np
+        block = np.frombuffer(pcm, dtype="<i2").copy()
+        if not len(block):
+            return
+        with self._lock:
+            if self._done or self.cancelled:
+                return
+            self._starts.append(self._length)
+            self._chunks.append(block)
+            self._length += len(block)
+        self._wake()
+
+    def finish(self, error=None):
+        with self._lock:
+            if self._done:
+                return
+            self._error, self._done = error, True
+        self._wake()
+
+    def read(self, offset, count):
+        import numpy as np
+        with self._lock:
+            end = min(self._length, offset + count)
+            if offset >= end:
+                return np.zeros(0, dtype=np.int16)
+            i = max(0, bisect_right(self._starts, offset) - 1)
+            parts = []
+            while offset < end:
+                at = offset - self._starts[i]
+                part = self._chunks[i][at:at + end - offset]
+                parts.append(part)
+                offset += len(part)
+                i += 1
+            return np.concatenate(parts)
+
+
+class _GrowingReader:
+    """audiotsm Reader. 수신 대기 중에는 0개, 문단 완료 뒤에만 기존 TAIL_PAD 를 공급한다."""
+    channels = 1
+
+    def __init__(self, source, offset):
+        self.source, self.offset = source, offset
+
+    @property
+    def limit(self):
+        return len(self.source) + (_Stretcher.TAIL_PAD if self.source.done else 0)
+
+    @property
+    def empty(self):
+        return self.offset >= self.limit
+
+    def skip(self, n):
+        count = min(n, max(0, self.limit - self.offset))
+        self.offset += count
+        return count
+
+    def read(self, buffer):
+        count = min(buffer.shape[1], max(0, self.limit - self.offset))
+        if count:
+            raw = self.source.read(self.offset, count)
+            buffer[0, :count] = 0
+            buffer[0, :len(raw)] = raw.astype("float32") / 32768.0
+            self.offset += count
+        return count
+
+
+class _StreamingStretcher:
+    """노을 전용 WSOLA. 수신 공백에서는 flush 하지 않고 같은 변환기를 다음 입력까지 보존한다."""
+
+    def __init__(self, source, rate):
+        self._source = source
+        self._raw_off = 0
+        self._tsm = None
+        self._tsm_ok = True
+        self._out, self._out_len = [], 0
+        self._flushed = self._in_done = False
+        self.started = False
+
+    def consumed(self):
+        return min(self._reader.offset, len(self._source)) if self._tsm else self._raw_off
+
+    @property
+    def done(self):
+        if not self._source.done:
+            return False
+        if self._tsm is None:
+            return self._raw_off >= len(self._source)
+        return self._flushed and self._out_len == 0
+
+    def next_block(self, n, rate):
+        import numpy as np
+        if self._tsm is not None and _Stretcher._unity(rate) and not self._flushed:
+            self._raw_off = self.consumed()
+            self._tsm = None
+            self._out, self._out_len = [], 0
+        elif self._tsm is None and not _Stretcher._unity(rate) and self._tsm_ok:
+            try:
+                from audiotsm import wsola
+                self._reader = _GrowingReader(self._source, self._raw_off)
+                self._tsm = wsola(1, speed=rate)
+                self._writer = _ListWriter(self)
+                self._flushed = self._in_done = False
+            except ImportError:
+                self._tsm_ok = False   # 기존 Google 경로와 같은 의존성 누락 시 1배 재생
+        before = self.consumed()
+        if self._tsm is None:
+            block = self._source.read(self._raw_off, n)
+            self._raw_off += len(block)
+            return block, len(block)
+        self._tsm.set_speed(rate)
+        while self._out_len < n and not self._flushed:
+            if self._in_done and self._reader.empty and self._source.done:
+                # 수신 중 empty 는 종료가 아니다. 패딩·flush 는 문단 전체가 끝난 뒤 딱 한 번.
+                while True:
+                    _, finished = self._tsm.flush_to(self._writer)
+                    if finished:
+                        break
+                self._tsm.clear()
+                self._flushed = True
+                break
+            at = self._reader.offset
+            self._tsm.read_from(self._reader)
+            written, self._in_done = self._tsm.write_to(self._writer)
+            if at == self._reader.offset and not written:
+                break   # 아직 안 온 입력을 기다린다 — 빈 블록은 done 과 구별해서 엔진에 돌려준다.
+        need = min(n, self._out_len)
+        parts = []
+        while need:
+            part = self._out[0]
+            take = min(need, len(part))
+            parts.append(part[:take])
+            need -= take
+            self._out_len -= take
+            if take == len(part):
+                self._out.pop(0)
+            else:
+                self._out[0] = part[take:]
+        block = (np.clip(np.concatenate(parts) * 32768, -32768, 32767).astype(np.int16)
+                 if parts else np.zeros(0, dtype=np.int16))
+        return block, self.consumed() - before
+
+
+def make_noeul_synthesize(key, *, log=None, on_sent=None, reader=None):
+    """앱 직접 읽기 전용. 확장 창구에는 이 합성기/사용량 콜백을 연결하지 않는다."""
+    import noeul_live
+    reader = reader or noeul_live.read_noeul
+    log = log or (lambda msg: None)
+
+    def sent(text):
+        if on_sent is not None:
+            try:
+                on_sent(text)
+            except Exception as e:
+                log(f"[노을] 사용량 기록 오류: {type(e).__name__}")
+
+    def failure(error):
+        return SegmentFailed(noeul_live.MESSAGES.get(getattr(error, "code", "internal"),
+                                                    noeul_live.MESSAGES["internal"]))
+
+    def synthesize(text, rate):
+        import numpy as np
+        try:
+            pcm = reader(text, key, "ko", log=log)
+        except Exception as e:
+            raise failure(e) from e
+        sent(text)
+        return np.frombuffer(pcm, dtype="<i2").copy()
+
+    def stream(text, plan_rate, *, cancelled, wake):
+        # Paseo server/presentation/tts.ts:570-585, 610-641: 계획은 문단을 열 때 한 번만 한다.
+        pieces = readaloud_text.stream_pieces_growing(text, plan_rate)
+        start_sec = readaloud_text.stream_start_sec(pieces[0], plan_rate) if pieces else 0
+        audio = GrowingAudio(start_sec, cancelled=cancelled, wake=wake)
+        audio.pieces, audio.plan_rate = pieces, plan_rate
+        slots = [{"pcm": deque(), "done": False} for _ in pieces]
+        lock = threading.Lock()
+        next_piece = cursor = 0
+        parallel = min(8, len(pieces))  # Paseo server/presentation/tts.ts:55 LIVE_PARALLEL = 8
+        remaining = parallel
+
+        def drain():
+            nonlocal cursor
+            # Paseo tts.ts:527-540: 앞 연결이 끝날 때까지 뒤 연결의 PCM 은 넘기지 않는다.
+            while cursor < len(slots):
+                slot = slots[cursor]
+                while slot["pcm"]:
+                    audio.append(slot["pcm"].popleft())
+                if not slot["done"]:
+                    break
+                cursor += 1
+
+        def receive(index, pcm):
+            with lock:
+                if not audio.cancelled and not audio.done:
+                    slots[index]["pcm"].append(pcm)
+                    drain()
+
+        def worker():
+            nonlocal next_piece, remaining
+            try:
+                while not audio.cancelled:
+                    with lock:
+                        if next_piece >= len(pieces) or audio.cancelled:
+                            return
+                        index = next_piece
+                        next_piece += 1
+                    reader(pieces[index], key, "ko", log=log, cancelled=lambda: audio.cancelled,
+                           sink=lambda pcm: receive(index, pcm))
+                    sent(pieces[index])   # 성공한 연결만. 버린 재시도·실패는 reader 가 예외로 끝낸다.
+                    with lock:
+                        slots[index]["done"] = True
+                        drain()
+            except Exception as e:
+                if not audio.cancelled:
+                    audio.finish(failure(e))
+                    audio.cancel()   # Paseo tts.ts:580: 한 조각 실패 시 나머지 연결도 닫는다.
+            finally:
+                with lock:
+                    remaining -= 1
+                    if remaining == 0:
+                        audio.finish()
+
+        audio.workers = [threading.Thread(target=worker, name="noeul-piece", daemon=True) for _ in range(parallel)]
+        try:
+            for thread in audio.workers:
+                thread.start()
+        except Exception as e:
+            audio.finish(failure(e))
+            audio.cancel()
+        if not pieces:
+            audio.finish()
+        return audio
+
+    synthesize.stream = stream
+    return synthesize
 
 
 class _ListWriter:
@@ -599,6 +882,7 @@ class TtsSession:
             self._para.append(p if isinstance(p, int) and not isinstance(p, bool) else i)
 
         self._synthesize = synthesize
+        self._stream_synthesize = getattr(synthesize, "stream", None)
         self._open_stream = open_stream
         self._on_event = on_event
         self._clock = clock
@@ -650,6 +934,7 @@ class TtsSession:
         # 합성 소리 캐시 [(글, 속도, 소리, 요청 순번)] — 최근 것이 앞 (모듈 설명 "합성 소리 재사용")
         self._cache = []
         self._synth_seq = 0          # 합성 요청 순번(보낼 때마다 +1). 확장 prefetchSeq(tts-engines.js:389, 401)
+        self._opening_stream = None  # 번역 대기 중인 노을 문단도 이동 시 취소할 수 있게 (번호, Event)
 
         # 재생 스레드가 손에 든 소리
         self._audio = None
@@ -994,11 +1279,21 @@ class TtsSession:
                     self._synth_seq += 1
                     seq = self._synth_seq
                     text = self._texts[idx]
+                    plan_rate = self._rate   # 노을 계획은 실제 재생 속도. SYNTH_RATE 와 별개다.
+                    cancel_open = threading.Event() if self._stream_synthesize is not None else None
+                    if cancel_open is not None:
+                        self._opening_stream = (idx, cancel_open)
                 audio = None
                 failure = None
                 try:
                     self._log(f"[TTS] 조각 {idx + 1}/{self._n} 합성 ({len(text)}자, 속도 {rate:.2f}): {text[:80]}")
-                    audio = self._synthesize(text, rate)
+                    if self._stream_synthesize is not None:
+                        audio = self._stream_synthesize(text, plan_rate,
+                                                        cancelled=lambda token=cancel_open: (
+                                                            self._stop_event.is_set() or token.is_set()),
+                                                        wake=self._wake_stream)
+                    else:
+                        audio = self._synthesize(text, rate)
                 except SegmentFailed as e:
                     # 건너뛰지 않는다 — 이 조각 차례가 오면 재생 스레드가 읽기를 멈춘다(_step_locked)
                     failure = str(e)
@@ -1008,9 +1303,20 @@ class TtsSession:
                     self._log(f"[TTS] 조각 {idx + 1} 합성 오류: {e}")
                     audio = None
                 with self._cond:
+                    self._opening_stream = None
                     if self._stop_event.is_set():
+                        if isinstance(audio, GrowingAudio):
+                            audio.cancel()
                         return
                     if gen != self._synth_gen:
+                        if (isinstance(audio, GrowingAudio) and not audio.cancelled
+                                and self._cur <= idx <= self._cur + self._prefetch
+                                and idx not in self._ready and idx != self._audio_idx):
+                            # 노을은 동일 세션의 동일 문단이고 새 창에도 필요하면 열던 작업을 유지한다.
+                            # 번역을 기다리다가 그 문단으로 이동한 경우도 중복 연결을 만들지 않는다.
+                            # Google 배열의 기존 세대·캐시 규칙은 아래 그대로다.
+                            self._put_ready_locked(idx, audio, rate, seq)
+                            continue
                         # ⚠️ 옛 세대 결과는 재생 자리에 넣지 않는다(늦게 온 소리가 새 위치·새 속도에서 울리면 안 됨).
                         #    실패도 기록하지 않는다 — 새 자리에서 필요하면 다시 요청한다.
                         self._cache_put_locked(text, rate, audio, seq)
@@ -1027,6 +1333,11 @@ class TtsSession:
             with self._cond:
                 self._producer_failed = True
                 self._changed_locked()
+
+    def _wake_stream(self):
+        """PCM 수신·완료 알림. Tk 를 부르지 않고 재생 스레드만 깨운다."""
+        with self._cond:
+            self._changed_locked()
 
     # ── 내부: 재생 스레드 ─────────────────────────────────────────────────
 
@@ -1182,7 +1493,7 @@ class TtsSession:
                 self._log(f"[TTS] 조각 {self._cur + 1}: 실패한 조각이라 읽기를 멈춥니다")
                 self._outbox.append(("segment_failed", {"index": self._cur, "message": failure}))
                 return ("done", "segment_failed")
-            if audio is None or len(audio) == 0:
+            if audio is None or (not isinstance(audio, GrowingAudio) and len(audio) == 0):
                 # 합성 실패(또는 빈 소리) → 건너뛴다. 번호는 그대로라 뒤 조각의 형광펜이 어긋나지 않는다
                 self._log(f"[TTS] 조각 {self._cur + 1}: 소리가 없어 건너뜁니다")
                 self._advance_locked(now)
@@ -1192,8 +1503,24 @@ class TtsSession:
             self._audio_rate = rate
             self._audio_seq = seq
             self._off = 0
-            self._stretch = _Stretcher(audio, self._rate)   # 이 조각을 재생 속도로 늘이고 줄일 부품(조각마다 새로)
+            self._stretch = (_StreamingStretcher(audio, self._rate) if isinstance(audio, GrowingAudio)
+                             else _Stretcher(audio, self._rate))
             self._dirty = True
+
+        if isinstance(self._audio, GrowingAudio):
+            failure = self._audio.error
+            if failure is not None:
+                self._outbox.append(("segment_failed", {"index": self._cur, "message": str(failure),
+                                                        "provider": "noeul"}))
+                return ("done", "segment_failed")
+            if not self._stretch.started:
+                if len(self._audio) < self._audio.start_samples and not self._audio.done:
+                    if self._waiting_since is None:
+                        self._waiting_since = now
+                    self._report_locked(now)
+                    return ("wait", self._poll)
+                self._stretch.started = True
+                self._waiting_since = None
 
         # 3) 일시정지 중이면 쓰지 않고 기다린다 (장치는 버퍼가 비면 무음을 낸다 — 옛 코드도 조각 사이에 그랬다)
         if self._paused:
@@ -1205,9 +1532,16 @@ class TtsSession:
         #    볼륨·음소거는 게인으로 — 역시 다음 블록부터 바로 적용. 세 번째 값은 "원본에서 더 읽은 양"(재생 위치용).
         block, consumed = self._stretch.next_block(self._block, self._rate)
         if len(block) == 0:
+            if isinstance(self._audio, GrowingAudio) and not self._stretch.done:
+                self._off += consumed
+                if self._waiting_since is None:
+                    self._waiting_since = now
+                self._report_locked(now)
+                return ("wait", self._poll)   # 아직 안 옴: 다음 문단으로 건너뛰지 않는다.
             # 늘이고 줄인 소리를 끝까지 다 냈다 → 조각 끝. 다음 조각으로 넘어가 한 걸음 더 본다
             self._finish_audio_locked()
             return self._step_locked()
+        self._waiting_since = None
         gain = 0.0 if self._muted else self._volume
         self._report_locked(now)
         return ("write", apply_gain(block, gain), consumed)
@@ -1222,6 +1556,11 @@ class TtsSession:
     def _finish_audio_locked(self):
         """(락 안) 지금 조각을 다 냈다 → 소리를 놓고, 이동을 기다리는 중이 아니면 다음 조각으로."""
         # 다 읽은 조각의 소리는 버린다(캐시에 넣지 않음 — 옛 코드와 같다. 모듈 설명 "합성 소리 재사용")
+        if isinstance(self._audio, GrowingAudio):
+            sec = len(self._audio) / self._sr
+            self._known_sec[self._cur] = sec
+            if self._chars[self._cur] > 0 and sec > 0:
+                self._speed_samples[self._cur] = (self._chars[self._cur], sec)
         self._audio = None
         self._audio_idx = None
         self._audio_rate = None
@@ -1256,9 +1595,13 @@ class TtsSession:
         """
         self._deadline = None
         self._cur = self._target
+        if self._opening_stream is not None:
+            opening_idx, token = self._opening_stream
+            if not self._cur <= opening_idx <= self._cur + self._prefetch:
+                token.set()   # 아직 번역 중이어도 이후 새 OpenAI 연결을 열지 않는다.
         self._synth_gen += 1      # 합성 중이던 결과는 돌아와도 재생 자리에 넣지 않는다(확장 playId)
         outgoing = self._take_ready_locked()
-        if self._audio is not None and len(self._audio) > 0:
+        if self._audio is not None and (isinstance(self._audio, GrowingAudio) or len(self._audio) > 0):
             # 읽던 소리도 통째로(처음부터 다시 쓸 수 있게) 내놓는다. _off 는 아래에서 0 으로
             outgoing.append((self._audio_idx, self._audio, self._audio_rate, self._audio_seq))
         self._audio = None
@@ -1283,7 +1626,9 @@ class TtsSession:
         audio 가 None/빈 소리면 "실패" 로 넣는다 → 재생 스레드가 건너뛴다.
         """
         self._ready[idx] = (audio, rate, seq)
-        if audio is not None and len(audio) > 0:
+        if isinstance(audio, GrowingAudio) and not audio.done:
+            self._known_sec[idx] = None
+        elif audio is not None and len(audio) > 0:
             sec = len(audio) / self._sr
             self._known_sec[idx] = sec
             if self._chars[idx] > 0:
@@ -1298,7 +1643,8 @@ class TtsSession:
         실패(None)·빈 소리는 돌려주지 않는다 — 이동 뒤 다시 요청하게 둔다(옛 코드와 같다. 확장도 실패한
         prefetch 는 캐시에 넣지 않는다 — tts-engines.js:410-413 catch → false).
         """
-        out = [(i, a, r, s) for i, (a, r, s) in self._ready.items() if a is not None and len(a) > 0]
+        out = [(i, a, r, s) for i, (a, r, s) in self._ready.items()
+               if a is not None and (isinstance(a, GrowingAudio) or len(a) > 0)]
         self._ready = {}
         self._failed = {}    # 실패(SegmentFailed)도 잊는다 — 새 자리에서 필요하면 다시 요청한다(번역 재시도)
         return out
@@ -1323,6 +1669,10 @@ class TtsSession:
             if self._blank[i] or i in self._ready:
                 continue
             item = by_idx.get(i)
+            if item is not None and isinstance(item[1], GrowingAudio) and item[1].error is not None:
+                item[1].cancel()
+                del by_idx[i]
+                item = None   # 이동으로 다시 고른 실패 문단은 새 연결로 시도한다.
             if item is not None and item[2] == SYNTH_RATE:
                 del by_idx[i]
                 self._put_ready_locked(i, item[1], item[2], item[3])
@@ -1369,6 +1719,11 @@ class TtsSession:
           다시 요청했다. → "지금 속도" 를 먼저 보고, 같을 때만 확장의 순번 규칙을 쓴다.
           (이것은 요청 횟수만 바꾼다. 어떤 소리가 울리는지는 키(글, 속도)가 정하므로 그대로다.)
         """
+        if isinstance(audio, GrowingAudio):
+            if not audio.done or audio.error is not None or audio.cancelled:
+                audio.cancel()   # 새 창 밖의 미완료 작업: 네트워크 스레드가 session.close 한다.
+                return
+            audio = audio.read(0, len(audio))   # 완성된 PCM 만 기존 2칸 캐시에 넣는다.
         if audio is None or len(audio) == 0 or self._cache_size <= 0:
             return
         new_now = rate == SYNTH_RATE

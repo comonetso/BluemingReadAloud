@@ -1,0 +1,27 @@
+## 변경한 파일·라인
+
+- 구현 전 편집 로그 생성. 아직 코드 변경 없음.
+- noeul_live.py:462 이후 — 선택적 PCM sink, 첫머리 확인 전 보류·확인 후 전달, 전달 후 재시도 금지, 앞뒤 무음 한 조각, 취소 직후 새 연결 방지와 서버 오류 문구 추가. 확장 반환 계약은 유지.
+- noeul_live.py:530 부근 — 추가한 PCM 전달 설명 주석을 한글로 바로잡음.
+- readaloud_text.py:1028 이후 — Paseo 점증 조각 계획·시작 전 모음 함수를 추가하고, streaming 선택 인자에서만 문단을 Google 요청 크기로 재분할하지 않도록 함. 기존 기본 경로 유지.
+- tts_engine.py:292 이후 — GrowingAudio·수신 대기를 보존하는 전용 WSOLA reader/stretcher·노을 합성기를 추가. 문단당 최대 8개 생성, 조각 순서대로 전달, 성공한 조각만 사용량 알림, 실패 시 동료 연결 취소. Google _Stretcher는 변경하지 않음.
+- tts_engine.py:TtsSession 생성·합성·재생·이동·캐시 경로 — 노을 .stream을 실제 재생 속도로 열고 시작 전 모음 후 재생. 수신 공백은 wait, 완료만 문단 종료. 이동 범위 밖 미완료 작업 취소, 완성 PCM만 캐시. 추가 주석을 한글로 정리.
+- translation.py:284 이후 — 번역·읽기용 변환을 공통 prepared 함수로 묶고, 노을 .stream의 계획 속도·취소·수신 알림을 전달. Google 호출 계약과 translated_of는 유지.
+- tts_usage.py:175 이후 — openai 종류의 노을 표시를 ko/en 동시 추가. 기존 Google 글자당 가격 형식과 분당 가격을 혼용하지 않으며, 월별 PC 앱 글자 수 괄호는 기존 형식 사용.
+- whisperer.py:297·GUI 큐·설정 음성 표시·preview_tts·stop_current_playback·speak_text·_notify_segment_failed — 노을 목록 끝 추가, Google 없는 노을 분기, Paseo 키별 계수, 노을 스트리밍 미리 듣기/정지, 큐 경유 경고를 연결. 기존 voice_name 저장·불러오기 형식을 그대로 사용.
+- tts_engine.py:공개 목록·스트리밍 실패 알림·_refill_window_locked — 노을 경고를 번역 실패 문구와 구별하는 provider 값을 추가하고, 이동으로 다시 고른 실패 작업은 재사용하지 않도록 함. 편집 로그 표현도 한글로 정리.
+- .scratch/261118_055840/run_tests.py:1 이후 — 시험 임시 경로·바이트코드 생성을 작업대로 제한하는 실행기 추가. Windows Python 3.13의 새 임시 폴더 0700 생성에만 상속 권한 요청을 사용하며 기존 ACL·운영 파일은 변경하지 않음.
+- tests/test_noeul_streaming.py:1 이후 — 계획·시작 모음·첫머리 보류/재시도·조기 PCM 전달·공백 대기·완료·문단 순서·8개 병렬·취소·WSOLA 연속성·번역 전달·Google 없는 앱 연결·no_key 경고·키별 계수·한영 표시에 대한 가짜 시험 추가.
+- tests/test_noeul_streaming.py:66·87·314 부근 — 잘못 계산한 기대값 3곳을 정정. 조각 길이는 Paseo 원본 JS 201개 입력 대조로 독립 확인, 원문 끝 공백 제외와 번역기 목록 반환 계약을 반영. 제품 코드는 시험에 맞춰 바꾸지 않음.
+- tts_engine.py:TtsSession._produce·_apply_move_locked — 아직 번역/열기 중이라 _ready에 없는 노을 요청에도 개별 취소 신호를 보관. 이동 범위 밖이면 토큰을 켜서 번역 후 뒤늦게 연결을 여는 것을 방지.
+- tests/test_noeul_streaming.py:추가 시험 — 실제 UsageCounter 월별/키별 두 칸·버린 재시도/실패/확장 몫 제외, 공유 연결 상한 12·session.close·일시정지 유지, 번역 대기 이동 취소, IP/키/재시도 소진, 노을 미리 듣기·GUI 경고·목록 끝/기본값·실제 설정 함수 왕복을 확인.
+- tests/test_noeul_streaming.py:추가 시험 — 1·1.5배에서 시작 문턱 1샘플 전/후를 검증하고, 실제 read_noeul 가짜 연결을 통해 문단 이동 시 옛 session.close·겹치는 연결 유지·속도 변경 시 계획 재사용을 확인.
+- readaloud_text.py:__all__·split_paragraphs_for_reading 설명 — 새 계획 함수의 공개 목록과 Google/노을 문단 반환 계약 설명을 동기화.
+- whisperer.py:preview_tts·speak_text·_notify_segment_failed 설명 — 실제 연결한 Google/노을 경로와 미리 듣기 정지·경고 설명을 일치시킴.
+- tests/test_noeul_streaming.py:추가 시험 — 스트리밍 중 1→1.5→1배가 다음 블록의 원본 소비량에 즉시 반영되는지, 미리 듣기가 실제 비무음 블록을 쓰는지, 미리 듣기 실패는 GUI 큐 경유·계수 제외인지 검증.
+- readaloud_text.py:stream_pieces_growing — 자체 대조에서 발견한 JS/Python 공백 집합 차이를 기존 _WS/_WS_SET으로 맞춤(FEFF 제거·U+0085 보존). Google 분할 함수는 변경하지 않음.
+- tests/test_noeul_streaming.py:TestPlan — JS trim/쉼표 뒤 공백에 관한 FEFF·U+0085 회귀 시험 추가.
+- tts_engine.py:_produce 세대 변경 처리 — 번역을 기다리는 중 그 문단으로 이동했더라도 새 범위에 필요한 동일 노을 작업은 유지. 범위 밖/취소/이미 준비된 결과는 기존 취소·캐시 경로로 보내며 Google 배열의 세대 규칙은 그대로 둠.
+- tests/test_noeul_streaming.py:TestLiveCancellation — 번역 대기 문단으로 이동할 때 완료 전 노을 연결을 취소·재개설하지 않고 하나만 유지하는 회귀 시험 추가.
+- 최종 검증: py_compile 7개 통과(산출물은 작업대). 기존 488개 + 새 33개 = 전체 521개 통과, 28.560초. Paseo 원본 JS 조각 계획·시작 모음 204개 입력 일치. Google _Stretcher/make_google_synthesize 및 기존 UsageReceiver.start의 AST가 HEAD와 동일함을 확인. git diff --check 통과.
+- 검증 이력: 첫 전체 실행은 Python 3.13 임시 폴더 0700 접근 거부로 실패하여 작업대 실행기에서 생성 모드만 조정했다. 이후 전체 508개 통과. 한 차례 520개 실행에서는 기존 test_tts_usage.TestUsageReceiver.test_rejects가 403 대신 closed를 받아 1개 실패했고, 마지막 전체 521개 실행은 통과했다. 해당 HTTP 처리 함수는 변경하지 않았다.

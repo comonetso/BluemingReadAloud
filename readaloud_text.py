@@ -51,6 +51,7 @@ __all__ = [
     "make_spoken_text", "spoken_text", "SpokenText",
     "pauses_markup", "load_english_words",
     "INPUT_CHUNK_BYTES", "split_paragraphs", "split_input", "split_paragraphs_for_reading",
+    "stream_pieces_growing", "stream_start_sec",
 ]
 
 # 이식 기준: F:\workspace\EtcProject\ChromeExtentions\read-aloud-hrg 의 HEAD
@@ -1025,16 +1026,59 @@ def split_input(text, voice_lang=None, voice_type=None, limit=INPUT_CHUNK_BYTES)
     return chunks
 
 
-def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_whole=None, words=None):
+def stream_pieces_growing(text, rate):
+    """노을 문단 안의 조각 계획. Paseo server/presentation/tts.ts:595-635(11-18 실행 코드)."""
+    import math
+    # Paseo tts.ts:604-605, 612, 630. Python len 도 JS [...s].length 처럼 코드 포인트 수다.
+    r = max(1.5, min(float(rate or 1), 3))
+    trim_chars = "".join(_WS_SET)  # JS trim/\s: Python strip 와 달리 FEFF 는 빼고 U+0085 는 남긴다.
+    sentences = [s.strip(trim_chars) for s in _INPUT_BOUNDARY.split(text) if s.strip(trim_chars)]
+    if not sentences:
+        return []
+    first = sentences.pop(0)
+    if len(first) > 45:
+        for m in re.finditer(r"[,，、][" + _WS + r"]*", first):
+            if m.start() + 1 >= 8:
+                if m.end() < len(first):
+                    sentences.insert(0, first[m.end():].strip(trim_chars))
+                    first = first[:m.end()].strip(trim_chars)
+                break
+    else:
+        while sentences and len(first) < 8 and len(first) + 1 + len(sentences[0]) <= 45:
+            first += " " + sentences.pop(0)
+    pieces = [first]
+    head = before = len(first)
+    for sentence in sentences:
+        limit = min(300, math.floor((head + (before - len(pieces[-1])) / (r - 1)) * 0.85))
+        if len(pieces) > 1 and len(pieces[-1]) + 1 + len(sentence) <= limit:
+            pieces[-1] += " " + sentence
+            before += 1 + len(sentence)
+        else:
+            pieces.append(sentence)
+            before += len(sentence)
+    return pieces
+
+
+def stream_start_sec(first, rate):
+    """시작 전 원본 소리 모음. Paseo server/presentation/tts.ts:606-608, 637-641."""
+    import math
+    r = max(1, float(rate or 1))
+    seconds = len(first) / 6.5 * (1 - 1 / r) + 0.4
+    return max(1.0, math.floor(seconds * 100 + 0.5) / 100)  # JS Math.round(양수), 둘째 자리
+
+
+def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_whole=None, words=None,
+                                 streaming=False):
     """원문 → 읽을 조각 [{"text", "src_start", "src_end", "para"}] — 문단 단위(기준 방식).
 
-    text: 음성에 보낼 글(spoken_text.make_spoken_text 뒤, 2000바이트 이하로 나눔).
+    text: 음성에 보낼 글(spoken_text.make_spoken_text 뒤, Google 은 2000바이트 이하로 나눔).
     src_start/src_end: 그 조각이 속한 **문단** 의 원문 위치(형광펜은 문단을 칠한다). para: 문단 번호(0부터, 빈 문단은 세지 않음).
     keep_whole(raw): True 면 그 문단을 나누지 않고 한 조각으로 두고 "raw"(변환 전 글)를 담는다 — 번역할 문단
       (translation.plan). 번역은 변환 전 글에 하고 변환은 번역 뒤에 한다(translation.make_translating_synthesize).
       raw 에서는 URL 을 "URL" 로 가린다 — 주소가 번역 회사로 나가지 않게(예전 "HTTP URL." 대체와 같은 이유).
     다듬어 빈 글이 된 문단(괄호·기호뿐)은 조각을 만들지 않는다(기준은 무음으로 지나간다 — 듣는 결과는 같다).
     words: 영어 대문자 낱말 사전(load_english_words) — 글 다듬기에 넘긴다(2026-10-28 사전 읽기). None 이면 띄우기만.
+    streaming: 노을은 문단 전체를 유지한다. 번역·읽기용 변환 뒤 합성기가 문단 안의 연결 조각을 계획한다.
     """
     import spoken_text   # 여기서 부른다 — spoken_text 는 이 모듈을 부르지 않지만, 옛 경로만 쓰는 시험이 이 모듈만 불러도 되게
     lang = spoken_text.speech_lang(voice_lang)
@@ -1049,7 +1093,8 @@ def split_paragraphs_for_reading(source_text, voice_lang, voice_type=None, keep_
         if keep_whole is not None and keep_whole(masked):
             result.append({"text": spoken, "src_start": s, "src_end": e, "para": para, "raw": masked})
         else:
-            for chunk in split_input(spoken, voice_lang, voice_type):
+            # 노을은 문단을 열 때 내부 조각을 한 번만 계획한다. Google 의 2000바이트 분할은 그대로다.
+            for chunk in ([spoken] if streaming else split_input(spoken, voice_lang, voice_type)):
                 result.append({"text": chunk, "src_start": s, "src_end": e, "para": para})
         para += 1
     return result
