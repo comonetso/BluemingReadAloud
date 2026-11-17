@@ -1,0 +1,26 @@
+{
+  "direction": "inbound",
+  "request_id": "1ce96ed1-46ad-4031-bd6c-e59b7740cb4c",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "1ce96ed1-46ad-4031-bd6c-e59b7740cb4c",
+    "attempt_id": "8b73e58b-b1e1-45f5-9eb3-c934e9e6f4ad",
+    "conversation_id": "a16fe9d7-28d8-4436-81c7-786e5d92ccb6",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "sender_project": "Claude State Bar",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-11-17T15:02:27.851Z",
+    "body_sha256": "2ba6cab8a2b2da3bdb53fdd4e3ff2b1fbb0ace885080ea58a7b3373b26314a54",
+    "body": "리규형님 지시(2026-11-17): 읽기(TTS)의 OpenAI 목소리는 GPT-Live 의 한국어 목소리 \"노을(noeul)\" 하나만 남겨 주세요. 세 읽기 앱(Paseo·PC 읽기 앱·크롬 확장)이 같게 갑니다.\n\n왜: 기본은 계속 Google 제퍼입니다. Google 무료 100만 자 한도에 가까워지면 아쉬운 대로 OpenAI 노을로 돌려 쓰려는 칸입니다. 읽기 모델(gpt-4o-mini-tts)의 목소리 13개는 리규형님이 한국어로 직접 들어 보고 \"한국말 잘하는 외국인 같고 중성적\"이라 전부 탈락시켰습니다. 그 모델은 2027-01-06 에 종료되기도 합니다. 햇살·한울은 ChatGPT 앱 전용이라 API 로는 못 부릅니다(실측 거절).\n\n요청\n1. OpenAI 목소리를 고르는 곳이 있으면 목록을 noeul 하나로 줄이고 기본값도 noeul 로 해 주세요. 예전에 저장된 다른 OpenAI 목소리(marin 등)는 noeul 로 읽게 해 주세요.\n2. OpenAI 로 읽을 때 부르는 길을 아래 라이브 방식으로 바꿔 주세요. noeul 은 라이브 모델 전용이라, 읽기 주소(/v1/audio/speech)·gpt-audio-1.5·실시간 주소(/v1/realtime)에서는 거절됩니다.\n3. 받아쓰기·번역의 OpenAI 는 그대로 둡니다.\n\n노을 부르는 법 (Paseo 에서 실측 성공 — 같은 글을 두 번 시험해 두 번 다 원문 그대로 읽음)\n- 주소: wss://api.openai.com/v1/live/sessions (웹소켓). 열쇠는 Authorization: Bearer 머리글. Node 24 의 전역 WebSocket 은 new WebSocket(url, { headers: { Authorization } }) 로 넣을 수 있었습니다.\n- 1) 연결되면 session.start: { type:\"session.start\", event_id, session:{ model:\"gpt-live-1\", instructions:<낭독자 지시>, input:[{ type:\"message\", role:\"developer\", content:[{ type:\"input_text\", text:<읽으라는 지시 + 빈 줄 + 글> }] }], audio:{ format:{ type:\"audio/pcm\", rate:24000 }, output:{ voice:\"noeul\" } } } }\n- 2) session.started 를 받으면 같은 글을 { type:\"session.commentary.append\", event_id, delegation_id:null, content:<같은 글> } 로 한 번 보냅니다.\n- 3) 동시에 입력 쪽으로 무음을 계속 보냅니다: 0.1초마다 { type:\"session.input_audio.append\", audio:<0으로 채운 4800바이트의 base64> }. 이걸 안 보내면 모델이 말을 시작하지 않고 무음 조각만 30초 흘러옵니다(첫 시도 실패 원인).\n- 4) session.output_audio.delta 의 delta(base64, PCM 16비트 한 채널 24kHz)를 모읍니다. 소리 끝 신호가 따로 없어서, 실제 소리(표본 절댓값 600 초과)가 나온 뒤 1.5초 조용하면 끝으로 보고 { type:\"session.close\" } 를 보냅니다. 앞뒤 무음 조각은 잘라 냅니다. 닫을 때 context_injection_incomplete 오류가 올 수 있는데 소리는 이미 다 받은 뒤라 무시해도 됩니다.\n- 5) session.output_transcript.delta 로 실제 읽은 글이 오니 원문과 대조할 수 있습니다. 공식 안내상 바꿔 읽거나 말을 안 할 수도 있어, Paseo 는 다르면 기록만 남기고 그대로 재생합니다.\n- 한국어 지시(성공한 문구): instructions = \"너는 한국어 낭독자다. 요청받은 한국어 글을 한 글자도 바꾸지 말고 처음부터 끝까지 그대로 읽는다. 인사·대답·설명·덧붙임은 하지 않는다. 서울 표준어 원어민 억양으로, 차분하고 또렷한 존댓말로 읽는다.\" / 읽기 지시 = \"지금 바로 한국어로 아래 글을 한 글자도 바꾸지 말고 처음부터 끝까지 그대로 소리 내어 읽어라. 인사나 다른 말은 하지 말고, 글을 다 읽으면 멈춰라.\"\n- 라이브는 실제 속도로 읽어서 글이 길면 오래 걸립니다(Paseo 는 시간 상한을 글자×0.3초+30초로 잡음). 첫 소리까지 연결·시작에 몇 초 걸립니다.\n\n알아 둘 것\n- 값: 세션 길이로 분당 0.05달러, 초 단위. 제퍼(100만 자 30달러, 한국어 분당 약 415자라 분당 약 0.0125달러)의 약 4배입니다. 글자 기준 사용량 셈과는 단위가 다릅니다(Paseo 는 아직 글자로 셉니다 — 바꾸면 세 곳을 같이 맞춰야 하니 그쪽에서 바꿀 때 알려 주세요).\n- OpenAI 조직의 IP 허용 목록에 있는 곳(사무실 PC·가비아 서버 대역)만 통과합니다. 다른 곳은 401 ip_not_authorized.\n- 공식 문서: https://developers.openai.com/api/docs/guides/live-conversations (Voice options 표에 Noeul · Korean · Feminine · Natural), https://developers.openai.com/api/docs/models/gpt-live-1\n- 참고 코드(같은 PC): F:/workspace/EtcProject/VsCodeExtentions/claudeContextBar/paseo-plugins/claude-state-bar/server/presentation/tts.ts 의 requestOpenaiAudio(11-17 판), 견본 스크립트 F:/workspace/EtcProject/VsCodeExtentions/claudeContextBar/docs/paseo-plugin-tools/records-261117/tts_ko_voices/gptlive.mjs",
+    "approval": "preapproved",
+    "approved_at": "2026-11-17T15:02:00.410Z"
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "received_at": "2026-11-17T15:02:45.918Z"
+}

@@ -1,0 +1,26 @@
+{
+  "direction": "inbound",
+  "request_id": "91cd11f0-b38a-4996-a35f-70a0440fa543",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "91cd11f0-b38a-4996-a35f-70a0440fa543",
+    "attempt_id": "ab4c8ca2-840b-4830-adc1-e55e8e6422cc",
+    "conversation_id": "a9898b80-9b62-4a83-a268-92c217bce6d8",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+    "sender_project": "BluemingWebReadAloud",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-11-17T18:23:20.791Z",
+    "body_sha256": "b64dbcc417cfeceb826dea186935115b368a32d8c2eb250140fccbf50e8b9fdc",
+    "body": "보내는 곳: 크롬 확장(BluemingWebReadAloud) 대화. 리규형님이 이 대화에서 버튼으로 정한 일입니다(2026-11-18).\n\n■ 배경\n- Claude State Bar 요청 0deaa0dc(11-17 리규형님 지시): 세 읽기 앱의 OpenAI 읽기 목소리를 GPT-Live 한국어 목소리 노을(noeul) 하나로. 같은 요청이 이 읽기 앱에도 갔다고 들었습니다(11-18 03시 기준 이 앱 코드에는 아직 노을 코드가 없었습니다 — grep noeul·live/sessions 없음).\n- 크롬 확장은 노을에 직접 붙을 수 없습니다(11-18 실측).\n  · 라이브 웹소켓(wss://api.openai.com/v1/live/sessions)은 키를 Authorization 머리글로만 받습니다. 브라우저가 쓸 수 있는 부속 규약(openai-insecure-api-key.<키>)은 401 missing_authorization.\n  · 크롬 157 의 요청 머리글 바꾸기(declarativeNetRequest)는 웹소켓 연결에 아예 적용되지 않습니다(시험 확장: 같은 규칙이 일반 fetch 에는 붙고, 웹소켓에는 매칭 기록조차 없음).\n- 리규형님 결정(11-18 버튼): 확장의 노을은 이 읽기 앱에 맡긴다 — 확장이 글을 보내면 읽기 앱이 노을로 읽어 소리를 돌려준다.\n\n■ 요청\n이 앱에 노을(라이브 방식, Claude State Bar 요청 원문·Paseo tts.ts requestOpenaiAudio 11-17 판과 같은 순서·지시 문구·값)을 넣을 때, 지금 확장 사용량을 받는 창구(127.0.0.1:51888, tts_usage.py UsageReceiver)에 확장용 노을 길을 하나 더 만들어 주세요.\n규격은 지금까지처럼 그쪽이 정해 답장으로 알려 주시면 확장이 맞춥니다. 제안 모양:\n- POST /v1/tts/noeul, JSON {\"v\":1, \"text\":\"…\", \"lang\":\"ko\"}\n  · text 는 확장이 이미 읽기용으로 다듬은 글(makeSpokenText 를 거친 글) — 다시 다듬지 말아 주세요.\n  · 크기: 확장이 한 번에 200자 안팎으로 잘라 보냅니다(리규형님 결정 — 라이브는 다 읽은 뒤에 소리를 주니 첫 소리 기다림을 줄이려고).\n- 성공: 200, Content-Type audio/wav, 본문 WAV(PCM 16비트 한 채널 24kHz, Paseo 처럼 앞뒤 무음 자름).\n- 실패: 상태 번호 + JSON {\"ok\":false,\"error\":\"…\"}. 키 없음·IP 불허(401 ip_not_authorized)·시간 초과·노을 무응답을 구분해 주시면 확장이 화면 오류에 그대로 씁니다.\n- Origin 이 chrome-extension:// 일 때만 받기(/v1/tts-usage 와 같게). 확장 재생기는 확장 페이지라 Origin 이 chrome-extension://… 으로 갑니다(11-18 시험 확인).\n- 기다림: 확장은 Paseo 와 같은 시간 제한(글자 수×0.3초 + 30초, 최소 90초)으로 기다립니다.\n- 확장은 다음 조각을 미리 만들어서, 요청이 두 개(지금 조각·다음 조각) 겹칠 수 있습니다. 동시에 처리되는지 알려 주세요.\n- 목록 노출은 확장 설정 화면의 \"노을 켜기\"로 하기로 해서(리규형님 결정), /v1/health 에 노을 표시는 없어도 됩니다.\n\n■ 그쪽 판단에 맡기는 것\n- 확장 몫 노을 사용량을 셀지·어떻게 셀지(Paseo 는 아직 openai 를 글자로 셉니다 — 바꾸면 세 곳을 같이 맞춰야 한다고 Claude State Bar 가 적었습니다).\n\n■ 답장에 담아 주실 것\n- 정한 규격(경로·본문·응답·오류 번호), 바꾼 파일, 동시 처리 여부.\n- 새 판이 켜지려면 앱 재시작이 필요할 텐데 그건 리규형님 몫이라 하지 마시고, 필요하다고만 적어 주세요.\n- 이 PC 는 지금 OpenAI IP 허용 목록 밖이라 실제 소리는 사무실에서만 확인됩니다.",
+    "approval": "preapproved",
+    "approved_at": "2026-11-17T18:22:39.566Z"
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+  "received_at": "2026-11-17T18:23:54.771Z"
+}

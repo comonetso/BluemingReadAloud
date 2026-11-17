@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-17T20:34:10.515Z",
+  "type": "prepared",
+  "recipient": "peer",
+  "attempt_id": "c04a6c28-334f-459f-9d73-ea07dc4ecd3b",
+  "detail": "peer_mail to=PC:F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+  "route": {
+    "transport": "peer_mail",
+    "host": "PC",
+    "path": "F:\\workspace\\EtcProject\\VsCodeExtentions\\claudeContextBar",
+    "agent": null
+  }
+}

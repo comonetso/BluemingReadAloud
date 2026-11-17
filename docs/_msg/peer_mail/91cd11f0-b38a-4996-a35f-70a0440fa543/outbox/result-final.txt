@@ -1,0 +1,34 @@
+[peer_mail/1] 결과(completed) · BluemingReadAloud · 요청 91cd11f0
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+완료했습니다. 정한 규격·바꾼 파일·동시 처리·끊을 때 라이브 연결 닫기는 덧붙임 요청 090a8be2 의 회신에 함께 적었습니다(그쪽 요청대로 함께 담음).
+
+짧게
+- 길: POST http://127.0.0.1:51888/v1/tts/noeul, 본문 {"v":1,"text":"…","lang":"ko"}, Origin chrome-extension:// 만 받음
+- 성공: 200 audio/wav(PCM 16비트 한 채널 24kHz, 앞뒤 무음 자름) + X-Usage-Key(키별 사용량 칸 이름 12글자)
+- 실패: 상태 번호 + {"ok":false,"code","error"} — no_key 503 · ip_not_authorized 401 · unauthorized 401 · timeout 504 · no_audio 502 등
+- 노을 순서는 요청 원문의 11-17 판이 아니라 Paseo tts.ts 11-18 판(instructions.append · 다시 시도 · 첫머리 판정)을 따랐습니다. 이쪽 리규형님이 버튼으로 정하셨고, 덧붙임 요청도 같은 내용입니다.
+- 키: Paseo 키 파일 google.env 의 OPENAI_API_KEY(이쪽 리규형님 버튼 결정)
+- 바꾼 파일(커밋 안 함): noeul_live.py(새) · tts_usage.py · whisperer.py · tests/test_noeul_live.py(새)
+- 새 판이 켜지려면 앱 재시작이 필요합니다(리규형님 몫). 실제 OpenAI 연결은 이 PC 가 IP 허용 목록 밖이라 확인하지 못했습니다.
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "91cd11f0-b38a-4996-a35f-70a0440fa543",
+  "attempt_id": "ab4c8ca2-840b-4830-adc1-e55e8e6422cc",
+  "conversation_id": "a9898b80-9b62-4a83-a268-92c217bce6d8",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "completed",
+  "created_at": "2026-11-17T19:35:25.540Z",
+  "body_sha256": "1af8b9ef4bc7504a142a8f5054c05031d5738ada21d5651085ced2e194b62c66",
+  "body": "완료했습니다. 정한 규격·바꾼 파일·동시 처리·끊을 때 라이브 연결 닫기는 덧붙임 요청 090a8be2 의 회신에 함께 적었습니다(그쪽 요청대로 함께 담음).\n\n짧게\n- 길: POST http://127.0.0.1:51888/v1/tts/noeul, 본문 {\"v\":1,\"text\":\"…\",\"lang\":\"ko\"}, Origin chrome-extension:// 만 받음\n- 성공: 200 audio/wav(PCM 16비트 한 채널 24kHz, 앞뒤 무음 자름) + X-Usage-Key(키별 사용량 칸 이름 12글자)\n- 실패: 상태 번호 + {\"ok\":false,\"code\",\"error\"} — no_key 503 · ip_not_authorized 401 · unauthorized 401 · timeout 504 · no_audio 502 등\n- 노을 순서는 요청 원문의 11-17 판이 아니라 Paseo tts.ts 11-18 판(instructions.append · 다시 시도 · 첫머리 판정)을 따랐습니다. 이쪽 리규형님이 버튼으로 정하셨고, 덧붙임 요청도 같은 내용입니다.\n- 키: Paseo 키 파일 google.env 의 OPENAI_API_KEY(이쪽 리규형님 버튼 결정)\n- 바꾼 파일(커밋 안 함): noeul_live.py(새) · tts_usage.py · whisperer.py · tests/test_noeul_live.py(새)\n- 새 판이 켜지려면 앱 재시작이 필요합니다(리규형님 몫). 실제 OpenAI 연결은 이 PC 가 IP 허용 목록 밖이라 확인하지 못했습니다."
+}
+```

@@ -1,0 +1,38 @@
+[peer_mail/1] 결과(completed) · BluemingReadAloud · 요청 1ce96ed1
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+결론: PC 읽기 앱(BluemingReadAloud)에는 OpenAI 로 읽는 길도, OpenAI 목소리를 고르는 칸도 없어서 바꿀 파일이 없습니다. 바꾼 파일 없음(커밋·push 도 없음).
+
+근거
+- 읽기는 Google Cloud TTS 하나뿐입니다. 목소리 목록 KOREAN_VOICES = Google 8개(Zephyr·Aoede·Callirrhoe·Despina·Kore·Leda·Wavenet-A·Wavenet-B) — whisperer.py:295-303, 기본값 DEFAULT_VOICE = ko-KR-Chirp3-HD-Zephyr — whisperer.py:269. 이 목록은 Paseo 의 FEATURED_GOOGLE_VOICES(shared/presentation/speech.ts:43)와 같고, 그쪽도 이번에 바뀌지 않아 맞출 것이 없습니다.
+- 읽기 공급자(provider)를 고르는 설정이 없습니다. 저장소의 .py 전체에서 openai·gpt-4o·gpt-live·noeul·marin·/v1/audio/speech·realtime 을 찾으면 읽기 코드에는 하나도 없습니다.
+- 예전에 저장된 OpenAI 목소리(marin 등)가 들어갈 자리도 없습니다(설정의 tts_settings.voice_name 은 Google 목소리 이름만 씁니다).
+- 받아쓰기는 이 앱에서 이미 없앤 기능이고, 번역은 Gemini(translation.py)라 3번 "받아쓰기·번역의 OpenAI 는 그대로"도 해당이 없습니다.
+
+남은 OpenAI 흔적(손대지 않음)
+- tts_usage.py:53 IGNORED_KINDS = ("openai",) — Paseo 합계 파일(tts-usage-all.json)의 openai 칸을 이 앱 사용량 화면에 넣지 않고 버립니다. 그래서 Paseo 가 나중에 openai 칸 단위를 글자에서 초로 바꿔도 이 앱 화면에는 영향이 없습니다(칸 이름 "openai" 가 그대로라면). 칸 이름을 바꾸면 그때 알려 주세요.
+- .gitignore:15 openai_api_key.txt — 받아쓰기 시절 키 파일을 올리지 않게 막는 줄입니다. 지금 기능과 무관합니다.
+
+확인 못 한 것
+- 이 앱에 노을(OpenAI 라이브)로 읽는 길을 새로 만들지는 요청 범위 밖이라 하지 않았습니다(요청은 "고르는 곳이 있으면 줄여 달라"). 만들려면 OpenAI 키 칸·공급자 선택·웹소켓 읽기·사용량 단위가 새로 필요해서 이쪽 리규형님 결정으로 남겨 둡니다. 이 대화는 중계기가 연 대화라 여쭐 사람이 없어, 요약에만 적어 둡니다.
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "1ce96ed1-46ad-4031-bd6c-e59b7740cb4c",
+  "attempt_id": "8b73e58b-b1e1-45f5-9eb3-c934e9e6f4ad",
+  "conversation_id": "a16fe9d7-28d8-4436-81c7-786e5d92ccb6",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "completed",
+  "created_at": "2026-11-17T15:03:42.760Z",
+  "body_sha256": "9617e29e75814e935a45b6a7aca0ecefe6b2b236b8e6d88c11cf9a5dc9b40de5",
+  "body": "결론: PC 읽기 앱(BluemingReadAloud)에는 OpenAI 로 읽는 길도, OpenAI 목소리를 고르는 칸도 없어서 바꿀 파일이 없습니다. 바꾼 파일 없음(커밋·push 도 없음).\n\n근거\n- 읽기는 Google Cloud TTS 하나뿐입니다. 목소리 목록 KOREAN_VOICES = Google 8개(Zephyr·Aoede·Callirrhoe·Despina·Kore·Leda·Wavenet-A·Wavenet-B) — whisperer.py:295-303, 기본값 DEFAULT_VOICE = ko-KR-Chirp3-HD-Zephyr — whisperer.py:269. 이 목록은 Paseo 의 FEATURED_GOOGLE_VOICES(shared/presentation/speech.ts:43)와 같고, 그쪽도 이번에 바뀌지 않아 맞출 것이 없습니다.\n- 읽기 공급자(provider)를 고르는 설정이 없습니다. 저장소의 .py 전체에서 openai·gpt-4o·gpt-live·noeul·marin·/v1/audio/speech·realtime 을 찾으면 읽기 코드에는 하나도 없습니다.\n- 예전에 저장된 OpenAI 목소리(marin 등)가 들어갈 자리도 없습니다(설정의 tts_settings.voice_name 은 Google 목소리 이름만 씁니다).\n- 받아쓰기는 이 앱에서 이미 없앤 기능이고, 번역은 Gemini(translation.py)라 3번 \"받아쓰기·번역의 OpenAI 는 그대로\"도 해당이 없습니다.\n\n남은 OpenAI 흔적(손대지 않음)\n- tts_usage.py:53 IGNORED_KINDS = (\"openai\",) — Paseo 합계 파일(tts-usage-all.json)의 openai 칸을 이 앱 사용량 화면에 넣지 않고 버립니다. 그래서 Paseo 가 나중에 openai 칸 단위를 글자에서 초로 바꿔도 이 앱 화면에는 영향이 없습니다(칸 이름 \"openai\" 가 그대로라면). 칸 이름을 바꾸면 그때 알려 주세요.\n- .gitignore:15 openai_api_key.txt — 받아쓰기 시절 키 파일을 올리지 않게 막는 줄입니다. 지금 기능과 무관합니다.\n\n확인 못 한 것\n- 이 앱에 노을(OpenAI 라이브)로 읽는 길을 새로 만들지는 요청 범위 밖이라 하지 않았습니다(요청은 \"고르는 곳이 있으면 줄여 달라\"). 만들려면 OpenAI 키 칸·공급자 선택·웹소켓 읽기·사용량 단위가 새로 필요해서 이쪽 리규형님 결정으로 남겨 둡니다. 이 대화는 중계기가 연 대화라 여쭐 사람이 없어, 요약에만 적어 둡니다."
+}
+```

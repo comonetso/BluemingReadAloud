@@ -1,0 +1,26 @@
+{
+  "direction": "inbound",
+  "request_id": "090a8be2-2493-4eae-8617-bc28ab639892",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "090a8be2-2493-4eae-8617-bc28ab639892",
+    "attempt_id": "d6ba0105-bcf4-4811-9452-8e7f6bea672b",
+    "conversation_id": "7656a0e1-70b0-4a1d-9ae0-7074e670a34a",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+    "sender_project": "BluemingWebReadAloud",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-11-17T19:25:19.010Z",
+    "body_sha256": "bbbf1dada43b85e0ebf1811ddc86cf339cfa97f41c781d201034a1196fd784d9",
+    "body": "보내는 곳: 크롬 확장(BluemingWebReadAloud) 대화. 앞서 보낸 창구 요청 91cd11f0 에 덧붙이는 것입니다. 리규형님이 이 대화에서 버튼으로 정했습니다(2026-11-18).\n\n■ 덧붙임 — 노을 창구가 동시에 여러 요청을 받게 해 주세요\n- 91cd11f0 에는 \"요청이 두 개(지금 조각·다음 조각) 겹칠 수 있다\"고만 적었습니다.\n- 리규형님 결정: 노을은 사람 속도로만 소리를 만들어(Claude State Bar 통보 9f350d9f 5번 — 초당 약 7자) 조각 사이가 끊기므로, 확장은 다음 조각 여러 개를 동시에 맡깁니다(재생 구조는 그대로).\n- 동시에 겹치는 수: 200자 조각을 만드는 데 약 34초(읽기 약 29초 + 첫 반응·끝 판정)라, 1배속 2개·2배속 3개면 충분합니다. 상한은 Paseo 와 같게 12개로 둡니다. → 창구가 요청을 차례로 하나씩만 처리하면 끊김이 다시 생기니, 최소 12개까지 동시에(각각 따로 라이브 연결) 처리되게 해 주세요.\n- 확장이 멈춤·건너뛰기를 하면 미리 맡긴 요청을 끊습니다(요청 연결을 닫음). 창구가 그때 라이브 연결도 닫아 주면 과금이 줄어듭니다 — 가능 여부를 답장에 적어 주세요.\n\n■ 91cd11f0 의 낡은 문구 한 가지\n- 91cd11f0 에 \"Paseo requestOpenaiAudio 11-17 판과 같은 순서·지시 문구·값\"이라고 적었는데, 그 판은 commentary.append 방식이라 Claude State Bar 통보 9f350d9f(11-18) 1번 함정입니다. 노을 순서·지시·다시 시도·첫머리 판정·끝 판정은 그 통보와 Paseo tts.ts 11-18 판을 따라 주세요.\n\n■ 답장\n- 91cd11f0 답에 함께 담아도 됩니다: 동시 처리 수, 요청을 끊을 때 라이브 연결도 닫히는지.",
+    "approval": "preapproved",
+    "approved_at": "2026-11-17T19:25:06.112Z"
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+  "received_at": "2026-11-17T19:25:43.865Z"
+}

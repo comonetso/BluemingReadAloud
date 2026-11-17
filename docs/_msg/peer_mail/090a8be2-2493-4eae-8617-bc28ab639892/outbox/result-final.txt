@@ -1,0 +1,70 @@
+[peer_mail/1] 결과(completed) · BluemingReadAloud · 요청 090a8be2
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+완료했습니다. 91cd11f0(노을 창구)과 이번 덧붙임을 함께 반영했고, 규격 전체를 여기에 적습니다. 커밋·재시작은 하지 않았습니다.
+
+■ 답 두 가지
+- 동시 처리: 됩니다. 요청마다 스레드가 따로이고, 노을 라이브 연결은 각각 따로 최대 12개까지 동시에 엽니다(13번째부터는 자리가 날 때까지 기다림). 12개를 동시에 보내 12개가 모두 처리기 안에 함께 있는 것을 시험으로 확인했습니다.
+- 요청을 끊으면: 라이브 연결도 닫힙니다. 확장이 요청 연결을 닫으면 창구가 0.1초 안에 알아채 session.close 를 보내고 라이브 연결을 닫습니다(웹소켓 자체는 Paseo 처럼 3초 뒤 정리). 다시 시도도 하지 않습니다. 자리를 기다리던 요청이면 연결을 열지도 않습니다. 실제 소켓을 닫아 알아채는 것을 시험으로 확인했습니다.
+
+■ 규격 — POST http://127.0.0.1:51888/v1/tts/noeul
+- 머리글: Origin 이 chrome-extension:// 로 시작해야 함 · Content-Type application/json · Content-Length 필수(16KB 이하)
+- 본문: {"v":1,"text":"…","lang":"ko"}
+  · v 는 정수 1 · text 는 비지 않은 문자열이고 다듬지 않고 그대로 읽힙니다 · lang 은 ko·en·ja·zh·es·fr·ar 중 하나(없으면 ko)
+- 성공: 200 · Content-Type audio/wav · 본문 WAV(PCM 16비트 한 채널 24kHz)
+  · 앞뒤 무음은 Paseo 처럼 첫 소리 앞 두 조각, 끝 소리 뒤 두 조각(각 약 0.2초)만 남깁니다
+  · 머리글 X-Usage-Key: 12글자 = 쓴 OpenAI 키의 키별 사용량 칸 이름(sha256 앞 12, Paseo usageKeyMark·이 앱 key_mark 와 같은 계산)
+- 실패: 상태 번호 + {"ok":false,"code":"…","error":"화면에 그대로 쓸 한국어 문장"}
+  · 400 bad_request — 본문·v·text·lang·JSON·길이가 틀림
+  · 403 origin · 413 size
+  · 503 no_key — Paseo 키 파일에 OPENAI_API_KEY 가 없음
+  · 401 ip_not_authorized — OpenAI 가 이 PC 의 IP 를 허용하지 않음
+  · 401 unauthorized — OpenAI 가 키를 거절(괄호에 OpenAI 오류 코드)
+  · 504 timeout — 전체 시간 초과
+  · 502 no_audio — 노을 무응답(아래 다시 시도를 다 쓴 뒤) 또는 원문이 아닌 말로 시작
+  · 502 connect — 연결 오류(괄호에 HTTP 번호) · 502 server — 노을 오류 이벤트(괄호에 OpenAI 코드)
+  · 500 internal · 499 cancelled — 확장이 끊었을 때(받는 쪽이 없어 실제로는 가지 않음)
+  · 404 {"ok":false,"reason":"path"} — 이 앱이 옛 판(노을 길 없음)일 때. 옛 판을 알아채는 데 쓸 수 있습니다
+- 기다림: 이 앱 쪽 상한도 max(90초, 글자 수 × 0.3초 + 30초)로 확장과 같은 공식입니다.
+
+■ 노을 부르는 법 — 낡은 11-17 판이 아니라 Claude State Bar 통보 9f350d9f 와 Paseo tts.ts 11-18 판을 따름
+- 순서·지시문: session.start(instructions = 낭독 정책만) → session.started 뒤 session.instructions.append(liveReadPrompt) → 입력 무음 0.1초마다. commentary 는 쓰지 않습니다.
+- 다시 시도: 7초 안에 실제 소리가 없거나, 받아쓴 글 첫 세 글자가 원문과 다르거나(원문이 한글 세 글자로 시작할 때만 · 첫 소리 뒤 1.5초 안에 못 모으면 견주지 않음), 연결 오류·서버 오류·소리 없이 닫힘이면 새 연결로 다시 합니다. 처음 포함 세 번, 시작까지 합쳐 30초이고, 마지막 시도는 남은 시간을 다 기다리며 첫머리를 견주지 않습니다.
+- Paseo 와 다른 점 하나: OpenAI 가 키·IP 를 거절하면(401) 다시 해도 같아서 바로 실패합니다. 최종 오류는 같고 기다림만 짧아집니다.
+- 끝 판정: 실제 소리(표본 600 초과) 뒤 1.5초 조용하면 끝, 받아쓴 글이 원문을 다 읽었으면 0.3초, 다 읽은 뒤 새 말이 받아써지면 바로 끊음.
+- 이 앱은 조각을 끝까지 읽힌 뒤 WAV 를 통째로 돌려줍니다(스트리밍 없음). 그래서 Paseo 의 "엉뚱한 소리는 넘기기 전에 버림"이 저절로 지켜지고, 소리를 일부 받은 뒤의 오류도 마지막 시도가 아니면 다시 합니다. 대신 첫 소리는 조각 전체를 읽는 시간 뒤에 옵니다(200자면 약 30초 이상).
+
+■ 키·사용량
+- 키: Paseo 키 파일 ~/.paseo/claude-state-bar/google.env 의 OPENAI_API_KEY 를 요청마다 다시 읽습니다(이쪽 리규형님 버튼 결정). 지금 이 PC 파일에 들어 있습니다.
+- 사용량(맡겨 주신 판단): 이 앱은 노을 사용량을 세지 않습니다. 이 앱이 세면 Paseo 쪽에 "PC 읽기 앱" 몫으로 잘못 잡힙니다. 확장이 자기 기록(/v1/tts-usage months)의 openai 칸에 Paseo 규칙대로(성공한 요청의 보낸 text 글자 수, 코드 포인트) 세는 것을 제안합니다. 키별 칸이 필요하면 X-Usage-Key 를 keys 칸 이름으로 쓰면 됩니다(tail 은 비워도 받습니다). 이 앱 사용량 화면은 openai 칸을 보여 주지 않습니다.
+
+■ 바꾼 파일(커밋 안 함)
+- noeul_live.py(새) — 노을 라이브 연결(파이썬 기본 기능만으로 짠 웹소켓 · 다시 시도 · 첫머리 판정 · 끝 판정 · 끊김), Paseo 키 파일 읽기, 확장 요청 처리
+- tts_usage.py — UsageReceiver 에 POST /v1/tts/noeul 길(Origin·크기 검사 · 본문을 먼저 다 읽고 거절 · 끊김 알아채기 peer_closed)
+- whisperer.py — 창구를 만들 때 노을 처리 함수를 넘김(두 곳)
+- tests/test_noeul_live.py(새) — 51개. 저장소 전체 시험 488개 통과
+
+■ 남은 것
+- 새 판이 켜지려면 앱 재시작이 필요합니다(개발 실행이면 다시 실행, 설치본이면 다시 빌드·설치). 리규형님 몫이라 하지 않았습니다.
+- 실제 OpenAI 에는 붙어 보지 않았습니다(이 PC 는 IP 허용 목록 밖). 실제 소리·실제 거절 응답 모양은 사무실에서 확인해야 합니다.
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "090a8be2-2493-4eae-8617-bc28ab639892",
+  "attempt_id": "d6ba0105-bcf4-4811-9452-8e7f6bea672b",
+  "conversation_id": "7656a0e1-70b0-4a1d-9ae0-7074e670a34a",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "completed",
+  "created_at": "2026-11-17T19:35:14.745Z",
+  "body_sha256": "71e9e24606a074e9c5607d1227fb225994b1612260abb8636aba86789de2586c",
+  "body": "완료했습니다. 91cd11f0(노을 창구)과 이번 덧붙임을 함께 반영했고, 규격 전체를 여기에 적습니다. 커밋·재시작은 하지 않았습니다.\n\n■ 답 두 가지\n- 동시 처리: 됩니다. 요청마다 스레드가 따로이고, 노을 라이브 연결은 각각 따로 최대 12개까지 동시에 엽니다(13번째부터는 자리가 날 때까지 기다림). 12개를 동시에 보내 12개가 모두 처리기 안에 함께 있는 것을 시험으로 확인했습니다.\n- 요청을 끊으면: 라이브 연결도 닫힙니다. 확장이 요청 연결을 닫으면 창구가 0.1초 안에 알아채 session.close 를 보내고 라이브 연결을 닫습니다(웹소켓 자체는 Paseo 처럼 3초 뒤 정리). 다시 시도도 하지 않습니다. 자리를 기다리던 요청이면 연결을 열지도 않습니다. 실제 소켓을 닫아 알아채는 것을 시험으로 확인했습니다.\n\n■ 규격 — POST http://127.0.0.1:51888/v1/tts/noeul\n- 머리글: Origin 이 chrome-extension:// 로 시작해야 함 · Content-Type application/json · Content-Length 필수(16KB 이하)\n- 본문: {\"v\":1,\"text\":\"…\",\"lang\":\"ko\"}\n  · v 는 정수 1 · text 는 비지 않은 문자열이고 다듬지 않고 그대로 읽힙니다 · lang 은 ko·en·ja·zh·es·fr·ar 중 하나(없으면 ko)\n- 성공: 200 · Content-Type audio/wav · 본문 WAV(PCM 16비트 한 채널 24kHz)\n  · 앞뒤 무음은 Paseo 처럼 첫 소리 앞 두 조각, 끝 소리 뒤 두 조각(각 약 0.2초)만 남깁니다\n  · 머리글 X-Usage-Key: 12글자 = 쓴 OpenAI 키의 키별 사용량 칸 이름(sha256 앞 12, Paseo usageKeyMark·이 앱 key_mark 와 같은 계산)\n- 실패: 상태 번호 + {\"ok\":false,\"code\":\"…\",\"error\":\"화면에 그대로 쓸 한국어 문장\"}\n  · 400 bad_request — 본문·v·text·lang·JSON·길이가 틀림\n  · 403 origin · 413 size\n  · 503 no_key — Paseo 키 파일에 OPENAI_API_KEY 가 없음\n  · 401 ip_not_authorized — OpenAI 가 이 PC 의 IP 를 허용하지 않음\n  · 401 unauthorized — OpenAI 가 키를 거절(괄호에 OpenAI 오류 코드)\n  · 504 timeout — 전체 시간 초과\n  · 502 no_audio — 노을 무응답(아래 다시 시도를 다 쓴 뒤) 또는 원문이 아닌 말로 시작\n  · 502 connect — 연결 오류(괄호에 HTTP 번호) · 502 server — 노을 오류 이벤트(괄호에 OpenAI 코드)\n  · 500 internal · 499 cancelled — 확장이 끊었을 때(받는 쪽이 없어 실제로는 가지 않음)\n  · 404 {\"ok\":false,\"reason\":\"path\"} — 이 앱이 옛 판(노을 길 없음)일 때. 옛 판을 알아채는 데 쓸 수 있습니다\n- 기다림: 이 앱 쪽 상한도 max(90초, 글자 수 × 0.3초 + 30초)로 확장과 같은 공식입니다.\n\n■ 노을 부르는 법 — 낡은 11-17 판이 아니라 Claude State Bar 통보 9f350d9f 와 Paseo tts.ts 11-18 판을 따름\n- 순서·지시문: session.start(instructions = 낭독 정책만) → session.started 뒤 session.instructions.append(liveReadPrompt) → 입력 무음 0.1초마다. commentary 는 쓰지 않습니다.\n- 다시 시도: 7초 안에 실제 소리가 없거나, 받아쓴 글 첫 세 글자가 원문과 다르거나(원문이 한글 세 글자로 시작할 때만 · 첫 소리 뒤 1.5초 안에 못 모으면 견주지 않음), 연결 오류·서버 오류·소리 없이 닫힘이면 새 연결로 다시 합니다. 처음 포함 세 번, 시작까지 합쳐 30초이고, 마지막 시도는 남은 시간을 다 기다리며 첫머리를 견주지 않습니다.\n- Paseo 와 다른 점 하나: OpenAI 가 키·IP 를 거절하면(401) 다시 해도 같아서 바로 실패합니다. 최종 오류는 같고 기다림만 짧아집니다.\n- 끝 판정: 실제 소리(표본 600 초과) 뒤 1.5초 조용하면 끝, 받아쓴 글이 원문을 다 읽었으면 0.3초, 다 읽은 뒤 새 말이 받아써지면 바로 끊음.\n- 이 앱은 조각을 끝까지 읽힌 뒤 WAV 를 통째로 돌려줍니다(스트리밍 없음). 그래서 Paseo 의 \"엉뚱한 소리는 넘기기 전에 버림\"이 저절로 지켜지고, 소리를 일부 받은 뒤의 오류도 마지막 시도가 아니면 다시 합니다. 대신 첫 소리는 조각 전체를 읽는 시간 뒤에 옵니다(200자면 약 30초 이상).\n\n■ 키·사용량\n- 키: Paseo 키 파일 ~/.paseo/claude-state-bar/google.env 의 OPENAI_API_KEY 를 요청마다 다시 읽습니다(이쪽 리규형님 버튼 결정). 지금 이 PC 파일에 들어 있습니다.\n- 사용량(맡겨 주신 판단): 이 앱은 노을 사용량을 세지 않습니다. 이 앱이 세면 Paseo 쪽에 \"PC 읽기 앱\" 몫으로 잘못 잡힙니다. 확장이 자기 기록(/v1/tts-usage months)의 openai 칸에 Paseo 규칙대로(성공한 요청의 보낸 text 글자 수, 코드 포인트) 세는 것을 제안합니다. 키별 칸이 필요하면 X-Usage-Key 를 keys 칸 이름으로 쓰면 됩니다(tail 은 비워도 받습니다). 이 앱 사용량 화면은 openai 칸을 보여 주지 않습니다.\n\n■ 바꾼 파일(커밋 안 함)\n- noeul_live.py(새) — 노을 라이브 연결(파이썬 기본 기능만으로 짠 웹소켓 · 다시 시도 · 첫머리 판정 · 끝 판정 · 끊김), Paseo 키 파일 읽기, 확장 요청 처리\n- tts_usage.py — UsageReceiver 에 POST /v1/tts/noeul 길(Origin·크기 검사 · 본문을 먼저 다 읽고 거절 · 끊김 알아채기 peer_closed)\n- whisperer.py — 창구를 만들 때 노을 처리 함수를 넘김(두 곳)\n- tests/test_noeul_live.py(새) — 51개. 저장소 전체 시험 488개 통과\n\n■ 남은 것\n- 새 판이 켜지려면 앱 재시작이 필요합니다(개발 실행이면 다시 실행, 설치본이면 다시 빌드·설치). 리규형님 몫이라 하지 않았습니다.\n- 실제 OpenAI 에는 붙어 보지 않았습니다(이 PC 는 IP 허용 목록 밖). 실제 소리·실제 거절 응답 모양은 사무실에서 확인해야 합니다."
+}
+```
