@@ -444,10 +444,33 @@ class TestRoutes(unittest.TestCase):
         status, _, data = self.call("GET", f"/v1/tts/noeul/stream/{job_id}")
         self.assertEqual((status, json.loads(data)["code"]), (404, "not_found"))
 
-    def test_stream_needs_origin(self):
+    def test_stream_without_origin(self):
+        # 확장 오디오 요소의 GET 엔 Origin 이 안 붙는다(정정 요청 46919744 실측) — id 로 받는다
         job_id = json.loads(self.post()[2])["id"]
-        status, _, data = self.call("GET", f"/v1/tts/noeul/stream/{job_id}", origin=None)
-        self.assertEqual((status, json.loads(data)["code"]), (403, "origin"))
+        self.fake.audios[0].append(pcm(1, 2))
+        self.fake.audios[0].finish()
+        status, headers, data = self.call("GET", f"/v1/tts/noeul/stream/{job_id}", origin=None,
+                                          headers={"Range": "bytes=0-"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("access-control-allow-origin", headers)
+        self.assertEqual(data, noeul_live.wav_stream_header() + widened([1, 2]))
+        status, _, data = self.call("GET", f"/v1/tts/noeul/stream/{job_id}/result", origin=None)
+        self.assertEqual((status, json.loads(data)), (200, {"ok": True, "done": True}))
+        other = json.loads(self.post()[2])["id"]
+        status, _, data = self.call("DELETE", f"/v1/tts/noeul/stream/{other}", origin="null")
+        self.assertEqual((status, json.loads(data)), (200, {"ok": True}))
+
+    def test_web_origin_refused(self):
+        job_id = json.loads(self.post()[2])["id"]
+        for method, path in [("GET", f"/v1/tts/noeul/stream/{job_id}"), ("GET", f"/v1/tts/noeul/stream/{job_id}/result"),
+                             ("DELETE", f"/v1/tts/noeul/stream/{job_id}")]:
+            status, _, data = self.call(method, path, origin="https://example.com")
+            self.assertEqual((status, json.loads(data)["code"]), (403, "origin"), (method, path))
+        self.assertFalse(self.fake.audios[0].cancelled)
+        status, _, data = self.call("GET", f"/v1/tts/noeul/stream/{job_id}/result")   # 거절된 GET 은 열지 않았다
+        self.assertEqual(json.loads(data), {"ok": True, "done": False})
+        status, _, data = self.call("POST", "/v1/tts/noeul/stream", {"v": 1, "text": "안녕"}, origin="null")
+        self.assertEqual((status, json.loads(data)["code"]), (403, "origin"))           # 맡기기는 확장 출처만
 
     def test_delete_and_options(self):
         job_id = json.loads(self.post()[2])["id"]

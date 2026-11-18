@@ -798,7 +798,8 @@ def handle_extension_request(payload, cancelled=None, *, key_reader, log=None, r
 # ════════════════════════════════════════════════════════════════════
 # 왜: 조각(≈200자)을 끝까지 만든 뒤 WAV 를 통째로 돌려주는 옛 길(POST /v1/tts/noeul)은 첫 소리가 PC 앱보다 3~4배 늦었다
 #   (11-18 15:21 설치본 기록: 76자 → 소리 11.8초, 17.5초 걸림). PC 앱은 문단 하나를 점점 큰 조각·8 동시·오는 대로 이어 튼다.
-# 길(tts_usage 창구가 부른다 — 모두 Origin chrome-extension:// 만):
+# 길(tts_usage 창구가 부른다 — 맡기기는 Origin chrome-extension:// 만, 흘림·결과·취소는 Origin 이 없어도 id 로 받는다:
+#   확장 오디오 요소의 GET 엔 Origin 이 안 붙는다 — 정정 요청 46919744 실측. 다른 웹사이트 출처가 붙어 오면 거절):
 #   POST   /v1/tts/noeul/stream             {"v":1,"text","lang","rate"} → 200 {"ok":true,"id"} + X-Usage-Key. 받는 즉시 만들기 시작
 #   GET    /v1/tts/noeul/stream/<id>        오디오 요소 — 200 audio/wav(길이 칸 0xFFFFFFFF, 48kHz·두 채널·16비트), 오는 대로.
 #                                           시작 전 모음(stream_start_sec)만큼 쌓이면 흘리기 시작(PC 앱 재생기와 같다). 한 id 한 번만

@@ -156,8 +156,12 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   (midpoints between samples, not plain repeats) and the channels. One GET per id; a closed connection cancels within ~0.2 s;
   `GET …/<id>/result` → `done:true` only after the last byte was sent; `DELETE …/<id>` cancels. Jobs never opened are dropped
   after `STREAM_KEEP_S` = 10 min, finished results are kept 10 min (Claude's value — the extension left it to this side; made
-  audio costs memory only). All routes: `Origin` chrome-extension:// only, answers carry Access-Control-Allow-Origin (Chrome
-  will not play 127.0.0.1 audio in an extension page without it), OPTIONS answered. The connection slots became an ordered
+  audio costs memory only). Origin: the POST (it creates billed work) takes `chrome-extension://` only; the stream GET, result
+  GET and DELETE also take a missing / `"null"` Origin — the extension's audio element sends **no** Origin (extension
+  measurement, correction peer_mail 46919744: it has all-site permissions, so Chrome skips the origin check) — and are guarded
+  by the unguessable one-time id; another web origin is refused there (`_stream_id_origin_ok`). Access-Control-Allow-Origin is
+  added only when an extension Origin came (playback works without it; the audio element still needs
+  `crossOrigin="anonymous"`). OPTIONS answered. The connection slots became an ordered
   queue (`_Slots`, ticket = (job group, piece index)) so the paragraph handed over first gets slots first; this app's own
   reading queues in arrival order. Measured 11-18 (dev run, 52 chars): first byte 3.5 s, 250 KB at 3.9 s, 6.4 s of sound in
   6.7 s. The old `POST /v1/tts/noeul` stays.

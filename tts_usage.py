@@ -651,8 +651,10 @@ class UsageReceiver:
     - noeul_stream — 확장 흘려받기 노을(2026-11-18 요청 20321079): noeul_live.ExtensionStreams 처럼 create(payload) ·
       stream(id, closed, begin, write) · result(id) · delete(id) 를 가진 것. 없으면 그 길들은 404.
       POST /v1/tts/noeul/stream · GET /v1/tts/noeul/stream/<id>(오디오 요소, 오는 대로 흘림) · GET …/<id>/result ·
-      DELETE …/<id> · OPTIONS(브라우저 사전 확인). 모두 Origin chrome-extension:// 만, 답에 Access-Control-Allow-Origin
-      (오디오 요소가 crossOrigin="anonymous" 일 때 이것이 있어야 크롬이 127.0.0.1 소리를 튼다 — 확장 실측).
+      DELETE …/<id> · OPTIONS(브라우저 사전 확인). 맡기기 POST 는 Origin chrome-extension:// 만. 흘림·결과·취소는
+      Origin 이 없어도 받는다 — 확장 오디오 요소의 GET 엔 Origin 이 안 붙는다(정정 요청 46919744 실측). 지키는 것은 일회용
+      id 이고, 다른 웹사이트 출처가 붙어 오면 거절한다(_stream_id_origin_ok). 확장 출처가 붙어 오면 답에
+      Access-Control-Allow-Origin(없어도 재생됨 — 확장 실측. 오디오 요소의 crossOrigin="anonymous" 는 필요).
     """
 
     def __init__(self, reports, host=RECEIVER_HOST, port=RECEIVER_PORT, on_report=None, log=None, on_reject=None,
@@ -731,11 +733,17 @@ class UsageReceiver:
                 receiver._log(f"[노을] 크롬 확장 흘림 요청 거절: {reason}")
                 self._stream_json(status, {"ok": False, "code": code, "error": f"요청이 올바르지 않습니다({reason})"})
 
-            def _stream_origin_or_refuse(self):
-                origin = self._ext_origin()
-                if origin is None:
-                    self._stream_refuse(403, "origin", "origin_other" if self.headers.get("Origin") else "origin_missing")
-                return origin
+            def _stream_id_origin_ok(self):
+                """흘림·결과·취소 길(id 를 아는 쪽)의 출처 검사 — Origin 이 없거나("null" 포함) 확장이면 받는다.
+                확장 오디오 요소의 GET 에는 Origin 이 붙지 않는다(확장 실측 11-18, 정정 요청 46919744 — 모든 사이트 권한이
+                있어 크롬이 출처 검사에서 뺀다). 지키는 것은 추측할 수 없는 일회용 id(24자 무작위 · 한 번 흘리면 끝 · 안 열리면
+                10분 뒤 버림). 다른 웹사이트 출처가 붙어 오면(웹페이지가 crossOrigin 으로 부름) 거절한다.
+                새 작업을 만드는(과금) 맡기기 POST 는 여전히 확장 출처만 받는다(_read_noeul_body)."""
+                origin = str(self.headers.get("Origin", "")).strip()
+                if not origin or origin == "null" or origin.startswith("chrome-extension://"):
+                    return True
+                self._stream_refuse(403, "origin", "origin_other")
+                return False
 
             def _post_noeul_stream(self):
                 found = self._read_noeul_body(self._stream_refuse)
@@ -751,15 +759,15 @@ class UsageReceiver:
             def _get_noeul_stream(self, job_id):
                 """오디오 요소의 GET — 브라우저가 Range: bytes=0- 를 붙여도 200 으로 처음부터 준다(206 안 씀).
                 길이를 모르니 Content-Length 없이 보내고 다 보내면 연결을 닫는다(HTTP/1.0 응답)."""
-                origin = self._stream_origin_or_refuse()
-                if origin is None:
+                if not self._stream_id_origin_ok():
                     return
+                origin = self._ext_origin()      # 확장 출처가 붙어 왔을 때만 허용 출처 머리글(없어도 재생됨 — 확장 실측)
                 connection = self.connection
 
                 def begin():
                     self.send_response(200)
                     self.send_header("Content-Type", "audio/wav")
-                    for name, value in self._cors(origin).items():
+                    for name, value in (self._cors(origin) if origin else {}).items():
                         self.send_header(name, value)
                     self.send_header("Cache-Control", "no-store")
                     self.send_header("Connection", "close")
@@ -778,7 +786,7 @@ class UsageReceiver:
                     self._stream_json(*refused)
 
             def _get_noeul_result(self, job_id):
-                if self._stream_origin_or_refuse() is None:
+                if not self._stream_id_origin_ok():
                     return
                 self._stream_json(*receiver.noeul_stream.result(job_id))
 
@@ -788,7 +796,7 @@ class UsageReceiver:
                 if route is None or route[1]:
                     self._reply(404, {"ok": False})
                     return
-                if self._stream_origin_or_refuse() is None:
+                if not self._stream_id_origin_ok():
                     return
                 self._stream_json(*receiver.noeul_stream.delete(route[0]))
 

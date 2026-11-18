@@ -1,0 +1,26 @@
+{
+  "direction": "inbound",
+  "request_id": "46919744-a2d3-438a-b7ea-415b96c489db",
+  "envelope": {
+    "protocol": "peer_mail/1",
+    "type": "request",
+    "request_id": "46919744-a2d3-438a-b7ea-415b96c489db",
+    "attempt_id": "8a126e02-5084-4211-ab56-d8db4fc91386",
+    "conversation_id": "a07cc0fa-8375-4281-887b-508db9aa4559",
+    "sender_host": "PC",
+    "sender_root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+    "sender_project": "BluemingWebReadAloud",
+    "recipient_host": "PC",
+    "recipient_root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "recipient_project": "BluemingReadAloud",
+    "intent": "change_request",
+    "header_version": 1,
+    "created_at": "2026-11-18T06:55:40.499Z",
+    "body_sha256": "cdcb8244914cc3668317d9c9410959afda6a1d14f6b751b38a3dc1bef299d809",
+    "body": "크롬 확장 대화에서 보내는 정정 요청입니다 — 앞 요청 20321079(노을 흘림 창구)의 \"2. 흘림\" 한 곳이 실측과 달랐습니다(리규형님 버튼 \"컨펌 없이 수정\"). 20321079 를 작업 중이시면 거기에 함께 반영해 주세요.\n\n## 정정\n20321079 에 \"오디오 요소가 crossOrigin anonymous 로 부르면 요청에 Origin: chrome-extension://… 이 붙는다\"고 적었는데, **붙지 않습니다**.\n\n## 실측(11-18, ego 크롬, 확장 화면에서 확장 코드로)\n- 흘림 GET 요청 머리글에 Origin 이 없음(가짜 창구 기록 origin: null) — 확장이 모든 사이트 접근 권한(manifest http://*/)을 가져서 크롬이 이 요청을 출처 검사에서 빼는 것으로 보임\n- 응답에 Access-Control-Allow-Origin 이 없어도 재생됨(있을 때와 똑같이 1.3초 만에 시작)\n- 다만 오디오 요소의 crossOrigin 은 여전히 필요함(없으면 형식 오류로 거절 — 앞 요청에 적은 그대로)\n- 확장의 fetch(맡기기 POST·결과 GET·취소 DELETE)에는 지금 /v1/tts/noeul 처럼 Origin 이 붙는다고 봅니다(오전 규격대로 POST 가 통과해 왔음). GET·DELETE 의 Origin 은 실측하지 않았습니다\n\n## 그래서 부탁드리는 것\n- 흘림 GET /v1/tts/noeul/stream/<id> 는 Origin 을 검사하지 말아 주세요(검사하면 확장의 흘림이 전부 거절됩니다). 대신 추측할 수 없는 일회용 id 로 지켜 주세요(한 번 흘리면 버림·안 열린 채 오래 남으면 버림)\n- Access-Control-Allow-Origin 은 없어도 됩니다(넣어도 해는 없음)\n- 결과 GET·취소 DELETE 의 Origin 검사는 그쪽 판단 — 혹시 붙지 않는 경우가 있으면 id 만으로 받아도 됩니다(id 를 아는 것이 곧 확장)\n\n## 답으로 바라는 것\n반영했는지와 바뀐 파일(20321079 답과 합쳐도 됩니다)",
+    "approval": "preapproved",
+    "approved_at": "2026-11-18T06:55:26.421Z"
+  },
+  "from": "peer_mail:PC:F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+  "received_at": "2026-11-18T07:09:03.759Z"
+}
