@@ -493,8 +493,12 @@ def make_noeul_synthesize(key, *, log=None, on_sent=None, reader=None):
                 log(f"[노을] 사용량 기록 오류: {type(e).__name__}")
 
     def failure(error):
-        return SegmentFailed(noeul_live.MESSAGES.get(getattr(error, "code", "internal"),
-                                                    noeul_live.MESSAGES["internal"]))
+        code = getattr(error, "code", "internal")
+        if code not in noeul_live.STATUS:
+            code = "internal"
+        failed = SegmentFailed(noeul_live.MESSAGES.get(code, noeul_live.MESSAGES["internal"]))
+        failed.code = code   # 확장 흘림 길이 결과에 오류 종류를 싣는다(noeul_live.ExtensionStreams)
+        return failed
 
     def synthesize(text, rate):
         import numpy as np
@@ -505,8 +509,10 @@ def make_noeul_synthesize(key, *, log=None, on_sent=None, reader=None):
         sent(text)
         return np.frombuffer(pcm, dtype="<i2").copy()
 
-    def stream(text, plan_rate, *, cancelled, wake):
+    def stream(text, plan_rate, *, cancelled, wake, lang="ko", group=None):
         # Paseo server/presentation/tts.ts:570-585, 610-641: 계획은 문단을 열 때 한 번만 한다.
+        # lang·group = 크롬 확장 흘림 길(noeul_live.ExtensionStreams, 요청 20321079): 확장이 보낸 언어로 읽고, 연결 자리는
+        # 순서표 (group, 조각 번호) 로 기다린다(먼저 맡긴 문단부터). group 이 없으면 예전처럼 온 순서.
         pieces = readaloud_text.stream_pieces_growing(text, plan_rate)
         start_sec = readaloud_text.stream_start_sec(pieces[0], plan_rate) if pieces else 0
         audio = GrowingAudio(start_sec, cancelled=cancelled, wake=wake)
@@ -543,8 +549,9 @@ def make_noeul_synthesize(key, *, log=None, on_sent=None, reader=None):
                             return
                         index = next_piece
                         next_piece += 1
-                    reader(pieces[index], key, "ko", log=log, cancelled=lambda: audio.cancelled,
-                           sink=lambda pcm: receive(index, pcm))
+                    extra = {} if group is None else {"priority": (group, index)}
+                    reader(pieces[index], key, lang, log=log, cancelled=lambda: audio.cancelled,
+                           sink=lambda pcm: receive(index, pcm), **extra)
                     sent(pieces[index])   # 성공한 연결만. 버린 재시도·실패는 reader 가 예외로 끝낸다.
                     with lock:
                         slots[index]["done"] = True

@@ -34,12 +34,16 @@
 """
 
 import base64
+import bisect
 import hashlib
+import itertools
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
+import struct
 import threading
 import time
 from array import array
@@ -76,7 +80,8 @@ _HANGUL_HEAD = re.compile(r"^[가-힣]{3}")   # 원문이 한글 세 글자로 �
 # 실패 종류 → HTTP 상태 번호(확장 창구 응답). 확장은 code 로 구분하고 error 문장을 화면에 그대로 쓴다.
 # cancelled = 확장이 요청 연결을 먼저 닫음(멈춤·건너뛰기) — 받을 쪽이 없어 실제로 가지는 않는다(499 는 nginx 의 "손님이 끊음" 관례)
 STATUS = {"bad_request": 400, "no_key": 503, "ip_not_authorized": 401, "unauthorized": 401, "timeout": 504,
-          "no_audio": 502, "connect": 502, "server": 502, "internal": 500, "cancelled": 499}
+          "no_audio": 502, "connect": 502, "server": 502, "internal": 500, "cancelled": 499,
+          "not_found": 404, "expired": 410}      # 마지막 둘 = 흘림 길(ExtensionStreams) 전용
 MESSAGES = {
     "no_key": "PC 읽기 앱에 OpenAI 키가 없습니다(인증 창의 OpenAI 키 칸)",
     "ip_not_authorized": "OpenAI 가 이 PC 의 IP 를 허용하지 않습니다(조직 IP 허용 목록 밖)",
@@ -88,6 +93,8 @@ MESSAGES = {
     "server": "OpenAI 노을 서버 오류",
     "internal": "PC 읽기 앱 내부 오류",
     "cancelled": "확장이 요청을 끊어 노을 연결을 닫았습니다",
+    "not_found": "흘림 id 가 없거나 이미 열렸습니다",
+    "expired": "맡긴 뒤 10분 동안 흘림을 열지 않아 버렸습니다",
 }
 
 
@@ -441,7 +448,76 @@ class LiveSocket:
 # 한 조각 읽히기
 # ════════════════════════════════════════════════════════════════════
 
-_slots = threading.BoundedSemaphore(LIVE_SESSIONS_MAX)
+_groups = itertools.count(1)
+
+
+def new_group():
+    """순서표 묶음 번호 — 먼저 받은 것이 작다. 확장 흘림 작업은 맡길 때 하나 받는다(그 안의 조각은 index 순)."""
+    return next(_groups)
+
+
+class _Slots:
+    """노을 라이브 연결 자리(동시 LIVE_SESSIONS_MAX). 자리가 나면 순서표가 가장 앞선 대기자에게 준다.
+
+    왜(크롬 확장 요청 20321079, 2026-11-18): 확장이 문단 셋(지금 + 다음 둘)을 한꺼번에 맡기면 뒤 문단의 조각이 자리를
+    먼저 차지해 지금 듣는 문단이 끊길 수 있다 → 순서표 = (group, index): 먼저 맡긴 문단(작은 group), 그 안에서는 앞 조각.
+    순서표 없이 오면 그때 새 group 을 받아 온 순서대로(예전 세마포어와 같은 쓰임). acquire/release 는 threading 세마포어와
+    같은 약속(시험이 자리를 채울 때 쓴다)."""
+
+    def __init__(self, size):
+        self._size = size
+        self._free = size
+        self._cond = threading.Condition()
+        self._queue = []                 # 정렬된 순서표 [((group, index), 차례 번호)]
+        self._turns = itertools.count()
+
+    def ticket(self, priority=None):
+        """줄을 선다. priority = (group, index) — 없으면 지금 새 group."""
+        key = (tuple(priority) if priority is not None else (new_group(), 0), next(self._turns))
+        with self._cond:
+            bisect.insort(self._queue, key)
+        return key
+
+    def wait(self, ticket, timeout):
+        """차례가 와서 자리를 얻으면 True. timeout 안에 못 얻으면 False(줄은 그대로 선 채)."""
+        end = None if timeout is None else time.monotonic() + timeout
+        with self._cond:
+            while not (self._free > 0 and self._queue and self._queue[0] == ticket):
+                if end is None:
+                    self._cond.wait()
+                    continue
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                self._cond.wait(left)
+            self._queue.pop(0)
+            self._free -= 1
+            self._cond.notify_all()
+            return True
+
+    def drop(self, ticket):
+        """줄에서 빠진다(끊김·시간 초과). 자리를 얻은 뒤라면 아무것도 안 한다 — 그땐 release."""
+        with self._cond:
+            if ticket in self._queue:
+                self._queue.remove(ticket)
+                self._cond.notify_all()
+
+    def acquire(self, blocking=True, timeout=None):
+        ticket = self.ticket()
+        ok = self.wait(ticket, timeout if blocking else 0)
+        if not ok:
+            self.drop(ticket)
+        return ok
+
+    def release(self):
+        with self._cond:
+            if self._free >= self._size:
+                raise ValueError("노을 연결 자리를 더 많이 돌려줌")
+            self._free += 1
+            self._cond.notify_all()
+
+
+_slots = _Slots(LIVE_SESSIONS_MAX)
 
 
 class _Retry(Exception):
@@ -453,13 +529,14 @@ class _Retry(Exception):
 
 
 def read_noeul(text, key, lang="ko", *, url=LIVE_URL, voice=LIVE_VOICE, log=None, opener=LiveSocket,
-               clock=time.monotonic, close_delay=CLOSE_DELAY_S, cancelled=None, sink=None):
+               clock=time.monotonic, close_delay=CLOSE_DELAY_S, cancelled=None, sink=None, priority=None):
     """text 를 노을로 읽혀 앞뒤 무음을 자른 PCM(16비트·한 채널·24kHz) bytes 를 돌려준다. 실패는 NoeulError.
     text 는 다듬지 않는다(확장이 이미 읽기용으로 다듬은 글). cancelled() 가 참이 되면(확장이 요청을 끊음) 0.1초 안에
     라이브 연결을 닫고 NoeulError("cancelled"). opener·clock·close_delay 는 시험용.
     다시 시도 = Paseo requestOpenaiAudio(11-18): 연결 자리(동시 12) 안에서 최대 LIVE_TRIES 번, 시작까지 합쳐 30초.
     sink(pcm) 를 주면 첫머리 확인 후 오는 대로 넘기고, 한 번 넘긴 뒤에는 재시도하지 않는다
     (Paseo server/presentation/tts.ts:341-347). sink 가 없으면 기존 완성 PCM 계약 그대로다.
+    priority = 연결 자리 순서표 (group, index) — 작은 것부터 자리를 얻는다(_Slots). 없으면 온 순서.
     OpenAI 가 키·IP 를 거절하면 다시 해도 같아서 바로 실패시킨다."""
     if not key:
         raise NoeulError("no_key")
@@ -469,11 +546,16 @@ def read_noeul(text, key, lang="ko", *, url=LIVE_URL, voice=LIVE_VOICE, log=None
         raise NoeulError("cancelled")
     start = clock()
     deadline = start + live_timeout_s(text)
-    while not _slots.acquire(timeout=PUMP_S):     # 자리를 기다리는 동안에도 끊김·시간을 본다
-        if cancelled():
-            raise NoeulError("cancelled")
-        if clock() >= deadline:
-            raise NoeulError("timeout")
+    ticket = _slots.ticket(priority)
+    try:
+        while not _slots.wait(ticket, PUMP_S):     # 자리를 기다리는 동안에도 끊김·시간을 본다
+            if cancelled():
+                raise NoeulError("cancelled")
+            if clock() >= deadline:
+                raise NoeulError("timeout")
+    except BaseException:
+        _slots.drop(ticket)
+        raise
     try:
         start_deadline = clock() + LIVE_START_LIMIT_S
         checkable = lang == "ko" and bool(_HANGUL_HEAD.match(LIVE_PLAIN.sub("", text)))
@@ -708,3 +790,256 @@ def handle_extension_request(payload, cancelled=None, *, key_reader, log=None, r
     log(f"[노을] 크롬 확장 요청 {len(text)}자 → 소리 {len(pcm) / (LIVE_RATE * 2):.1f}초 "
         f"({time.monotonic() - began:.1f}초 걸림)")
     return 200, "audio/wav", wav_from_pcm(pcm), {"X-Usage-Key": usage_key_id(key)}
+
+
+# ════════════════════════════════════════════════════════════════════
+# 크롬 확장 흘려받기 — 문단을 맡기면 PC 앱 직접 읽기와 같은 받는 대로 틀기로 만들어 오는 대로 흘린다
+# (크롬 확장 요청 20321079, 2026-11-18 — 그쪽 리규형님 버튼 "확장도 PC 앱 방식으로", 사전 승인)
+# ════════════════════════════════════════════════════════════════════
+# 왜: 조각(≈200자)을 끝까지 만든 뒤 WAV 를 통째로 돌려주는 옛 길(POST /v1/tts/noeul)은 첫 소리가 PC 앱보다 3~4배 늦었다
+#   (11-18 15:21 설치본 기록: 76자 → 소리 11.8초, 17.5초 걸림). PC 앱은 문단 하나를 점점 큰 조각·8 동시·오는 대로 이어 튼다.
+# 길(tts_usage 창구가 부른다 — 모두 Origin chrome-extension:// 만):
+#   POST   /v1/tts/noeul/stream             {"v":1,"text","lang","rate"} → 200 {"ok":true,"id"} + X-Usage-Key. 받는 즉시 만들기 시작
+#   GET    /v1/tts/noeul/stream/<id>        오디오 요소 — 200 audio/wav(길이 칸 0xFFFFFFFF, 48kHz·두 채널·16비트), 오는 대로.
+#                                           시작 전 모음(stream_start_sec)만큼 쌓이면 흘리기 시작(PC 앱 재생기와 같다). 한 id 한 번만
+#   GET    /v1/tts/noeul/stream/<id>/result {"ok":true,"done":true}=끝까지 흘림 · {"ok":true,"done":false}=아직 · {"ok":false,"code","error"}
+#   DELETE /v1/tts/noeul/stream/<id>        취소(맡기기만 하고 안 연 것, 흘리는 중인 것 모두) → 200 {"ok":true}
+# 소리 늘이기: 크롬은 약 250KB 를 모은 뒤 튼다(확장 실측) — 24kHz 한 채널(초당 48KB)이면 5.2초, 48kHz 두 채널(초당 192KB)이면
+#   1.3초. 그래서 48kHz 두 채널로 늘린다. 표본 사이는 앞뒤 평균(그대로 두 번 쓰면 12kHz 위에 거울 잡음이 남는다 — Claude 판단).
+# 보관(STREAM_KEEP_S — 확장이 "그쪽이 정해 주세요", Claude 가 정함): 안 연 작업은 맡긴 뒤 10분이 지나면 취소·버림, 끝난 작업의
+#   결과는 끝난 뒤 10분 기억. 다 만든 뒤에는 라이브 연결이 닫혀 과금이 없고 메모리만 든다(문단 750자 ≈ 2분 소리 ≈ 6MB) —
+#   지금 문단을 듣는 동안(일시정지 포함) 뒤 두 문단이 기다리는 시간을 넉넉히 둔 값. 청소는 맡기기·결과 확인 때 한다.
+# 사용량: 이 앱은 세지 않는다(확장이 끝까지 흘린 문단만 센다 — 그쪽 리규형님 결정). 연결 자리: 문단마다 새 group 순서표
+#   — 먼저 맡긴 문단의 조각부터 자리를 얻는다(_Slots).
+
+STREAM_RATE = 48_000
+STREAM_CHANNELS = 2
+STREAM_KEEP_S = 600.0
+
+
+def wav_stream_header(rate=STREAM_RATE, channels=STREAM_CHANNELS):
+    """길이 모르는 WAV 머리 44바이트 — RIFF·data 길이 칸 0xFFFFFFFF(브라우저가 흘려받으며 튼다, duration = Infinity)."""
+    block = channels * 2
+    return (b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels, rate, rate * block, block, 16)
+            + b"data" + struct.pack("<I", 0xFFFFFFFF))
+
+
+class StreamWidener:
+    """24kHz 한 채널 16비트 → 48kHz 두 채널 16비트. 원 표본 사이에 앞뒤 평균을 하나 끼우고 두 채널에 같은 값을 쓴다.
+    표본 사이 값은 다음 표본이 와야 알 수 있어 마지막 표본 하나는 다음 덩이까지 들고 있다가 끝에 flush 로 낸다
+    (덩이를 어떻게 나눠 넣어도 한 번에 넣은 것과 같은 바이트)."""
+
+    def __init__(self):
+        self._last = None
+
+    def feed(self, block):
+        import numpy as np
+        x = np.asarray(block, dtype=np.int32)
+        if not len(x):
+            return b""
+        if self._last is not None:
+            x = np.concatenate((np.array([self._last], dtype=np.int32), x))
+        self._last = int(x[-1])
+        if len(x) < 2:
+            return b""
+        a, b = x[:-1], x[1:]
+        mono = np.empty(len(a) * 2, dtype=np.int32)
+        mono[0::2] = a
+        mono[1::2] = (a + b) // 2
+        return np.repeat(mono, STREAM_CHANNELS).astype("<i2").tobytes()
+
+    def flush(self):
+        if self._last is None:
+            return b""
+        value, self._last = self._last, None
+        return struct.pack("<h", value) * (2 * STREAM_CHANNELS)
+
+
+def _refusal(code, message=None):
+    return {"ok": False, "code": code, "error": message or MESSAGES.get(code, code)}
+
+
+def _failure_of(error):
+    """만들기 실패(tts_engine.SegmentFailed — code 를 달고 온다) → (code, 화면에 쓸 문장)."""
+    code = getattr(error, "code", None) or "internal"
+    return code, (str(error) or MESSAGES.get(code, code))
+
+
+class _StreamGone(Exception):
+    """흘리던 연결이 끊겼거나 작업이 취소됐다."""
+
+
+class _StreamJob:
+    def __init__(self, job_id, text_len, created):
+        self.id = job_id
+        self.text_len = text_len
+        self.created = created
+        self.audio = None                # tts_engine.GrowingAudio
+        self.wake = threading.Event()    # 소리가 더 오거나 끝나거나 취소되면 선다
+        self.opened = False
+        self.first = None                # 흘리기 시작한 시각(첫 소리 기록용)
+        self.state = "running"           # running · done · failed · cancelled
+        self.code = None
+        self.message = None
+        self.finished = None
+
+
+class ExtensionStreams:
+    """크롬 확장 흘림 작업 장부 — 위 머리 설명의 네 길. 창구 스레드(요청마다 하나)에서 불린다 — Tk 를 만지지 않는다.
+    make_stream(key) → tts_engine.make_noeul_synthesize(key, ...).stream (사용량 콜백 없이 — 확장이 센다).
+    key_reader() = 인증 창의 OpenAI 키(맡길 때마다 지금 값). 답은 (상태 번호, 본문 dict[, 머리글 dict])."""
+
+    def __init__(self, *, key_reader, make_stream, log=None, clock=time.monotonic, keep_s=STREAM_KEEP_S):
+        self._key_reader = key_reader
+        self._make_stream = make_stream
+        self._log = log or (lambda msg: None)
+        self._clock = clock
+        self._keep_s = keep_s
+        self._jobs = {}
+        self._lock = threading.Lock()
+
+    def create(self, payload):
+        """POST — 검사 규칙은 옛 길과 같고 rate 가 더 있다(계획용 재생 빠르기, 소리엔 넣지 않는다 — 없으면 1)."""
+        if not isinstance(payload, dict) or type(payload.get("v")) is not int or payload.get("v") != 1:
+            return 400, _refusal("bad_request", "요청 본문이 올바르지 않습니다(v)"), {}
+        text = payload.get("text")
+        lang = payload.get("lang", "ko")
+        rate = payload.get("rate", 1)
+        if not isinstance(text, str) or not text.strip():
+            return 400, _refusal("bad_request", "요청 본문이 올바르지 않습니다(text)"), {}
+        if lang not in LANGUAGE_NAMES:
+            return 400, _refusal("bad_request", "요청 본문이 올바르지 않습니다(lang)"), {}
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not 0 < rate < float("inf"):
+            return 400, _refusal("bad_request", "요청 본문이 올바르지 않습니다(rate)"), {}
+        key = self._key_reader()
+        if not key:
+            self._log("[노을] 크롬 확장 흘림 맡기기 실패: no_key")
+            return 503, _refusal("no_key"), {}
+        self.sweep()
+        job = _StreamJob(secrets.token_urlsafe(18), len(text), self._clock())
+        try:
+            job.audio = self._make_stream(key)(text, float(rate), cancelled=lambda: False, wake=job.wake.set,
+                                               lang=lang, group=new_group())
+        except Exception as e:
+            self._log(f"[노을] 크롬 확장 흘림 맡기기 실패: internal ({type(e).__name__})")
+            return 500, _refusal("internal"), {}
+        with self._lock:
+            self._jobs[job.id] = job
+        return 200, {"ok": True, "id": job.id}, {"X-Usage-Key": usage_key_id(key)}
+
+    def stream(self, job_id, closed, begin, write):
+        """GET 흘림. 흘리기 전에 거절하면 (상태 번호, 본문 dict), 흘렸으면 None(끝·끊김 모두 — 결과는 result 로).
+        closed() = 오디오 요소가 연결을 닫았나 · begin() = 200 머리글을 보낸다 · write(bytes) = 보낸다(끊기면 OSError)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.opened:
+                return 404, _refusal("not_found")
+            job.opened = True
+        if job.state != "running":
+            return STATUS.get(job.code, 502), _refusal(job.code or "internal", job.message)
+        audio = job.audio
+        while len(audio) < audio.start_samples and not audio.done and not audio.cancelled:   # 시작 전 모음
+            if closed():
+                self._end(job, "cancelled", "cancelled", note="확장이 끊어 노을 연결을 닫음")
+                return 499, _refusal("cancelled")
+            job.wake.wait(PUMP_S)
+            job.wake.clear()
+        # 조각 하나가 실패하면 엔진은 실패를 적고(finish) 나머지 연결을 닫는다(cancel) — 실패를 먼저 본다
+        if audio.done and audio.error is not None and len(audio) == 0:
+            code, message = _failure_of(audio.error)
+            self._end(job, "failed", code, message)
+            return STATUS.get(code, 502), _refusal(code, message)
+        if job.state != "running" or (audio.cancelled and audio.error is None):
+            self._end(job, "cancelled", "cancelled", note="취소됨")
+            return STATUS.get(job.code, 499), _refusal(job.code or "cancelled", job.message)
+        job.first = self._clock()
+        widen = StreamWidener()
+        offset = 0
+        try:
+            begin()
+            write(wav_stream_header())
+            while True:
+                if job.state != "running" or (audio.cancelled and audio.error is None):   # 취소(DELETE·만료)
+                    raise _StreamGone()
+                length = len(audio)
+                if offset < length:
+                    block = audio.read(offset, length - offset)
+                    offset += len(block)
+                    write(widen.feed(block))
+                    continue
+                if audio.done:
+                    break
+                if closed():
+                    raise _StreamGone()
+                job.wake.wait(PUMP_S)
+                job.wake.clear()
+            write(widen.flush())
+        except (_StreamGone, OSError):
+            self._end(job, "cancelled", "cancelled", note="확장이 끊어 노을 연결을 닫음", sent=offset)
+            return None
+        except Exception as e:           # 예상 못 한 오류 — 작업을 닫고 연결도 닫는다(머리는 이미 보냈을 수 있다)
+            self._log(f"[노을] 크롬 확장 흘림 처리 오류: {type(e).__name__}")
+            self._end(job, "failed", "internal")
+            return None
+        if audio.error is not None:
+            code, message = _failure_of(audio.error)
+            self._end(job, "failed", code, message, sent=offset)
+        else:
+            self._end(job, "done", sent=offset)
+        return None
+
+    def result(self, job_id):
+        self.sweep()
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return 404, _refusal("not_found", "흘림 id 가 없습니다")
+        if job.state == "running" and job.audio.done and job.audio.error is not None:
+            code, message = _failure_of(job.audio.error)
+            self._end(job, "failed", code, message)
+        if job.state == "done":
+            return 200, {"ok": True, "done": True}
+        if job.state == "running":
+            return 200, {"ok": True, "done": False}
+        return 200, _refusal(job.code or "internal", job.message)
+
+    def delete(self, job_id):
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return 404, _refusal("not_found", "흘림 id 가 없습니다")
+        self._end(job, "cancelled", "cancelled", note="확장이 취소함")
+        return 200, {"ok": True}
+
+    def sweep(self):
+        """안 연 채 STREAM_KEEP_S 가 지난 작업은 취소, 끝난 지 STREAM_KEEP_S 가 지난 작업은 장부에서 지운다."""
+        now = self._clock()
+        expired = []
+        with self._lock:
+            for job_id, job in list(self._jobs.items()):
+                if job.state == "running":
+                    if not job.opened and now - job.created >= self._keep_s:
+                        expired.append(job)
+                elif now - job.finished >= self._keep_s:
+                    del self._jobs[job_id]
+        for job in expired:
+            self._end(job, "cancelled", "expired", note=f"{self._keep_s / 60:g}분 동안 안 열려 버림")
+
+    def _end(self, job, state, code=None, message=None, *, note=None, sent=None):
+        with self._lock:
+            if job.state != "running":
+                return
+            job.state, job.code, job.finished = state, code, self._clock()
+            job.message = message or (MESSAGES.get(code) if code else None)
+        if state != "done" and job.audio is not None:
+            job.audio.cancel()           # 남은 라이브 연결을 닫는다(만드는 스레드가 0.1초 안에 본다)
+        took = job.finished - job.created
+        if state == "done":
+            first = (job.first - job.created) if job.first is not None else 0.0
+            self._log(f"[노을] 크롬 확장 흘림 {job.text_len}자 → 소리 {(sent or 0) / LIVE_RATE:.1f}초 "
+                      f"(첫 소리까지 {first:.1f}초 · 다 흘림 {took:.1f}초)")
+        elif state == "failed":
+            self._log(f"[노을] 크롬 확장 흘림 {job.text_len}자 실패: {code}")
+        else:
+            self._log(f"[노을] 크롬 확장 흘림 {job.text_len}자 — {note or '취소됨'} ({took:.1f}초 뒤)")

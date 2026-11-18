@@ -57,6 +57,8 @@ RECEIVER_HOST = "127.0.0.1"
 RECEIVER_PORT = 51888
 RECEIVER_PATH = "/v1/tts-usage"
 NOEUL_PATH = "/v1/tts/noeul"      # 확장 대신 노을로 읽어 WAV 를 돌려주는 길(2026-11-18, noeul_live.py)
+NOEUL_STREAM_PATH = "/v1/tts/noeul/stream"   # 확장 흘려받기 노을 — 맡기기(2026-11-18 요청 20321079, noeul_live.ExtensionStreams)
+_NOEUL_STREAM_ID = re.compile(r"^/v1/tts/noeul/stream/([A-Za-z0-9_-]{1,64})(/result)?$")   # 흘림 · 결과 · 취소
 RECEIVER_MAX_BYTES = 16 * 1024
 EXTENSION_MAX_SOURCES = 20        # 확장 설치가 이보다 많으면 가장 오래 소식 없는 것부터 버린다(Claude 가 정함)
 _COUNT_MAX = 10 ** 10             # 한 칸 값 상한 — 이보다 크면 잘못 보낸 값으로 보고 받지 않는다
@@ -646,16 +648,22 @@ class UsageReceiver:
       cancelled() = 확장이 그 요청 연결을 닫았나(peer_closed). Origin 검사·크기 상한은 사용량 길과 같고, 거절 본문은
       {"ok":false,"code","error"}(확장이 error 를 화면에 그대로 쓴다). 요청마다 스레드가 따로라 겹쳐도 동시에 처리된다
       (노을 연결 상한 12 는 noeul_live). 거절 까닭은 log 로 한 줄(on_reject 는 사용량 길 전용).
+    - noeul_stream — 확장 흘려받기 노을(2026-11-18 요청 20321079): noeul_live.ExtensionStreams 처럼 create(payload) ·
+      stream(id, closed, begin, write) · result(id) · delete(id) 를 가진 것. 없으면 그 길들은 404.
+      POST /v1/tts/noeul/stream · GET /v1/tts/noeul/stream/<id>(오디오 요소, 오는 대로 흘림) · GET …/<id>/result ·
+      DELETE …/<id> · OPTIONS(브라우저 사전 확인). 모두 Origin chrome-extension:// 만, 답에 Access-Control-Allow-Origin
+      (오디오 요소가 crossOrigin="anonymous" 일 때 이것이 있어야 크롬이 127.0.0.1 소리를 튼다 — 확장 실측).
     """
 
     def __init__(self, reports, host=RECEIVER_HOST, port=RECEIVER_PORT, on_report=None, log=None, on_reject=None,
-                 noeul=None):
+                 noeul=None, noeul_stream=None):
         self.reports = reports
         self.host = host
         self.port = port
         self.on_report = on_report
         self.on_reject = on_reject
         self.noeul = noeul
+        self.noeul_stream = noeul_stream
         self._log = log or (lambda msg: None)
         self._server = None
         self._thread = None
@@ -682,8 +690,124 @@ class UsageReceiver:
             def do_GET(self):
                 if self.path == "/v1/health":
                     self._reply(200, {"ok": True})
-                else:
+                    return
+                route = self._stream_route()
+                if route is not None:
+                    job_id, is_result = route
+                    if is_result:
+                        self._get_noeul_result(job_id)
+                    else:
+                        self._get_noeul_stream(job_id)
+                    return
+                self._reply(404, {"ok": False})
+
+            # ── 확장 흘려받기 노을(2026-11-18 요청 20321079) ──
+            def _stream_route(self):
+                """흘림 id 길이면 (id, 결과 길이냐), 아니면 None. 확장이 주소에 ?… 를 붙여도 길만 본다."""
+                from urllib.parse import urlsplit
+                if receiver.noeul_stream is None:
+                    return None
+                found = _NOEUL_STREAM_ID.match(urlsplit(self.path).path)
+                return (found.group(1), bool(found.group(2))) if found else None
+
+            def _ext_origin(self):
+                origin = str(self.headers.get("Origin", ""))
+                return origin if origin.startswith("chrome-extension://") else None
+
+            @staticmethod
+            def _cors(origin):
+                return {"Access-Control-Allow-Origin": origin, "Vary": "Origin",
+                        "Access-Control-Expose-Headers": "X-Usage-Key"}
+
+            def _stream_json(self, status, body, headers=None):
+                extra = dict(headers or {})
+                origin = self._ext_origin()
+                if origin:
+                    extra.update(self._cors(origin))
+                extra["Cache-Control"] = "no-store"
+                self._send(status, "application/json", json.dumps(body, ensure_ascii=False).encode("utf-8"), extra)
+
+            def _stream_refuse(self, status, code, reason):
+                receiver._log(f"[노을] 크롬 확장 흘림 요청 거절: {reason}")
+                self._stream_json(status, {"ok": False, "code": code, "error": f"요청이 올바르지 않습니다({reason})"})
+
+            def _stream_origin_or_refuse(self):
+                origin = self._ext_origin()
+                if origin is None:
+                    self._stream_refuse(403, "origin", "origin_other" if self.headers.get("Origin") else "origin_missing")
+                return origin
+
+            def _post_noeul_stream(self):
+                found = self._read_noeul_body(self._stream_refuse)
+                if found is None:
+                    return
+                try:
+                    status, body, headers = receiver.noeul_stream.create(found[0])
+                except Exception as e:
+                    receiver._log(f"[노을] 크롬 확장 흘림 맡기기 처리 오류: {type(e).__name__}")
+                    status, body, headers = 500, {"ok": False, "code": "internal", "error": "PC 읽기 앱 내부 오류"}, {}
+                self._stream_json(status, body, headers)
+
+            def _get_noeul_stream(self, job_id):
+                """오디오 요소의 GET — 브라우저가 Range: bytes=0- 를 붙여도 200 으로 처음부터 준다(206 안 씀).
+                길이를 모르니 Content-Length 없이 보내고 다 보내면 연결을 닫는다(HTTP/1.0 응답)."""
+                origin = self._stream_origin_or_refuse()
+                if origin is None:
+                    return
+                connection = self.connection
+
+                def begin():
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    for name, value in self._cors(origin).items():
+                        self.send_header(name, value)
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+
+                def write(data):
+                    if data:
+                        self.wfile.write(data)
+
+                try:
+                    refused = receiver.noeul_stream.stream(job_id, lambda: peer_closed(connection), begin, write)
+                except Exception as e:
+                    receiver._log(f"[노을] 크롬 확장 흘림 처리 오류: {type(e).__name__}")
+                    return
+                if refused is not None:
+                    self._stream_json(*refused)
+
+            def _get_noeul_result(self, job_id):
+                if self._stream_origin_or_refuse() is None:
+                    return
+                self._stream_json(*receiver.noeul_stream.result(job_id))
+
+            def do_DELETE(self):
+                self._read_body_first()   # 본문이 있으면 먼저 읽어 둔다(읽지 않고 닫으면 Windows 가 RST)
+                route = self._stream_route()
+                if route is None or route[1]:
                     self._reply(404, {"ok": False})
+                    return
+                if self._stream_origin_or_refuse() is None:
+                    return
+                self._stream_json(*receiver.noeul_stream.delete(route[0]))
+
+            def do_OPTIONS(self):
+                """브라우저 사전 확인 — 확장의 fetch 는 보통 host_permissions 로 건너뛰지만 어느 문맥에서 불러도 되게."""
+                from urllib.parse import urlsplit
+                origin = self._ext_origin()
+                path = urlsplit(self.path).path
+                if receiver.noeul_stream is None or origin is None or not (
+                        path == NOEUL_STREAM_PATH or _NOEUL_STREAM_ID.match(path)):
+                    self._reply(404, {"ok": False})
+                    return
+                self.send_response(204)
+                for name, value in self._cors(origin).items():
+                    self.send_header(name, value)
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
             def _reject(self, code, reason):
                 if receiver.on_reject:
@@ -711,26 +835,34 @@ class UsageReceiver:
                                  ensure_ascii=False).encode("utf-8")
                 self._send(status, "application/json", raw)
 
-            def _post_noeul(self):
-                # 본문을 먼저 다 읽고 Origin 을 본다 — 읽지 않고 답한 뒤 닫으면 보내던 쪽엔 403 대신 연결 끊김으로 보일 수 있다
+            def _read_noeul_body(self, refuse):
+                """노을 길 본문 → (payload, origin). 거절했으면 None(refuse(상태 번호, code, 까닭) 로 이미 답함).
+                본문을 먼저 다 읽고 Origin 을 본다 — 읽지 않고 답한 뒤 닫으면 보내던 쪽엔 403 대신 연결 끊김으로 보일 수 있다."""
                 try:
                     length = int(self.headers.get("Content-Length", ""))
                 except ValueError:
-                    self._noeul_refuse(400, "bad_request", "length")
-                    return
+                    refuse(400, "bad_request", "length")
+                    return None
                 if length < 0 or length > RECEIVER_MAX_BYTES:
-                    self._noeul_refuse(413, "size", "size")
-                    return
+                    refuse(413, "size", "size")
+                    return None
                 raw_body = self.rfile.read(length)
                 origin = str(self.headers.get("Origin", ""))
                 if not origin.startswith("chrome-extension://"):
-                    self._noeul_refuse(403, "origin", "origin_other" if origin else "origin_missing")
-                    return
+                    refuse(403, "origin", "origin_other" if origin else "origin_missing")
+                    return None
                 try:
                     payload = json.loads(raw_body.decode("utf-8"))
                 except (ValueError, UnicodeDecodeError):
-                    self._noeul_refuse(400, "bad_request", "json")
+                    refuse(400, "bad_request", "json")
+                    return None
+                return payload, origin
+
+            def _post_noeul(self):
+                found = self._read_noeul_body(self._noeul_refuse)
+                if found is None:
                     return
+                payload = found[0]
                 connection = self.connection
                 try:
                     status, content_type, raw, headers = receiver.noeul(payload, lambda: peer_closed(connection))
@@ -756,6 +888,9 @@ class UsageReceiver:
             def do_POST(self):
                 if self.path == NOEUL_PATH and receiver.noeul is not None:
                     self._post_noeul()
+                    return
+                if self.path == NOEUL_STREAM_PATH and receiver.noeul_stream is not None:
+                    self._post_noeul_stream()
                     return
                 body = self._read_body_first()
                 if self.path != RECEIVER_PATH:

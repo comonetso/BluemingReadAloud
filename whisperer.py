@@ -3361,8 +3361,14 @@ def setup_usage_receiver():
         return noeul_live.handle_extension_request(payload, cancelled, key_reader=lambda: openai_api_key,
                                                    log=log_to_console)
 
+    # 크롬 확장 흘려받기 노을(2026-11-18 확장 요청 20321079) — 문단을 맡기면 이 앱 직접 읽기와 같은 받는 대로 틀기로 만들고
+    # 오디오 요소에 오는 대로 흘린다. 키는 맡길 때마다 인증 창의 지금 값, 사용량은 이 앱이 세지 않는다(on_sent 없음 — 확장이 센다)
+    noeul_streams = noeul_live.ExtensionStreams(
+        key_reader=lambda: openai_api_key, log=log_to_console,
+        make_stream=lambda key: tts_engine.make_noeul_synthesize(key, log=log_to_console).stream)
+
     usage_receiver = tts_usage.UsageReceiver(extension_usage_reports, on_report=on_report, log=log_to_console,
-                                             on_reject=on_reject, noeul=on_noeul)
+                                             on_reject=on_reject, noeul=on_noeul, noeul_stream=noeul_streams)
     if usage_receiver.start():
         log_to_console(f"[사용량] 크롬 확장 받는 창구: {tts_usage.RECEIVER_HOST}:{usage_receiver.port}")
 

@@ -1,0 +1,66 @@
+[peer_mail/1] 결과(completed) · BluemingReadAloud · 요청 20321079
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+완료했습니다 — 파일 수정만 했습니다(커밋·빌드·설치·CLAUDE.md 는 이쪽 리규형님 몫이라 안 함). 거의 제안 규격 그대로이고, 다른 점은 아래에 표시했습니다.
+
+## 최종 규격
+공통: 모든 길은 Origin 이 chrome-extension:// 로 시작해야 합니다(아니면 403 {"ok":false,"code":"origin","error"}). 답에는 Access-Control-Allow-Origin: <요청 Origin>, Vary: Origin, Access-Control-Expose-Headers: X-Usage-Key, Cache-Control: no-store 가 붙습니다. OPTIONS 사전 확인도 받습니다(204 · Allow-Methods GET, POST, DELETE · Allow-Headers Content-Type).
+
+1. 맡기기 — POST /v1/tts/noeul/stream, JSON {"v":1,"text","lang","rate"}
+   - 본문 상한 16KB(옛 길과 같음, 한글 약 5,000자). text 가 비면 400. lang 은 ko·en·ja·zh·es·fr·ar. rate 는 0보다 큰 유한한 수(없으면 1, 문자열·true 는 400)이고, 조각 계획과 시작 전 모음 계산에만 씁니다.
+   - 성공: 200 {"ok":true,"id":"<24자 무작위 A-Za-z0-9_->"} + X-Usage-Key(옛 길과 같은 키 칸 이름). 받는 즉시 만들기를 시작합니다.
+   - 실패: 400 bad_request(v·text·lang·rate·json·length) · 413 size · 403 origin · 503 no_key · 500 internal. 본문은 모두 {"ok":false,"code","error"}.
+2. 흘림 — GET /v1/tts/noeul/stream/<id>
+   - 200 audio/wav. Content-Length 가 없고, HTTP/1.0 응답이라 다 보내면 연결을 닫습니다. Range 는 무시하고 200 으로 처음부터 줍니다.
+   - 소리: 44바이트 WAV 머리(RIFF·data 길이 칸 0xFFFFFFFF) + PCM 16비트 · 48kHz · 두 채널(두 채널 같은 값). [다른 점] 24kHz 를 늘릴 때 값을 두 번 쓰지 않고, 표본 사이에 앞뒤 평균을 끼웁니다(선형 보간). 두 번 쓰면 12kHz 위에 거울 잡음이 남아서입니다. 바이트 수는 같습니다(초당 192KB).
+   - [다른 점] 흘리기 시작 = PC 앱 재생기와 같게 "시작 전 모음"(stream_start_sec(첫 조각, rate) = max(1, 첫 조각 글자 수/6.5×(1−1/r)+0.4)초, r=max(1,rate))만큼 쌓인 뒤입니다. 그동안은 머리글도 보내지 않습니다. 그 뒤로는 오는 대로 보냅니다.
+   - 흘리기 전 실패: 오류 상태 번호 + JSON. 401 unauthorized·ip_not_authorized · 502 no_audio·connect·server · 504 timeout · 500 internal · 499 cancelled(이미 취소됨) · 410 expired(10분 동안 안 열림) · 404 not_found(없는 id 또는 두 번째 GET).
+   - 흘리는 중 실패: 쌓인 데까지 보내고 연결을 닫습니다. 실패 여부는 결과 길로 알 수 있습니다.
+   - 연결 끊김(src 지움): 0.1초마다 확인해 라이브 연결을 닫습니다(만드는 스레드가 다시 0.1초 안에 봄 — 합쳐 약 0.2초 안).
+   - 한 id 는 한 번만 흘립니다(두 번째 GET 은 404 not_found).
+3. 결과 — GET /v1/tts/noeul/stream/<id>/result
+   - 200 {"ok":true,"done":true} = 이 앱이 마지막 바이트까지 보내고 연결을 닫음(오디오 요소가 다 틀었는지는 확장 판단)
+   - 200 {"ok":true,"done":false} = 만드는 중·흘리는 중·아직 안 열림
+   - 200 {"ok":false,"code","error"} = 실패, 취소(code cancelled), 만료(code expired). 결과 조회 자체의 상태 번호는 200 이고, id 를 모르면 404 입니다.
+4. 취소 — DELETE /v1/tts/noeul/stream/<id> → 200 {"ok":true}(이미 끝난 것도 200, 결과는 그대로) / 모르는 id 404. 안 연 것과 흘리는 중인 것 모두 취소되고, 흘리는 중이면 연결이 닫힙니다.
+5. 연결 자리: 동시 12 는 그대로입니다. 자리가 나면 순서표가 가장 앞선 대기자가 받습니다. 순서표는 (맡긴 순번, 문단 안 조각 번호)라 먼저 맡긴 문단의 조각부터 들어갑니다. 문단 안 동시 8 도 그대로라, 지금 문단 8 + 다음 문단 4 가 먼저 돌고 나머지는 기다립니다. PC 앱 직접 읽기도 같은 자리를 온 순서로 씁니다.
+6. 옛 길 POST /v1/tts/noeul 은 그대로 둡니다(옛 확장·되돌리기용).
+
+## 확장이 알아야 할 제약
+- id 유효 시간(Claude 가 정함): 맡긴 뒤 10분 안에 GET 을 열지 않으면 취소합니다(결과 code expired). 끝난 결과(다 흘림·실패·취소·만료)는 끝난 뒤 10분 기억하고 지웁니다(그 뒤 404). 청소는 맡기기·결과 확인 때만 합니다. 근거: 다 만든 뒤에는 라이브 연결이 닫혀 과금이 없고 메모리만 듭니다(750자 문단 ≈ 2분 소리 ≈ 6MB). 지금 문단을 듣는 동안이나 일시정지 동안 뒤 문단이 기다리는 시간으로 넉넉히 잡았습니다.
+- 맡긴 문단은 DELETE 전까지 끝까지 만듭니다(과금). 건너뛴 미리 맡긴 문단은 꼭 DELETE 해 주세요. 맡길 수 있는 작업 수 상한은 없으니 "지금 + 다음 2개"를 확장 쪽에서 지켜 주세요.
+- 크롬이 받기를 멈추면(일시정지로 버퍼가 참) 이 앱은 그대로 기다리고 만들기는 계속 쌓입니다. 크롬이 그 연결을 닫으면 취소로 처리되니 다시 맡겨야 합니다.
+- 첫 소리: 빠르기 1배면 시작 전 모음이 1초라 머리글과 함께 192KB 가 갑니다. 크롬이 250KB 를 채우려고 약 0.3초 더 기다립니다. 빠르기가 높을수록 시작 전 모음이 길어져(PC 앱과 같음) 크롬 쪽 대기는 사라집니다.
+- 사용량: 이 앱은 흘림 몫을 세지 않습니다(확장이 done:true 인 것만 세는 그쪽 결정대로).
+
+## 확인한 것 / 못 한 것
+- 시험: 가짜 만들기로 새 시험 29개(실제 포트에 띄운 창구 포함 — 머리글·Range·한 번만·결과·취소·OPTIONS·소켓 닫기 → 취소, 늘리기 바이트, 순서표 순서, 10분 보관). 전체 559개 통과, 창구·노을 시험 다섯 번 되풀이 모두 통과.
+- 실제 OpenAI 노을로 흘리는 것과 크롬 오디오 요소 재생은 아직 확인하지 못했습니다. 이 PC 설치본(11-18 15:15 판)에는 이 길이 없어 404 입니다. 새 판 빌드·설치는 이쪽 리규형님 결정 뒤에 합니다.
+
+## 고친 파일
+- noeul_live.py — 연결 자리를 순서표 방식(_Slots, new_group)으로 · read_noeul(priority=) · STATUS/MESSAGES 에 not_found 404·expired 410 · wav_stream_header · StreamWidener(48kHz 두 채널) · ExtensionStreams(맡기기·흘림·결과·취소·청소) · STREAM_RATE/STREAM_CHANNELS/STREAM_KEEP_S
+- tts_engine.py — make_noeul_synthesize().stream(lang=, group=): 조각마다 lang 과 순서표 (group, 조각 번호)를 넘김 · 실패(SegmentFailed)에 code 를 붙임
+- tts_usage.py — NOEUL_STREAM_PATH·흘림 id 길 · UsageReceiver(noeul_stream=) · 네 길 + OPTIONS · 옛 노을 길의 본문 읽기를 공통 함수로 뺌(동작 같음)
+- whisperer.py — 창구에 ExtensionStreams 연결(키 = 인증 창 OpenAI 키, 사용량 안 셈)
+- tests/test_noeul_stream_route.py — 새로(29개)
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "20321079-a1f6-42fc-b213-1d4c233c1cd5",
+  "attempt_id": "89a188d3-3796-47b6-9426-ee4cec57df93",
+  "conversation_id": "5848a4d0-5c84-42d0-856c-4db2da955061",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "completed",
+  "created_at": "2026-11-18T06:59:56.742Z",
+  "body_sha256": "3d9977c2990ec6b10f9550def9795d8475ed93c20bfa404d9a60662204ee89c9",
+  "body": "완료했습니다 — 파일 수정만 했습니다(커밋·빌드·설치·CLAUDE.md 는 이쪽 리규형님 몫이라 안 함). 거의 제안 규격 그대로이고, 다른 점은 아래에 표시했습니다.\n\n## 최종 규격\n공통: 모든 길은 Origin 이 chrome-extension:// 로 시작해야 합니다(아니면 403 {\"ok\":false,\"code\":\"origin\",\"error\"}). 답에는 Access-Control-Allow-Origin: <요청 Origin>, Vary: Origin, Access-Control-Expose-Headers: X-Usage-Key, Cache-Control: no-store 가 붙습니다. OPTIONS 사전 확인도 받습니다(204 · Allow-Methods GET, POST, DELETE · Allow-Headers Content-Type).\n\n1. 맡기기 — POST /v1/tts/noeul/stream, JSON {\"v\":1,\"text\",\"lang\",\"rate\"}\n   - 본문 상한 16KB(옛 길과 같음, 한글 약 5,000자). text 가 비면 400. lang 은 ko·en·ja·zh·es·fr·ar. rate 는 0보다 큰 유한한 수(없으면 1, 문자열·true 는 400)이고, 조각 계획과 시작 전 모음 계산에만 씁니다.\n   - 성공: 200 {\"ok\":true,\"id\":\"<24자 무작위 A-Za-z0-9_->\"} + X-Usage-Key(옛 길과 같은 키 칸 이름). 받는 즉시 만들기를 시작합니다.\n   - 실패: 400 bad_request(v·text·lang·rate·json·length) · 413 size · 403 origin · 503 no_key · 500 internal. 본문은 모두 {\"ok\":false,\"code\",\"error\"}.\n2. 흘림 — GET /v1/tts/noeul/stream/<id>\n   - 200 audio/wav. Content-Length 가 없고, HTTP/1.0 응답이라 다 보내면 연결을 닫습니다. Range 는 무시하고 200 으로 처음부터 줍니다.\n   - 소리: 44바이트 WAV 머리(RIFF·data 길이 칸 0xFFFFFFFF) + PCM 16비트 · 48kHz · 두 채널(두 채널 같은 값). [다른 점] 24kHz 를 늘릴 때 값을 두 번 쓰지 않고, 표본 사이에 앞뒤 평균을 끼웁니다(선형 보간). 두 번 쓰면 12kHz 위에 거울 잡음이 남아서입니다. 바이트 수는 같습니다(초당 192KB).\n   - [다른 점] 흘리기 시작 = PC 앱 재생기와 같게 \"시작 전 모음\"(stream_start_sec(첫 조각, rate) = max(1, 첫 조각 글자 수/6.5×(1−1/r)+0.4)초, r=max(1,rate))만큼 쌓인 뒤입니다. 그동안은 머리글도 보내지 않습니다. 그 뒤로는 오는 대로 보냅니다.\n   - 흘리기 전 실패: 오류 상태 번호 + JSON. 401 unauthorized·ip_not_authorized · 502 no_audio·connect·server · 504 timeout · 500 internal · 499 cancelled(이미 취소됨) · 410 expired(10분 동안 안 열림) · 404 not_found(없는 id 또는 두 번째 GET).\n   - 흘리는 중 실패: 쌓인 데까지 보내고 연결을 닫습니다. 실패 여부는 결과 길로 알 수 있습니다.\n   - 연결 끊김(src 지움): 0.1초마다 확인해 라이브 연결을 닫습니다(만드는 스레드가 다시 0.1초 안에 봄 — 합쳐 약 0.2초 안).\n   - 한 id 는 한 번만 흘립니다(두 번째 GET 은 404 not_found).\n3. 결과 — GET /v1/tts/noeul/stream/<id>/result\n   - 200 {\"ok\":true,\"done\":true} = 이 앱이 마지막 바이트까지 보내고 연결을 닫음(오디오 요소가 다 틀었는지는 확장 판단)\n   - 200 {\"ok\":true,\"done\":false} = 만드는 중·흘리는 중·아직 안 열림\n   - 200 {\"ok\":false,\"code\",\"error\"} = 실패, 취소(code cancelled), 만료(code expired). 결과 조회 자체의 상태 번호는 200 이고, id 를 모르면 404 입니다.\n4. 취소 — DELETE /v1/tts/noeul/stream/<id> → 200 {\"ok\":true}(이미 끝난 것도 200, 결과는 그대로) / 모르는 id 404. 안 연 것과 흘리는 중인 것 모두 취소되고, 흘리는 중이면 연결이 닫힙니다.\n5. 연결 자리: 동시 12 는 그대로입니다. 자리가 나면 순서표가 가장 앞선 대기자가 받습니다. 순서표는 (맡긴 순번, 문단 안 조각 번호)라 먼저 맡긴 문단의 조각부터 들어갑니다. 문단 안 동시 8 도 그대로라, 지금 문단 8 + 다음 문단 4 가 먼저 돌고 나머지는 기다립니다. PC 앱 직접 읽기도 같은 자리를 온 순서로 씁니다.\n6. 옛 길 POST /v1/tts/noeul 은 그대로 둡니다(옛 확장·되돌리기용).\n\n## 확장이 알아야 할 제약\n- id 유효 시간(Claude 가 정함): 맡긴 뒤 10분 안에 GET 을 열지 않으면 취소합니다(결과 code expired). 끝난 결과(다 흘림·실패·취소·만료)는 끝난 뒤 10분 기억하고 지웁니다(그 뒤 404). 청소는 맡기기·결과 확인 때만 합니다. 근거: 다 만든 뒤에는 라이브 연결이 닫혀 과금이 없고 메모리만 듭니다(750자 문단 ≈ 2분 소리 ≈ 6MB). 지금 문단을 듣는 동안이나 일시정지 동안 뒤 문단이 기다리는 시간으로 넉넉히 잡았습니다.\n- 맡긴 문단은 DELETE 전까지 끝까지 만듭니다(과금). 건너뛴 미리 맡긴 문단은 꼭 DELETE 해 주세요. 맡길 수 있는 작업 수 상한은 없으니 \"지금 + 다음 2개\"를 확장 쪽에서 지켜 주세요.\n- 크롬이 받기를 멈추면(일시정지로 버퍼가 참) 이 앱은 그대로 기다리고 만들기는 계속 쌓입니다. 크롬이 그 연결을 닫으면 취소로 처리되니 다시 맡겨야 합니다.\n- 첫 소리: 빠르기 1배면 시작 전 모음이 1초라 머리글과 함께 192KB 가 갑니다. 크롬이 250KB 를 채우려고 약 0.3초 더 기다립니다. 빠르기가 높을수록 시작 전 모음이 길어져(PC 앱과 같음) 크롬 쪽 대기는 사라집니다.\n- 사용량: 이 앱은 흘림 몫을 세지 않습니다(확장이 done:true 인 것만 세는 그쪽 결정대로).\n\n## 확인한 것 / 못 한 것\n- 시험: 가짜 만들기로 새 시험 29개(실제 포트에 띄운 창구 포함 — 머리글·Range·한 번만·결과·취소·OPTIONS·소켓 닫기 → 취소, 늘리기 바이트, 순서표 순서, 10분 보관). 전체 559개 통과, 창구·노을 시험 다섯 번 되풀이 모두 통과.\n- 실제 OpenAI 노을로 흘리는 것과 크롬 오디오 요소 재생은 아직 확인하지 못했습니다. 이 PC 설치본(11-18 15:15 판)에는 이 길이 없어 404 입니다. 새 판 빌드·설치는 이쪽 리규형님 결정 뒤에 합니다.\n\n## 고친 파일\n- noeul_live.py — 연결 자리를 순서표 방식(_Slots, new_group)으로 · read_noeul(priority=) · STATUS/MESSAGES 에 not_found 404·expired 410 · wav_stream_header · StreamWidener(48kHz 두 채널) · ExtensionStreams(맡기기·흘림·결과·취소·청소) · STREAM_RATE/STREAM_CHANNELS/STREAM_KEEP_S\n- tts_engine.py — make_noeul_synthesize().stream(lang=, group=): 조각마다 lang 과 순서표 (group, 조각 번호)를 넘김 · 실패(SegmentFailed)에 code 를 붙임\n- tts_usage.py — NOEUL_STREAM_PATH·흘림 id 길 · UsageReceiver(noeul_stream=) · 네 길 + OPTIONS · 옛 노을 길의 본문 읽기를 공통 함수로 뺌(동작 같음)\n- whisperer.py — 창구에 ExtensionStreams 연결(키 = 인증 창 OpenAI 키, 사용량 안 셈)\n- tests/test_noeul_stream_route.py — 새로(29개)"
+}
+```
