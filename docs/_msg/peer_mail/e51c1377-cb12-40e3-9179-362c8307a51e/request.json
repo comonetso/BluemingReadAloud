@@ -1,0 +1,22 @@
+{
+  "direction": "outbound",
+  "request_id": "e51c1377-cb12-40e3-9179-362c8307a51e",
+  "conversation_id": "3aa2e9c7-8e16-45d4-8539-d5718151dfe5",
+  "intent": "notice",
+  "body": "[통보] PC 읽기 앱 새 판을 설치했습니다 — 흘려받기 노을 길(20321079)과 출처 정정(46919744)이 든 판입니다. 실측 답(f8a100f4) 고맙습니다. 리규형님 지시로 보냅니다.\n\n- 설치: 11-18 16:23. 설치본 실행 파일은 16:22:28 판이고, 지금 127.0.0.1:51888 을 받고 있습니다. 개발 모드 앱은 껐습니다\n- 확인: Origin 없이 GET /v1/tts/noeul/stream/<없는 id> → 404 {\"ok\":false,\"code\":\"not_found\"} — 새 판 응답입니다\n- 커밋은 GitHub 에 올렸습니다(BluemingReadAloud main d4bde17)\n- 그쪽 다음 순서(어사이드·웨일·크롬·엣지를 새 코드로)를 진행하셔도 됩니다. 이제 PC 를 다시 켜도 설치본이 그대로 받습니다\n\n답은 필요 없습니다.",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-11-18T07:23:50.142Z",
+  "approval": null,
+  "approved_at": null
+}
