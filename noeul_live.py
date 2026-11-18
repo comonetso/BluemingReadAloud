@@ -26,8 +26,8 @@
   끊김(크롬 확장 요청 090a8be2): 확장이 멈춤·건너뛰기로 요청 연결을 닫으면 창구가 알아채고(cancelled) 0.1초 안에 라이브
   연결을 닫는다(연결이 열린 시간만큼 과금되니까). 동시에 12개까지 따로 연결(LIVE_SESSIONS_MAX — 넘으면 차례를 기다린다).
 값: 세션 길이로 분당 0.05달러(초 단위). OpenAI 조직의 IP 허용 목록 밖에서는 401 ip_not_authorized.
-키: Paseo 키 파일 ~/.paseo/claude-state-bar/google.env 의 OPENAI_API_KEY (리규형님 11-18 버튼 "Paseo 키 파일을 읽기" —
-  이 앱 인증 창엔 OpenAI 칸이 없다). 요청마다 다시 읽어 Paseo 에서 키를 바꾸면 바로 따른다. 키 값은 기록하지 않는다.
+키: 이 앱 인증 창의 OpenAI 키 칸(설정 openai_api_key). 처음엔 Paseo 키 파일을 읽었으나 같은 날 리규형님이 "다른 저장소
+  것을 가져오지 말고 이 앱 설정에서 직접"으로 바꿨다(11-18). 확장 창구·앱 직접 읽기 모두 그 키. 키 값은 기록하지 않는다.
 웹소켓: 파이썬 기본(ssl·socket)만으로 짠 최소 클라이언트(LiveSocket — Paseo 의 Node 20 용 tlsLiveSocket 과 같은 범위).
   새 패키지를 들이지 않으려고(설치 파일 빌드에 영향 없음).
 기록: 글은 길이만 남긴다(측정 규칙).
@@ -78,7 +78,7 @@ _HANGUL_HEAD = re.compile(r"^[가-힣]{3}")   # 원문이 한글 세 글자로 �
 STATUS = {"bad_request": 400, "no_key": 503, "ip_not_authorized": 401, "unauthorized": 401, "timeout": 504,
           "no_audio": 502, "connect": 502, "server": 502, "internal": 500, "cancelled": 499}
 MESSAGES = {
-    "no_key": "PC 읽기 앱이 OpenAI 키를 찾지 못했습니다(Paseo 키 파일 google.env 의 OPENAI_API_KEY)",
+    "no_key": "PC 읽기 앱에 OpenAI 키가 없습니다(인증 창의 OpenAI 키 칸)",
     "ip_not_authorized": "OpenAI 가 이 PC 의 IP 를 허용하지 않습니다(조직 IP 허용 목록 밖)",
     "unauthorized": "OpenAI 가 키를 거절했습니다",
     "timeout": "음성 합성 시간 초과",
@@ -174,41 +174,32 @@ def wav_from_pcm(pcm, rate=LIVE_RATE):
 
 
 # ════════════════════════════════════════════════════════════════════
-# 키 — Paseo 키 파일에서 OPENAI_API_KEY
+# 키 — 이 앱 인증 창의 OpenAI 키 칸(2026-11-18 리규형님: 다른 저장소 파일 말고 이 앱 설정에서 직접)
 # ════════════════════════════════════════════════════════════════════
 
-_KEY_LINE = re.compile(r"^\s*(?:export\s+)?(OPENAI_API_KEY)\s*=\s*(.*?)\s*$")
+OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
 
 
-def paseo_keys_path():
-    """Paseo googleKeysFile — PASEO_HOME 이 있으면 그 아래, 없으면 ~/.paseo/claude-state-bar/google.env."""
-    base = os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
-    return os.path.join(base, "claude-state-bar", "google.env")
-
-
-def read_paseo_openai_key(path=None):
-    """Paseo 키 파일의 OPENAI_API_KEY 값(없거나 못 읽으면 None). 값 다듬기는 Paseo readGoogleKeys 와 같다 —
-    따옴표로 감쌌으면 닫는 따옴표까지(뒤엔 주석만 허용), 아니면 ' #' 뒤 주석을 뗀다. 같은 이름이 여러 줄이면 마지막 줄."""
+def check_openai_key(key, timeout, *, opener=None):
+    """인증 창 "저장" 때 OpenAI 키를 한 번 확인한다 — 모델 목록 조회(과금 없음). 통과하면 None, 실패면 RuntimeError.
+    문장은 창에 보일 짧은 것 — OpenAI 오류의 code(invalid_api_key·ip_not_authorized 등)만 쓰고 message 는 쓰지 않는다
+    (message 엔 키 일부가 들어 있다). timeout 은 Google·Gemini 키 확인과 같은 값을 부르는 쪽이 넘긴다. opener 는 시험용."""
+    import urllib.error
+    import urllib.request
+    request = urllib.request.Request(OPENAI_MODELS_URL, headers={"Authorization": f"Bearer {key}"})
     try:
-        with open(path or paseo_keys_path(), encoding="utf-8") as f:
-            content = f.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-    key = None
-    for line in content.lstrip("﻿").splitlines():
-        m = _KEY_LINE.match(line)
-        if not m:
-            continue
-        value = m.group(2)
-        if value[:1] in ("\"", "'"):
-            end = value.find(value[0], 1)
-            if end < 0 or not re.match(r"^\s*(?:#.*)?$", value[end + 1:]):
-                continue
-            value = value[1:end].strip()
-        else:
-            value = re.sub(r"\s+#.*$", "", value).strip()
-        key = value or None
-    return key
+        with (opener or urllib.request.urlopen)(request, timeout=timeout):
+            return None
+    except urllib.error.HTTPError as e:
+        code = ""
+        try:
+            error = json.loads(e.read().decode("utf-8")).get("error") or {}
+            code = error.get("code") or error.get("type") or ""
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code}" + (f" {code}" if code else "")) from None
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError(f"{type(e).__name__}: {getattr(e, 'reason', e)}") from None
 
 
 def usage_key_id(key):
@@ -683,7 +674,7 @@ def error_body(code, message=None):
                       ensure_ascii=False).encode("utf-8")
 
 
-def handle_extension_request(payload, cancelled=None, *, log=None, key_reader=read_paseo_openai_key, reader=read_noeul):
+def handle_extension_request(payload, cancelled=None, *, key_reader, log=None, reader=read_noeul):
     """확장 본문 {"v":1,"text":"…","lang":"ko"} → (상태 번호, Content-Type, 본문 bytes, 더할 머리글 dict).
     성공 = 200 audio/wav + X-Usage-Key(키별 사용량 칸 이름 12글자). 실패 = STATUS 번호 + {"ok":false,"code","error"}.
     cancelled() = 확장이 요청 연결을 닫았나(창구가 넘긴다) — 참이 되면 노을 연결을 닫는다.

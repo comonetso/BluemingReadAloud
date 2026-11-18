@@ -251,7 +251,7 @@ class TestGeminiTranslator(unittest.TestCase):
         self.assertEqual(url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent")
         self.assertEqual(headers, {"x-goog-api-key": "KEY-123"})
         self.assertNotIn("KEY-123", url)                 # 키는 URL 에 넣지 않는다(로그로 새지 않게)
-        self.assertEqual(timeout, 3.0)                   # 사용자 결정 제한 시간
+        self.assertEqual(timeout, tr.TIMEOUT)             # 번역 요청 10초(11-18 리규형님 — Paseo 와 같게)
         self.assertEqual(json.loads(body["contents"][0]["parts"][0]["text"]), ["Hello"])
         self.assertEqual(body["generationConfig"]["responseMimeType"], "application/json")
         self.assertIn("programming terms", body["systemInstruction"]["parts"][0]["text"])
@@ -286,7 +286,7 @@ class TestCheckGeminiKey(unittest.TestCase):
         url, headers, timeout = session.gets[0]
         self.assertEqual(url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite")
         self.assertEqual(headers, {"x-goog-api-key": "KEY-9"})
-        self.assertEqual(timeout, 3.0)
+        self.assertEqual(timeout, tr.KEY_CHECK_TIMEOUT)   # 키 확인은 3초 그대로
 
     def test_wrong_key_or_network(self):
         with self.assertRaises(tr.TranslationError) as cm:
@@ -297,6 +297,118 @@ class TestCheckGeminiKey(unittest.TestCase):
         with self.assertRaises(tr.TranslationError):
             tr.check_gemini_key("", session=FakeSession())
 
+
+
+class ReplySession:
+    """요청마다 reply(url, json, headers) 로 응답을 만든다 — 다시 보내기·나눠 보내기 시험용(여러 스레드가 함께 불러도 된다)."""
+    def __init__(self, reply):
+        import threading
+        self.reply = reply
+        self.posts = []
+        self.gets = []
+        self._lock = threading.Lock()
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        with self._lock:
+            self.posts.append((url, json, headers, timeout))
+            return self.reply(url, json, headers)
+
+    def get(self, url, headers=None, timeout=None):
+        with self._lock:
+            self.gets.append((url, headers, timeout))
+            return self.reply(url, None, headers)
+
+
+def openai_reply(content, finish="stop"):
+    return FakeResponse(200, {"choices": [{"finish_reason": finish, "message": {"content": content}}]})
+
+
+def claude_reply(text, stop="end_turn", **extra):
+    return FakeResponse(200, {"content": [{"type": "text", "text": text}], "stop_reason": stop, **extra})
+
+
+class TestProviders(unittest.TestCase):
+    """번역 공급자 고르기(2026-11-18 리규형님 — Paseo 처럼 Gemini·OpenAI·Claude)."""
+
+    def test_openai_request_shape_and_result(self):
+        s = ReplySession(lambda url, body, headers: openai_reply('["안녕하세요"]'))
+        self.assertEqual(tr.OpenAITranslator("sk-k", session=s)(["hello"]), ["안녕하세요"])
+        url, body, headers, timeout = s.posts[0]
+        self.assertEqual(url, "https://api.openai.com/v1/chat/completions")
+        self.assertEqual((body["model"], body["temperature"]), ("gpt-4.1-mini", 0))   # Paseo openaiText.ts
+        self.assertEqual(body["messages"], [{"role": "system", "content": tr.SYSTEM_INSTRUCTION},
+                                            {"role": "user", "content": '["hello"]'}])
+        self.assertEqual((headers, timeout), ({"Authorization": "Bearer sk-k"}, tr.TIMEOUT))
+
+    def test_openai_reply_error_is_not_sent_again(self):
+        s = ReplySession(lambda url, body, headers: openai_reply('["x"]', finish="length"))
+        with self.assertRaises(tr.TranslationError) as ctx:
+            tr.OpenAITranslator("sk-k", session=s)(["hello"])
+        self.assertEqual((str(ctx.exception), len(s.posts)), ("OpenAI 응답 형식 오류", 1))   # Paseo: 다시 보내지 않는다
+
+    def test_claude_request_shape_code_fence_and_backslashes(self):
+        doubled = json.dumps(["C:\\\\Users\\\\a 폴더"], ensure_ascii=False)   # 경로 역슬래시를 두 겹으로 돌려줌
+        s = ReplySession(lambda url, body, headers: claude_reply("```json\n" + doubled + "\n```"))
+        out = tr.ClaudeTranslator("ant-k", session=s)(["C:\\Users\\a folder"])
+        self.assertEqual(out, ["C:\\Users\\a 폴더"])   # 울타리를 벗기고 원문 경로대로 되돌린다
+        url, body, headers, timeout = s.posts[0]
+        self.assertEqual(url, "https://api.anthropic.com/v1/messages")
+        self.assertEqual((body["model"], body["max_tokens"], body["system"]), ("claude-haiku-5-5", 128000, tr.SYSTEM_INSTRUCTION))
+        self.assertNotIn("temperature", body)   # Haiku 5.5 는 temperature 를 받지 않는다(Paseo translate.ts:84)
+        self.assertEqual(headers, {"x-api-key": "ant-k", "anthropic-version": "2023-06-01"})
+        self.assertEqual(timeout, tr.TIMEOUT)
+
+    def test_claude_refusal_is_sent_again_once(self):
+        s = ReplySession(lambda url, body, headers: claude_reply("", stop="refusal", stop_details={"category": "cyber"}))
+        with self.assertRaises(tr.TranslationError) as ctx:
+            tr.ClaudeTranslator("ant-k", session=s)(["hello"])
+        self.assertEqual(str(ctx.exception), "번역 거절됨(안전 검사: cyber) · 다시 보내도 실패")
+        self.assertEqual(len(s.posts), 2)
+
+    def test_claude_splits_into_fives_and_keeps_order(self):
+        def reply(url, body, headers):
+            texts = json.loads(body["messages"][0]["content"])
+            return claude_reply(json.dumps([t.upper() for t in texts]))
+        s = ReplySession(reply)
+        texts = [f"t{i}" for i in range(12)]
+        self.assertEqual(tr.ClaudeTranslator("ant-k", session=s)(texts), [t.upper() for t in texts])
+        self.assertEqual(sorted(len(json.loads(p[1]["messages"][0]["content"])) for p in s.posts), [2, 5, 5])
+
+    def test_format_error_is_sent_again_once(self):
+        replies = iter([FakeResponse(200, {"candidates": [{"content": {"parts": [{"text": "not json"}]}}]}),
+                        FakeResponse(200, {"candidates": [{"content": {"parts": [
+                            {"text": "생각", "thought": True}, {"text": '["번역"]'}]}}]})])
+        s = ReplySession(lambda url, body, headers: next(replies))
+        self.assertEqual(tr.GeminiTranslator("g-k", session=s)(["text"]), ["번역"])   # 생각 조각은 뺀다
+        self.assertEqual(len(s.posts), 2)
+
+    def test_key_in_reply_is_not_sent_again(self):
+        # 공통 검사(Paseo translateOnce). OpenAI 는 그 앞에서 "OpenAI 응답 형식 오류"로 끝나므로 Gemini 응답으로 본다
+        s = ReplySession(lambda url, body, headers: FakeResponse(200, {"candidates": [{"content": {"parts": [
+            {"text": '["g-k 가 섞임"]'}]}}]}))
+        with self.assertRaises(tr.TranslationError) as ctx:
+            tr.GeminiTranslator("g-k", session=s)(["hello"])
+        self.assertEqual(str(ctx.exception), "번역 응답 형식 오류(응답에 키가 섞임)")
+        self.assertEqual(len(s.posts), 1)   # 다시 보내지 않는다
+
+    def test_check_anthropic_key(self):
+        s = ReplySession(lambda url, body, headers: FakeResponse(200, {"data": []}))
+        self.assertIsNone(tr.check_anthropic_key("ant-k", session=s))
+        self.assertEqual(s.gets, [("https://api.anthropic.com/v1/models",
+                                   {"x-api-key": "ant-k", "anthropic-version": "2023-06-01"}, tr.KEY_CHECK_TIMEOUT)])
+        bad = FakeResponse(401, {"error": {"type": "authentication_error", "message": "invalid x-api-key ant-k"}})
+        with self.assertRaises(tr.TranslationError) as ctx:
+            tr.check_anthropic_key("ant-k", session=ReplySession(lambda *a: bad))
+        self.assertEqual(str(ctx.exception), "HTTP 401 authentication_error")   # 설명문(키 조각)은 쓰지 않는다
+
+    def test_make_translator_by_provider(self):
+        self.assertIsInstance(tr.make_translator("google", gemini_key="g"), tr.GeminiTranslator)
+        self.assertIsInstance(tr.make_translator("openai", openai_key="o"), tr.OpenAITranslator)
+        self.assertIsInstance(tr.make_translator("anthropic", anthropic_key="a"), tr.ClaudeTranslator)
+        missing = tr.make_translator("anthropic", gemini_key="g")
+        self.assertIsInstance(missing, tr.MissingTranslator)
+        self.assertIn("Claude 키", missing.reason)
+        self.assertEqual(tr.PROVIDERS, ("google", "openai", "anthropic"))
 
 if __name__ == "__main__":
     unittest.main()

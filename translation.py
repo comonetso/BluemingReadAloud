@@ -13,8 +13,12 @@
     처음엔 서비스 계정(Vertex AI)으로 만들었다가 같은 날 사용자 결정으로 키 방식으로 바꿨다. 키는 TTS 키와 따로다 —
     구글이 Gemini 키는 서비스 계정에 묶게 하고 묶인 키는 TTS 를 못 부른다(실측: Gemini 키로 TTS 401,
     TTS 키로 Gemini 403). 그래서 인증 창에 키 두 칸(whisperer.show_api_key_dialog).
+  - 2026-11-18 리규형님: 번역 공급자를 Paseo 처럼 고른다 — Google(Gemini)·OpenAI·Claude(인증 창 맨 위).
+    OpenAI·Claude 의 모델·요청 모양·다시 보내기 규칙은 Paseo server/presentation/translate.ts·openaiText.ts 그대로.
+    번역 지시문(SYSTEM_INSTRUCTION)은 이 앱 것 — Paseo 지시문은 "AI 생각 상자"용이다. make_translator 가 고른 공급자 번역기를 만든다.
   - 번역이 실패하면 그 조각을 읽을 차례에 읽기를 멈추고 알린다 → tts_engine.SegmentFailed.
-    번역 한 번이 TIMEOUT(3초)을 넘으면 실패다(사용자 결정. 실측 0.87~1.55초, 12회).
+    요청 하나가 TIMEOUT(10초)을 넘으면 실패다(2026-11-18 리규형님 "Paseo 와 같은 10초" — 처음엔 3초, 9-29 Gemini 실측 0.87~1.55초).
+    거절·형식 오류는 같은 요청을 한 번만 다시 보낸다(Paseo translateBatch, 10-13 리규형님 결정).
   - 설정 창 체크(translate_enabled), 처음 값은 켬.
 
 구현하며 정한 것 (2026-09-29 사용자에게 알림)
@@ -40,16 +44,30 @@ import readaloud_text
 from tts_engine import SegmentFailed
 
 __all__ = [
-    "MODEL", "API_BASE", "TIMEOUT", "TranslationError", "GeminiTranslator", "MissingTranslator", "check_gemini_key",
+    "MODEL", "API_BASE", "TIMEOUT", "KEY_CHECK_TIMEOUT", "PROVIDERS", "OPENAI_MODEL", "ANTHROPIC_MODEL",
+    "TranslationError", "GeminiTranslator", "OpenAITranslator", "ClaudeTranslator", "MissingTranslator",
+    "make_translator", "check_gemini_key", "check_anthropic_key",
     "supports", "has_primary", "needs_translation", "sentence_spans", "plan", "translate_segment",
     "mark_for_translation", "make_translating_synthesize",
 ]
 
 MODEL = "gemini-3.5-flash-lite"   # 2026-09 Gemini API 문서가 새 프로젝트에 권하는 저지연 모델(정식판)
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-# 번역 한 번의 제한 시간(초). 2026-09-29 사용자 결정 — 실측 0.87~1.55초(12회, 가운데 약 1초).
-# 넘으면 그 조각 차례에 읽기를 멈추고 알린다. 인증 창의 키 확인 요청도 같은 값을 쓴다.
-TIMEOUT = 3.0
+# 번역 요청 하나의 제한 시간(초). 2026-11-18 리규형님 "Paseo 와 같은 10초"(Paseo translate.ts REQUEST_TIMEOUT_MS) —
+# 처음엔 3초(2026-09-29 Gemini 실측 0.87~1.55초). 넘으면 그 조각 차례에 읽기를 멈추고 알린다.
+TIMEOUT = 10.0
+# 인증 창 "저장" 때 키 확인 요청의 제한 시간 — 예전 번역 제한 그대로 3초(Tk 화면에서 바로 하므로 짧게). 번역 10초와 따로 둔다.
+KEY_CHECK_TIMEOUT = 3.0
+
+PROVIDERS = ("google", "openai", "anthropic")   # 번역 공급자 — Paseo shared/presentation/speech.ts translateProviderSchema
+OPENAI_MODEL = "gpt-4.1-mini"                   # Paseo server/presentation/openaiText.ts:3
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+ANTHROPIC_MODEL = "claude-haiku-5-5"            # Paseo server/presentation/translate.ts:13 (기획서 지정값)
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"   # 키 확인(모델 목록 — 과금 없음)
+ANTHROPIC_VERSION = "2023-06-01"                # Paseo translate.ts:82
+ANTHROPIC_MAX_TOKENS = 128_000                  # Paseo translate.ts:88 (Haiku 5.5 공식 최대 출력)
+ANTHROPIC_CHUNK = 5                             # Paseo translate.ts ANTHROPIC_CHUNK — 5문장씩 나눠 동시에(10-14 리규형님 결정)
 
 SYSTEM_INSTRUCTION = (
     "You translate text for a Korean text-to-speech reader. "
@@ -162,12 +180,58 @@ def translate_segment(text, translate):
 
 
 # ════════════════════════════════════════════════════════════════════
-# 번역기 — Gemini API (API 키)
+# 번역기 — 공급자 셋(Gemini·OpenAI·Claude). 고르는 건 make_translator
 # ════════════════════════════════════════════════════════════════════
 
 def _new_session():
     import requests   # google-cloud-texttospeech 가 이미 끌고 온 패키지(requirements.txt 에도 적어 둠)
     return requests.Session()
+
+
+class _Retry(TranslationError):
+    """거절·형식 오류 — 같은 요청을 한 번만 다시 보낸다(Paseo translate.ts translateBatch, 10-13 리규형님 결정).
+    시간 초과·HTTP 오류·키가 섞인 응답은 다시 보내지 않는다(그건 TranslationError)."""
+
+
+def _strip_code_fence(raw):
+    """응답을 감싼 ```json … ``` 를 벗긴다 — Paseo translate.ts stripCodeFence(Haiku 5.5 가 가끔 감싼다, 10-12 실측 7번 중 3번)."""
+    m = re.match(r"^```[A-Za-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?```$", raw.strip())
+    return m.group(1) if m else raw
+
+
+def _restore_source_backslashes(source, translated):
+    """Claude 가 원문 경로의 역슬래시를 두 겹으로 돌려준 것만 원문 토큰과 대조해 되돌린다 — Paseo restoreSourceBackslashes."""
+    for token in re.findall(r"[^\s\"`'<>]*\\[^\s\"`'<>]+", source):
+        translated = translated.replace(token.replace("\\", "\\\\"), token)
+    return translated
+
+
+def _parse_translations(raw, texts, key):
+    """응답 글 → 번역 목록. Paseo translateOnce 의 공통 검사(JSON 배열·같은 개수·빈 번역 없음·키 섞임 없음)."""
+    try:
+        out = json.loads(_strip_code_fence(raw))
+    except ValueError:
+        raise _Retry("번역 응답 형식 오류(JSON 아님)") from None
+    if not isinstance(out, list):
+        raise _Retry("번역 응답 형식 오류(배열 아님)")
+    if len(out) != len(texts):
+        raise _Retry(f"번역 응답 형식 오류(문장 수 {len(out)}/{len(texts)})")
+    if not all(isinstance(t, str) and t.strip() for t in out):
+        raise _Retry("번역 응답 형식 오류(빈 번역)")
+    if key and any(key in t for t in out):
+        raise TranslationError("번역 응답 형식 오류(응답에 키가 섞임)")
+    return out
+
+
+def _twice(once, texts):
+    """once(texts) 가 _Retry 로 실패하면 한 번만 다시. 두 번째도 실패면 Paseo 처럼 " · 다시 보내도 실패" 를 붙인다."""
+    try:
+        return once(texts)
+    except _Retry:
+        try:
+            return once(texts)
+        except TranslationError as second:
+            raise TranslationError(f"{second} · 다시 보내도 실패") from None
 
 
 class GeminiTranslator:
@@ -182,14 +246,18 @@ class GeminiTranslator:
             raise TranslationError("Gemini 키가 없습니다")
         self.url = f"{API_BASE}/models/{model}:generateContent"
         self.model = model
+        self._key = api_key
         self._headers = {"x-goog-api-key": api_key}
         self._session = session or _new_session()
         self._timeout = timeout
 
     def __call__(self, texts):
+        return _twice(self._once, list(texts))
+
+    def _once(self, texts):
         body = {
             "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
-            "contents": [{"role": "user", "parts": [{"text": json.dumps(list(texts), ensure_ascii=False)}]}],
+            "contents": [{"role": "user", "parts": [{"text": json.dumps(texts, ensure_ascii=False)}]}],
             "generationConfig": {
                 "temperature": 0,
                 "responseMimeType": "application/json",
@@ -203,13 +271,110 @@ class GeminiTranslator:
         if resp.status_code != 200:
             raise TranslationError(f"번역 요청 실패 (HTTP {resp.status_code}): {_error_message(resp)}")
         try:
-            data = resp.json()
-            parts = data["candidates"][0]["content"]["parts"]
-            raw = "".join(p.get("text", "") for p in parts)
-            out = json.loads(raw)
+            parts = resp.json()["candidates"][0]["content"]["parts"]
+            raw = "".join(p.get("text", "") for p in parts if not p.get("thought"))   # Paseo 처럼 생각 조각은 뺀다
         except Exception as e:
-            raise TranslationError(f"번역 응답을 읽지 못했습니다: {e}") from e
-        return out
+            raise _Retry(f"번역 응답을 읽지 못했습니다: {e}") from e
+        return _parse_translations(raw, texts, self._key)
+
+
+class OpenAITranslator:
+    """OpenAI 글 모델 번역 — Paseo openaiText.ts 와 같은 요청(chat completions, temperature 0)."""
+
+    def __init__(self, api_key, model=OPENAI_MODEL, timeout=TIMEOUT, session=None):
+        if not api_key:
+            raise TranslationError("OpenAI 키가 없습니다")
+        self.model = model
+        self._key = api_key
+        self._session = session or _new_session()
+        self._timeout = timeout
+
+    def __call__(self, texts):
+        return _twice(self._once, list(texts))
+
+    def _once(self, texts):
+        body = {"model": self.model, "temperature": 0, "messages": [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
+        ]}
+        try:
+            resp = self._session.post(OPENAI_URL, json=body, headers={"Authorization": f"Bearer {self._key}"},
+                                      timeout=self._timeout)
+        except Exception as e:
+            raise TranslationError(f"번역 요청 실패: {e}") from e
+        if resp.status_code != 200:
+            raise TranslationError(f"OpenAI HTTP {resp.status_code}")
+        try:
+            choice = resp.json()["choices"][0]
+            message = choice.get("message") or {}
+            value = message.get("content")
+        except Exception:
+            raise TranslationError("OpenAI 응답 형식 오류") from None
+        # Paseo openaiText: 끝난 이유·거절·글 아님·키 섞임은 "OpenAI 응답 형식 오류"로 끝낸다(다시 보내지 않는다)
+        if choice.get("finish_reason") != "stop" or message.get("refusal") or not isinstance(value, str) or self._key in value:
+            raise TranslationError("OpenAI 응답 형식 오류")
+        return _parse_translations(value, texts, self._key)
+
+
+class ClaudeTranslator:
+    """Claude 번역 — Paseo translate.ts 의 anthropic 요청 그대로. 5문장보다 많으면 5개씩 나눠 동시에 보낸다(ANTHROPIC_CHUNK).
+    나눈 요청은 각자 새 세션을 쓴다(requests 세션은 여러 스레드가 함께 쓰라고 만든 것이 아니다). session 은 시험용."""
+
+    def __init__(self, api_key, model=ANTHROPIC_MODEL, timeout=TIMEOUT, session=None, chunk=ANTHROPIC_CHUNK):
+        if not api_key:
+            raise TranslationError("Claude 키가 없습니다")
+        self.model = model
+        self._key = api_key
+        self._session_for = (lambda: session) if session is not None else _new_session
+        self._timeout = timeout
+        self._chunk = chunk
+
+    def __call__(self, texts):
+        texts = list(texts)
+        groups = [texts[i:i + self._chunk] for i in range(0, len(texts), self._chunk)] or [texts]
+        if len(groups) == 1:
+            return _twice(self._once, texts)
+        results, errors = [None] * len(groups), [None] * len(groups)
+
+        def run(i):
+            try:
+                results[i] = _twice(self._once, groups[i])
+            except Exception as e:
+                errors[i] = e
+
+        threads = [threading.Thread(target=run, args=(i,), name="claude-translate", daemon=True) for i in range(len(groups))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for e in errors:
+            if e is not None:
+                raise e if isinstance(e, TranslationError) else TranslationError(str(e))
+        return [t for group in results for t in group]
+
+    def _once(self, texts):
+        # Haiku 5.5 는 temperature 를 받지 않는다(Paseo translate.ts:84 — 넣으면 HTTP 400)
+        body = {"model": self.model, "system": SYSTEM_INSTRUCTION, "max_tokens": ANTHROPIC_MAX_TOKENS,
+                "messages": [{"role": "user", "content": json.dumps(texts, ensure_ascii=False)}]}
+        headers = {"x-api-key": self._key, "anthropic-version": ANTHROPIC_VERSION}
+        try:
+            resp = self._session_for().post(ANTHROPIC_URL, json=body, headers=headers, timeout=self._timeout)
+        except Exception as e:
+            raise TranslationError(f"번역 요청 실패: {e}") from e
+        if resp.status_code != 200:
+            raise TranslationError(f"Anthropic HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except Exception:
+            raise _Retry("번역 응답 형식 오류(JSON 아님)") from None
+        if data.get("stop_reason") == "refusal":   # 안전 검사 거절은 HTTP 200 + refusal(Paseo 주석) — 한 번 다시
+            category = (data.get("stop_details") or {}).get("category")
+            raise _Retry("번역 거절됨(안전 검사" + (f": {category}" if category else "") + ")")
+        if data.get("stop_reason") != "end_turn":
+            raise _Retry(f"번역 응답 형식 오류(끝난 이유 {data.get('stop_reason') or '없음'})")
+        raw = "".join(p.get("text", "") for p in (data.get("content") or []) if p.get("type") == "text")
+        out = _parse_translations(raw, texts, self._key)
+        return [_restore_source_backslashes(s, t) for s, t in zip(texts, out)]
 
 
 def _error_message(resp):
@@ -219,7 +384,7 @@ def _error_message(resp):
         return (resp.text or "")[:300]
 
 
-def check_gemini_key(api_key, model=MODEL, timeout=TIMEOUT, session=None):
+def check_gemini_key(api_key, model=MODEL, timeout=KEY_CHECK_TIMEOUT, session=None):
     """인증 창 "설정" 때 Gemini 키가 맞는지 확인한다 — 모델 정보 요청(GET) 한 번. 틀리면 TranslationError.
 
     실측(2026-09-29): Gemini 키 200(0.49초), TTS 키 403 — 두 칸을 바꿔 넣어도 잡힌다.
@@ -243,6 +408,40 @@ class MissingTranslator:
 
     def __call__(self, texts):
         raise TranslationError(f"번역기를 준비하지 못했습니다: {self.reason}")
+
+
+def check_anthropic_key(api_key, timeout=KEY_CHECK_TIMEOUT, session=None):
+    """인증 창 "저장" 때 Claude 키를 한 번 확인한다 — 모델 목록 조회(과금 없음). 틀리면 TranslationError.
+    Paseo 는 짧은 번역 한 번으로 확인하지만, 이 앱은 Google·OpenAI 키처럼 과금 없는 조회로 맞춘다(11-18 리규형님 "Google 키처럼").
+    문장은 오류 종류(error.type)만 — 설명문(message)엔 키 일부가 들어갈 수 있다."""
+    if not api_key:
+        raise TranslationError("Claude 키가 없습니다")
+    session = session or _new_session()
+    try:
+        resp = session.get(ANTHROPIC_MODELS_URL, headers={"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION},
+                           timeout=timeout)
+    except Exception as e:
+        raise TranslationError(f"확인 요청 실패: {type(e).__name__}") from e
+    if resp.status_code != 200:
+        try:
+            kind = resp.json()["error"]["type"]
+        except Exception:
+            kind = ""
+        raise TranslationError(f"HTTP {resp.status_code}" + (f" {kind}" if kind else ""))
+
+
+def make_translator(provider, *, gemini_key=None, openai_key=None, anthropic_key=None):
+    """고른 번역 공급자의 번역기. 키가 없거나 만들지 못하면 MissingTranslator — 읽기는 되고, 번역할 문장에서 멈추고 알린다."""
+    name, key, cls = {
+        "openai": ("OpenAI", openai_key, OpenAITranslator),
+        "anthropic": ("Claude", anthropic_key, ClaudeTranslator),
+    }.get(provider, ("Gemini", gemini_key, GeminiTranslator))
+    if not key:
+        return MissingTranslator(f"{name} 키가 설정되지 않았습니다 (설정 창 → 인증 설정)")
+    try:
+        return cls(key)
+    except Exception as e:
+        return MissingTranslator(str(e))
 
 
 # ════════════════════════════════════════════════════════════════════

@@ -251,6 +251,12 @@ KeyCode = None
 # Google 인증 — API 키 두 개 (2026-09-29 사용자 결정. 그 전엔 서비스 계정 JSON 경로 google_credentials_path)
 google_tts_api_key = None   # Cloud Text-to-Speech API 를 허용한 키. 없으면 시작할 때 필수 인증 창
 gemini_api_key = None       # Gemini API 를 허용한 키(번역용). 없어도 되고, 없으면 번역할 때 멈추고 알린다
+openai_api_key = None       # OpenAI 키(읽기 "노을"·번역 OpenAI용, 2026-11-18 인증 창 칸). 없으면 그 공급자로 읽기·번역할 때 경고
+anthropic_api_key = None    # Claude 키(번역 공급자 "Claude"용, 2026-11-18). 없으면 번역할 문장에서 읽기를 멈추고 알린다
+# 공급자(2026-11-18 리규형님 — Paseo 처럼 인증 창 맨 위에서 고른다. 고른 공급자의 키 칸·설명·목소리만 보인다)
+TTS_PROVIDERS = ("google", "openai")   # 읽기 공급자 — Paseo shared/presentation/speech.ts ttsProviderSchema
+tts_provider = "google"           # 읽기 공급자. 설정 창 목소리 목록은 이 공급자 것만(_voices_for)
+translate_provider = "google"     # 번역 공급자 — translation.PROVIDERS (google = Gemini · openai · anthropic = Claude)
 
 # Google Cloud TTS 관련 변수
 google_tts = None          # google.cloud.texttospeech 모듈 (요청 객체를 만들 때 씀). init_tts_client 가 채운다
@@ -263,13 +269,14 @@ translate_enabled = True   # 설정 창 "일반" 체크. 기본 켬(사용자 �
 # 번역된 조각은 원문 위 형광펜 막에 번역문을 쓴다(짙은 회색 바탕 + 흰 글씨, source_highlight caption). 끄면 노랑 형광펜만.
 translation_overlay_enabled = True   # 설정 창 "일반" 체크. 기본 켬(2026-09-29 사용자 결정 "옵션으로 빼고 기본은 레이어로")
 _translation_lookup = None  # (세션, 조각 글 → 번역문 함수). speak_text 가 넣고 session_end 가 비운다. Tk 메인에서만
-gemini_translator = None   # translation.GeminiTranslator(키가 없거나 못 만들었으면 MissingTranslator). init_tts_client 가 채운다
+active_translator = None   # 고른 번역 공급자의 번역기(translation.make_translator — 키가 없으면 MissingTranslator). _init_translator 가 채운다
 tts_hotkey_modifiers = {"ctrl": True, "shift": False, "alt": True} # 기본 TTS 단축키: Ctrl+Alt+D
 tts_hotkey_key = "D"
 # 기본 음성 모델 — 2026-10-28 Paseo 상태바 플러그인·크롬 확장과 같은 목소리로(리규형님 지시, 그 전 기본은 Callirrhoe).
 # 설정 창에서 고른 칸을 못 찾을 때도 이 값(2026-11-01 Paseo 기준 맞추기 — 그 전엔 옛 기본 Wavenet-A 였다)
 DEFAULT_VOICE = "ko-KR-Chirp3-HD-Zephyr"
 tts_voice_name = DEFAULT_VOICE
+tts_google_voice = DEFAULT_VOICE   # 마지막으로 고른 Google 목소리 — OpenAI 로 바꿨다 돌아오면 이 목소리(Paseo voice.google)
 tts_speaking_rate = 1.0   # 재생 속도(기본 1.0). 하단 바 목록·Ctrl+↑/↓ 로 고른다 — 늘 tts_rate_step 간격의 값(tts_engine.snap_rate)
 tts_rate_step = tts_engine.DEFAULT_RATE_STEP   # 속도 간격 0.1(0.5~2배) / 0.25(0.5~5배) — 2026-10-28 Paseo 기준(그 전 10-24 는 0.7~2.0 / 0.5~3.0)
 tts_volume = 1.0          # 재생 볼륨 — 늘 1.0(2026-10-24 사용자 결정: 볼륨 막대 제거, 소리 크기는 윈도우 볼륨으로). 저장·읽기 안 함
@@ -490,18 +497,41 @@ def _format_hotkey(modifiers, key):
         parts.append(str(key))
     return "+".join(parts) if parts else "(없음)"
 
-def init_tts_client(tts_key, gemini_key=None):
-    """API 키로 Google Cloud TTS 클라이언트를 만들고, Gemini 키로 번역기를 만든다.
+def _voice_provider(voice_name):
+    """목소리 → 읽기 공급자(노을이면 openai, 그 밖은 google)."""
+    return "openai" if voice_name == tts_engine.NOEUL_VOICE else "google"
+
+
+def _voices_for(provider):
+    """읽기 공급자의 목소리 목록(설정 창) — Google 은 KOREAN_VOICES 의 Google 목소리, OpenAI 는 노을(Paseo OPENAI_VOICES)."""
+    return [v for v in KOREAN_VOICES if _voice_provider(v) == provider]
+
+
+def _set_tts_provider(provider):
+    """읽기 공급자를 바꾸고, 목소리가 그 공급자 것이 아니면 맞춘다(Google 은 마지막 Google 목소리, OpenAI 는 노을)."""
+    global tts_provider, tts_voice_name
+    tts_provider = provider if provider in TTS_PROVIDERS else "google"
+    if _voice_provider(tts_voice_name) != tts_provider:
+        tts_voice_name = tts_engine.NOEUL_VOICE if tts_provider == "openai" else (tts_google_voice or DEFAULT_VOICE)
+
+
+def _reading_ready():
+    """고른 읽기 공급자로 읽을 준비가 됐나 — 필수 인증 창을 닫아도 되나(Google: 클라이언트, OpenAI: 키)."""
+    return bool(openai_api_key) if tts_provider == "openai" else bool(google_tts_client)
+
+
+def init_tts_client(tts_key):
+    """API 키로 Google Cloud TTS 클라이언트를 만든다(번역기는 _init_translator — 2026-11-18 공급자 고르기로 나눔).
 
     반환:
-      True  — google_tts / google_tts_client 준비 완료 (번역기는 키가 없어도 MissingTranslator 로 채워진다)
+      True  — google_tts / google_tts_client 준비 완료
       False — google-cloud-texttospeech 모듈을 불러올 수 없어 건너뜀 (로그만 남김)
     TTS 키가 비었거나 클라이언트 생성이 실패하면 예외를 그대로 올린다(호출부가 인증 창을 띄우거나 오류를 표시한다).
     ⚠️ 클라이언트 생성은 키가 맞는지 확인하지 않는다(네트워크 요청 없음). 확인은 인증 창 "설정" 이 한다
        (_check_tts_key·translation.check_gemini_key). 시작할 때는 확인하지 않는다 — 인터넷이 끊긴 채 켜도 창이 뜨지 않게.
 
     부르는 곳 두 군데:
-      - main() 시작 때: 설정 파일의 키로 시도. TTS 키가 없거나 예외면 필수 인증 창.
+      - main() 시작 때: 설정 파일의 키로 시도. 읽기 공급자로 읽을 수 없으면(_reading_ready) 필수 인증 창.
       - show_api_key_dialog 의 "설정" 버튼: 확인을 통과한 키로 시도.
     왜 키 두 개인가 (2026-09-29 사용자 결정 — 그 전엔 서비스 계정 JSON 파일):
       - 구글이 Gemini API 키는 서비스 계정에 묶게 하고, 묶인 키는 Vertex·Gemini 만 부른다. 실측: Gemini 키로 TTS 는
@@ -533,14 +563,13 @@ def init_tts_client(tts_key, gemini_key=None):
     tts_usage_counter.adopt_keys(google_tts_key_mark)
     log_to_console("[TTS] Google Cloud TTS 클라이언트 초기화 성공 (API 키)")
     logging.info("Google Cloud TTS 클라이언트 초기화 완료 (API 키)")
-    _init_translator(gemini_key)
     return True
 
 def _check_tts_key(tts_key):
     """인증 창 "설정" 때 TTS 키가 맞는지 확인한다 — 한국어 음성 목록 요청 한 번. 틀리면 예외.
 
     실측(2026-09-29): TTS 키 성공(0.28초), Gemini 키 401 — 두 칸을 바꿔 넣어도 잡힌다.
-    제한 시간은 번역과 같은 값(translation.TIMEOUT, 3초 — 사용자가 번역에 정한 값을 같이 쓴다).
+    제한 시간은 translation.KEY_CHECK_TIMEOUT(3초 — 예전 번역 제한 값. 2026-11-18 번역 요청은 10초로 따로).
     TTS 모듈을 못 불러오면 확인을 건너뛴다(예외로 올리면 필수 인증 창을 영영 못 닫는다 — init_tts_client 와 같은 규칙).
     """
     try:
@@ -549,26 +578,23 @@ def _check_tts_key(tts_key):
         log_to_console(f"[TTS] TTS 모듈을 불러올 수 없어 키 확인을 건너뜁니다: {e}")
         return
     client = texttospeech.TextToSpeechClient(client_options={"api_key": tts_key})
-    client.list_voices(language_code="ko-KR", timeout=translation.TIMEOUT)
+    client.list_voices(language_code="ko-KR", timeout=translation.KEY_CHECK_TIMEOUT)
 
-def _init_translator(gemini_key):
-    """Gemini 키로 번역기를 만든다(2026-09-29 사용자 결정 — TTS 키와 따로인 키).
+def _init_translator():
+    """고른 번역 공급자(translate_provider)의 번역기를 만든다 — 2026-11-18 리규형님 "번역 공급자 고르기"(그 전엔 Gemini 만).
 
     키가 없거나 만들지 못해도 예외를 올리지 않는다 — 읽기는 그대로 돼야 한다.
     그때는 MissingTranslator 를 넣어 두어, 번역할 문장이 나오면 그 조각에서 멈추고 이유를 알린다(사용자 결정).
+    부르는 곳: main() 시작 때, 인증 창 "저장" 뒤.
     """
-    global gemini_translator
-    if not gemini_key:
-        gemini_translator = translation.MissingTranslator("Gemini 키가 설정되지 않았습니다 (설정 창 → 인증 설정)")
-        log_to_console("[번역] Gemini 키가 없습니다 — 번역할 문장이 나오면 읽기를 멈추고 알립니다")
-        return
-    try:
-        gemini_translator = translation.GeminiTranslator(gemini_key)
-        log_to_console(f"[번역] Gemini 번역기 준비 ({translation.MODEL})")
-    except Exception as e:
-        gemini_translator = translation.MissingTranslator(str(e))
-        logging.error(f"번역기 생성 실패: {e}")
-        log_to_console(f"[번역] 번역기를 만들지 못했습니다: {e}")
+    global active_translator
+    active_translator = translation.make_translator(translate_provider, gemini_key=gemini_api_key,
+                                                    openai_key=openai_api_key, anthropic_key=anthropic_api_key)
+    name = {"openai": "OpenAI", "anthropic": "Claude"}.get(translate_provider, "Gemini")
+    if isinstance(active_translator, translation.MissingTranslator):
+        log_to_console(f"[번역] {name} 번역기를 쓸 수 없습니다({active_translator.reason}) — 번역할 문장이 나오면 읽기를 멈추고 알립니다")
+    else:
+        log_to_console(f"[번역] {name} 번역기 준비 ({active_translator.model})")
 
 def main():
     """앱 초기화 순서를 한곳에 모은 함수. 순서가 곧 의존 관계라 함부로 바꾸지 말 것.
@@ -653,17 +679,18 @@ def main():
         log_to_console("Google Cloud 인증 확인 중...")
 
         # 설정에서 키를 이미 로드했으므로, TTS 클라이언트·번역기 만들기 시도 (키 확인 요청은 하지 않는다 — init_tts_client)
+        # 2026-11-18: 읽기 공급자가 OpenAI 면 Google TTS 키가 없어도 된다 — 고른 공급자로 읽을 수 없을 때만 필수 인증 창
         if google_tts_api_key:
             try:
                 log_to_console("[TTS] TTS 클라이언트 초기화 시도 중...")
-                init_tts_client(google_tts_api_key, gemini_api_key)
+                init_tts_client(google_tts_api_key)
             except Exception as e:
                 logging.error(f"Google Cloud 인증 오류: {str(e)}")
                 log_to_console(f"Google Cloud 인증 오류: {str(e)}")
-                show_api_key_dialog(required=True)
-        else:
-            logging.warning("TTS API 키가 없습니다.")
-            log_to_console("TTS API 키가 없습니다. 인증 창을 표시합니다.")
+        _init_translator()
+        if not _reading_ready():
+            logging.warning(f"읽기 공급자({tts_provider})의 키가 없습니다.")
+            log_to_console(f"읽기 공급자({tts_provider})의 키가 없거나 준비되지 않았습니다. 인증 창을 표시합니다.")
             show_api_key_dialog(required=True)
 
         # 키보드 리스너 설정
@@ -1075,7 +1102,8 @@ def save_settings():
     (옛 구조 그대로 — 설정 저장은 사람 손으로 드물게 일어난다).
     ⚠️ 파일은 "지금 작업 폴더" 기준 상대 경로다. 사용자 데이터이므로 키 이름을 바꾸면 옛 설정을 못 읽는다
        → 키를 바꿀 땐 load_settings 에 옛 키 읽기를 남길 것.
-    키 목록: language, google_tts_api_key, gemini_api_key, tts_hotkey{modifiers,key}, tts_settings{voice_name,speaking_rate,rate_step},
+    키 목록: language, google_tts_api_key, gemini_api_key, openai_api_key, anthropic_api_key, tts_provider, translate_provider,
+            tts_hotkey{modifiers,key}, tts_settings{voice_name,google_voice,speaking_rate,rate_step},
             reader_window_enabled, reader_window_geometry, bottom_bar_monitor, selection_button_enabled,
             disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled
     """
@@ -1090,12 +1118,18 @@ def save_settings():
             "language": current_language,
             "google_tts_api_key": google_tts_api_key,
             "gemini_api_key": gemini_api_key,
+            "openai_api_key": openai_api_key,
+            "anthropic_api_key": anthropic_api_key,
+            # 공급자 (2026-11-18 — 인증 창 맨 위)
+            "tts_provider": tts_provider,
+            "translate_provider": translate_provider,
             "tts_hotkey": {
                 "modifiers": tts_hotkey_modifiers,
                 "key": tts_hotkey_key
             },
             "tts_settings": {
                 "voice_name": tts_voice_name,
+                "google_voice": tts_google_voice,   # 마지막 Google 목소리(2026-11-18)
                 "speaking_rate": tts_speaking_rate,
                 # 속도 목록 간격 (2026-10-24 추가, 설정 창 "속도 간격")
                 "rate_step": tts_rate_step
@@ -1145,7 +1179,8 @@ def load_settings():
     - 속도는 간격(rate_step, 없거나 이상하면 0.1) 목록의 가장 가까운 값으로 맞춰 읽는다(2026-10-24 사용자 결정 —
       예전 막대로 고른 0.33배·1.37배 같은 값도 목록 값이 된다).
     """
-    global current_language, google_tts_api_key, gemini_api_key
+    global current_language, google_tts_api_key, gemini_api_key, openai_api_key, anthropic_api_key
+    global tts_provider, translate_provider, tts_google_voice
     global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, tts_rate_step
     global reader_window_enabled, reader_window_geometry, bottom_bar_monitor, selection_button_enabled
     global disable_in_browsers, source_highlight_enabled, translate_enabled, translation_overlay_enabled
@@ -1171,6 +1206,9 @@ def load_settings():
                 if "tts_settings" in settings:
                     if "voice_name" in settings["tts_settings"]:
                         tts_voice_name = settings["tts_settings"]["voice_name"]
+                    google_voice = settings["tts_settings"].get("google_voice")
+                    if isinstance(google_voice, str) and google_voice and _voice_provider(google_voice) == "google":
+                        tts_google_voice = google_voice
                     tts_rate_step = tts_engine.normalize_rate_step(
                         settings["tts_settings"].get("rate_step", tts_engine.DEFAULT_RATE_STEP))
                     if "speaking_rate" in settings["tts_settings"]:
@@ -1210,6 +1248,22 @@ def load_settings():
                 google_tts_api_key = tts_key.strip() if isinstance(tts_key, str) and tts_key.strip() else None
                 gem_key = settings.get("gemini_api_key")
                 gemini_api_key = gem_key.strip() if isinstance(gem_key, str) and gem_key.strip() else None
+                # OpenAI 키 (2026-11-18 — 노을. 처음엔 Paseo 키 파일을 읽었으나 이 앱 설정으로 옮김)
+                oa_key = settings.get("openai_api_key")
+                openai_api_key = oa_key.strip() if isinstance(oa_key, str) and oa_key.strip() else None
+                an_key = settings.get("anthropic_api_key")
+                anthropic_api_key = an_key.strip() if isinstance(an_key, str) and an_key.strip() else None
+
+                # 공급자 (2026-11-18). 옛 파일엔 없다 → 목소리로 읽기 공급자를 정한다(노을이면 OpenAI), 번역은 Google
+                if _voice_provider(tts_voice_name) == "google" and not isinstance(
+                        settings.get("tts_settings", {}).get("google_voice"), str):
+                    tts_google_voice = tts_voice_name
+                saved_tts_provider = settings.get("tts_provider")
+                _set_tts_provider(saved_tts_provider if saved_tts_provider in TTS_PROVIDERS
+                                  else _voice_provider(tts_voice_name))
+                saved_translate_provider = settings.get("translate_provider")
+                translate_provider = (saved_translate_provider if saved_translate_provider in translation.PROVIDERS
+                                      else "google")
 
             logging.info(f"설정 로드 완료: 언어={current_language}, 읽어주기 단축키 수정자={tts_hotkey_modifiers}, 단축키={tts_hotkey_key}")
             print(f"설정 로드 완료: 언어={current_language}, 읽어주기 단축키 수정자={tts_hotkey_modifiers}, 단축키={tts_hotkey_key}")
@@ -1218,7 +1272,7 @@ def load_settings():
         logging.error(f"설정 로드 오류: {str(e)}")
         print(f"설정 로드 오류: {str(e)}")
 
-_SECRET_SETTING_KEYS = ("google_tts_api_key", "gemini_api_key")
+_SECRET_SETTING_KEYS = ("google_tts_api_key", "gemini_api_key", "openai_api_key", "anthropic_api_key")
 
 def _mask_keys(settings):
     """설정 dict 를 콘솔·로그에 찍기 전에 API 키를 가린다(앞 4글자 + 길이만). 원본은 건드리지 않는다."""
@@ -2413,22 +2467,24 @@ def _notify_source_scroll():
 
 # API 키 설정 대화 상자 표시 함수
 def show_api_key_dialog(required=False):
-    """Google API 키 두 개(TTS 키·Gemini 키)를 넣는 인증 창 (2026-09-29 — 그 전엔 서비스 계정 JSON 파일 고르기).
+    """읽기·번역 공급자를 고르고 그 공급자의 API 키를 넣는 인증 창.
 
+    2026-09-29 Google 키 두 칸(그 전엔 서비스 계정 JSON 파일 고르기) → 2026-11-18 OpenAI 칸·칸마다 한 줄 설명 → 같은 날 리규형님:
+    맨 위에서 읽기 공급자(Google·OpenAI)와 번역 공급자(Google Gemini·OpenAI·Claude)를 고르면, 그 공급자에 필요한 키 칸과
+    맨 아래 "키 만드는 곳" 줄만 보인다. 숨은 칸의 키는 지우지 않고 그대로 둔다(공급자를 다시 바꾸면 다시 쓴다).
     ⚠️ Tk 메인 스레드에서만 부른다(main 의 인증 확인 / 설정 창 "인증 설정" 버튼 / 트레이 → gui_queue "show_api_key_dialog").
-    흐름: 두 칸에 키 붙여넣기 → "저장" → 키 확인 요청(TTS: 음성 목록, Gemini: 모델 정보 — Gemini 칸이 비면 건너뜀)
-          → 통과하면 init_tts_client → 설정 저장 → 1.5초 뒤 창 닫힘.
-          실패하면 창에 빨간 글씨로 이유를 보이고 저장하지 않는다(창은 열어 둔다 — 파일 방식 때와 같은 규칙).
-          두 칸을 바꿔 넣어도 확인에서 걸린다(실측: TTS 키로 Gemini 403, Gemini 키로 TTS 401).
-    확인 요청은 Tk 메인에서 바로 한다(실측 0.3~0.5초씩, 제한 3초) — 그동안 창이 잠깐 멈춘다. 드물게 하는 일이라 그대로 둔다.
-    필수 모드(시작할 때 TTS 키가 없거나 클라이언트를 못 만들었을 때): 클라이언트가 준비될 때까지 취소·X·Esc 로 닫을 수 없다.
+    흐름: 공급자 고르기 → 보이는 칸에 키 → "저장" → 보이는 칸의 키 확인(Google TTS: 음성 목록, Gemini: 모델 정보,
+          OpenAI·Claude: 모델 목록 — 모두 과금 없음, 선택 칸이 비면 건너뜀) → 통과하면 클라이언트·번역기 → 설정 저장 → 1.5초 뒤 닫힘.
+          실패하면 창에 빨간 글씨로 이유를 보이고 저장하지 않는다(창은 열어 둔다). 읽기 공급자의 키는 필수, 번역 키는 선택.
+    확인 요청은 Tk 메인에서 바로 한다(실측 0.3~0.5초씩, 제한 translation.KEY_CHECK_TIMEOUT 3초) — 그동안 창이 잠깐 멈춘다.
+    필수 모드(시작할 때 고른 읽기 공급자로 읽을 수 없을 때 — _reading_ready): 준비될 때까지 취소·X·Esc 로 닫을 수 없다.
       그래서 init_tts_client·_check_tts_key 는 "모듈 import 오류" 를 예외로 올리지 않는다
       (예외로 올리면 저장이 계속 실패하고 취소도 안 돼 창을 영영 못 닫는다 — init_tts_client 의 ⚠️ 설명).
     키 칸은 가려서(●) 보이고, "키 보이기" 체크로 드러낸다.
     wait_window() 로 창이 닫힐 때까지 이 함수가 돌아오지 않는다(그동안에도 Tk 이벤트는 돈다).
     반환: 저장했으면 True, 아니면 False.
     """
-    global google_tts_api_key, gemini_api_key
+    global google_tts_api_key, gemini_api_key, openai_api_key, anthropic_api_key, translate_provider
 
     # 완전히 독립적인 모달 대화 상자 생성
     # (부모를 안 주면 기본 루트가 부모가 된다. 창 아이콘은 main 이 건 "기본 아이콘"(favicon.ico)을 따른다)
@@ -2446,31 +2502,87 @@ def show_api_key_dialog(required=False):
     frame = ttk.Frame(dialog, padding=20)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(frame, text=get_msg("auth_help"), justify=tk.LEFT, wraplength=560).pack(anchor="w", pady=(0, 15))
+    # 맨 위 — 공급자 고르기. 고르면 아래 칸·설명이 바로 바뀐다(refresh)
+    tts_prov_var = tk.StringVar(value=tts_provider)
+    tr_prov_var = tk.StringVar(value=translate_provider)
+    providers = ttk.Frame(frame)
+    providers.pack(fill=tk.X)
+    for row, (label_key, var, choices) in enumerate((
+            ("auth_tts_provider", tts_prov_var, (("google", "provider_google"), ("openai", "provider_openai"))),
+            ("auth_translate_provider", tr_prov_var,
+             (("google", "provider_gemini"), ("openai", "provider_openai"), ("anthropic", "provider_claude"))))):
+        ttk.Label(providers, text=get_msg(label_key)).grid(row=row, column=0, sticky="w", padx=(0, 14), pady=3)
+        for col, (value, text_key) in enumerate(choices, start=1):
+            ttk.Radiobutton(providers, text=get_msg(text_key), value=value, variable=var,
+                            command=lambda: refresh()).grid(row=row, column=col, sticky="w", padx=(0, 14), pady=3)
 
-    # 키 두 칸 — 지금 저장된 키를 채워 둔다(가려서 보인다)
+    # 키 칸 — 칸마다 이름 · 입력 · 한 줄 설명. 어느 칸을 보일지는 refresh 가 정한다. 지금 저장된 키를 채워 둔다(가려서 보인다)
     fields = ttk.Frame(frame)
-    fields.pack(fill=tk.X, pady=4)
-    tts_var = tk.StringVar(value=google_tts_api_key or "")
-    gem_var = tk.StringVar(value=gemini_api_key or "")
-    ttk.Label(fields, text=get_msg("auth_tts_key")).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=4)
-    tts_entry = ttk.Entry(fields, textvariable=tts_var, width=52, show="●")
-    tts_entry.grid(row=0, column=1, sticky="ew", pady=4)
-    ttk.Label(fields, text=get_msg("auth_gemini_key")).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
-    gem_entry = ttk.Entry(fields, textvariable=gem_var, width=52, show="●")
-    gem_entry.grid(row=1, column=1, sticky="ew", pady=4)
-    fields.columnconfigure(1, weight=1)
+    fields.pack(fill=tk.X, pady=(4, 0))
+    rows = {}
+    for i, (field, value) in enumerate((("tts", google_tts_api_key), ("gemini", gemini_api_key),
+                                         ("openai", openai_api_key), ("anthropic", anthropic_api_key))):
+        var = tk.StringVar(value=value or "")
+        name = ttk.Label(fields)
+        entry = ttk.Entry(fields, textvariable=var, width=60, show="●")
+        # 설명은 테마의 밝은 회색(darkly "light" = #ADB5BD) — 이름·입력과 구별되게
+        note = ttk.Label(fields, bootstyle="light", wraplength=560, justify=tk.LEFT)
+        name.grid(row=i * 3, column=0, sticky="w", pady=(14, 4))
+        entry.grid(row=i * 3 + 1, column=0, sticky="ew")
+        note.grid(row=i * 3 + 2, column=0, sticky="w", pady=(4, 0))
+        rows[field] = (name, entry, note, var)
+    fields.columnconfigure(0, weight=1)
+
+    # 맨 아래 — 키 만드는 곳(보이는 칸의 줄만)
+    where_label = ttk.Label(frame, justify=tk.LEFT, wraplength=560)
+    where_label.pack(anchor="w", pady=(18, 0))
+
+    def needed():
+        """지금 고른 공급자에 필요한 칸 → {칸: 필수냐}. 읽기 공급자의 키는 필수, 번역 공급자의 키는 선택(같은 칸이면 필수)."""
+        want = {"tts": True} if tts_prov_var.get() == "google" else {"openai": True}
+        want.setdefault({"openai": "openai", "anthropic": "anthropic"}.get(tr_prov_var.get(), "gemini"), False)
+        return want
+
+    def refresh():
+        """고른 공급자에 맞게 칸·이름·설명·"키 만드는 곳"을 바꾸고 창 크기를 다시 맞춘다."""
+        want = needed()
+        reading_openai = tts_prov_var.get() == "openai"
+        translating_openai = tr_prov_var.get() == "openai"
+        for field, (name, entry, note, _var) in rows.items():
+            if field not in want:
+                for widget in (name, entry, note):
+                    widget.grid_remove()
+                continue
+            for widget in (name, entry, note):
+                widget.grid()
+            if field == "openai":
+                name.config(text=get_msg("auth_openai_key_required" if want[field] else "auth_openai_key"))
+                note.config(text=get_msg("auth_openai_note_both" if reading_openai and translating_openai else
+                                         "auth_openai_note" if reading_openai else "auth_openai_note_translate"))
+            else:
+                name.config(text=get_msg(f"auth_{field}_key"))
+                note.config(text=get_msg(f"auth_{field}_note"))
+        lines = [get_msg("auth_where_title")]
+        if "tts" in want and "gemini" in want:
+            lines.append(get_msg("auth_where_google_two"))
+        elif "tts" in want or "gemini" in want:
+            lines.append(get_msg("auth_where_google"))
+        if "openai" in want:
+            lines.append(get_msg("auth_where_openai"))
+        if "anthropic" in want:
+            lines.append(get_msg("auth_where_anthropic"))
+        where_label.config(text="\n".join(lines))
 
     show_var = tk.BooleanVar(value=False)
 
     def toggle_show():
-        """"키 보이기" 체크: 두 칸의 가림(●)을 켜고 끈다."""
+        """"키 보이기" 체크: 모든 칸의 가림(●)을 켜고 끈다."""
         mask = "" if show_var.get() else "●"
-        tts_entry.config(show=mask)
-        gem_entry.config(show=mask)
+        for _name, entry, _note, _var in rows.values():
+            entry.config(show=mask)
 
     ttk.Checkbutton(frame, text=get_msg("auth_show_keys"), variable=show_var,
-                    command=toggle_show).pack(anchor="w", pady=(4, 0))
+                    command=toggle_show).pack(anchor="w", pady=(12, 0))
 
     # 결과 메시지 라벨 (bootstyle 활용)
     result_label = ttk.Label(frame, text="", wraplength=560, justify=tk.LEFT)
@@ -2488,55 +2600,68 @@ def show_api_key_dialog(required=False):
         text = str(e).strip().splitlines()
         return (text[0] if text else type(e).__name__)[:200]
 
+    checks = {   # 칸 → (확인 함수, 실패 문구, 로그 이름). 모두 과금 없는 조회
+        "tts": (_check_tts_key, "auth_tts_key_failed", "TTS"),
+        "gemini": (translation.check_gemini_key, "auth_gemini_key_failed", "Gemini"),
+        "openai": (lambda key: noeul_live.check_openai_key(key, translation.KEY_CHECK_TIMEOUT), "auth_openai_key_failed", "OpenAI"),
+        "anthropic": (translation.check_anthropic_key, "auth_anthropic_key_failed", "Claude"),
+    }
+
     def save_credentials():
-        """"저장" 버튼(또는 Enter): 키를 확인하고 통과하면 클라이언트·번역기를 만들고 설정 파일에 저장한다."""
-        global google_tts_api_key, gemini_api_key
+        """"저장" 버튼(또는 Enter): 보이는 칸의 키를 확인하고 통과하면 공급자·키를 저장하고 클라이언트·번역기를 만든다."""
+        global google_tts_api_key, gemini_api_key, openai_api_key, anthropic_api_key, translate_provider
 
-        tts_key = tts_var.get().strip()
-        gem_key = gem_var.get().strip()
-
-        if not tts_key:
-            result_label.config(text=get_msg("auth_need_tts_key"), bootstyle="danger")
-            return
+        want = needed()
+        keys = {field: var.get().strip() for field, (_name, _entry, _note, var) in rows.items()}
+        for field, must in want.items():
+            if must and not keys[field]:
+                result_label.config(text=get_msg("auth_need_tts_key" if field == "tts" else "auth_need_openai_key"),
+                                    bootstyle="danger")
+                return
 
         result_label.config(text=get_msg("auth_checking"), bootstyle="default")
         dialog.update_idletasks()
-        try:
-            _check_tts_key(tts_key)
-        except Exception as e:
-            result_label.config(text=get_msg("auth_tts_key_failed", _first_line(e)), bootstyle="danger")
-            logging.error(f"TTS 키 확인 실패: {_first_line(e)}")
-            return
-        if gem_key:
+        for field in ("tts", "gemini", "openai", "anthropic"):   # 보이는 칸만, 비었으면 건너뜀(숨은 칸은 안 쓰니 확인하지 않는다)
+            if field in want and keys[field]:
+                check, failed_key, name = checks[field]
+                try:
+                    check(keys[field])
+                except Exception as e:
+                    result_label.config(text=get_msg(failed_key, _first_line(e)), bootstyle="danger")
+                    logging.error(f"{name} 키 확인 실패: {_first_line(e)}")
+                    return
+
+        if keys["tts"]:
             try:
-                translation.check_gemini_key(gem_key)
+                # texttospeech 모듈이 없으면 False(로그만) — 옛 파일 방식처럼 저장은 진행한다
+                init_tts_client(keys["tts"])
             except Exception as e:
-                result_label.config(text=get_msg("auth_gemini_key_failed", _first_line(e)), bootstyle="danger")
-                logging.error(f"Gemini 키 확인 실패: {_first_line(e)}")
-                return
+                logging.error(f"인증 설정 오류: {_first_line(e)}")
+                if "tts" in want:   # 읽기 공급자가 Google 이면 막는다. 아니면(숨은 칸) 기록만
+                    result_label.config(text=get_msg("auth_error", _first_line(e)), bootstyle="danger")
+                    return
 
-        try:
-            # texttospeech 모듈이 없으면 False(로그만) — 옛 파일 방식처럼 저장은 진행한다
-            init_tts_client(tts_key, gem_key or None)
-        except Exception as e:
-            result_label.config(text=get_msg("auth_error", _first_line(e)), bootstyle="danger")
-            logging.error(f"인증 설정 오류: {_first_line(e)}")
-            return
-
-        google_tts_api_key = tts_key
-        gemini_api_key = gem_key or None
+        google_tts_api_key = keys["tts"] or None
+        gemini_api_key = keys["gemini"] or None
+        openai_api_key = keys["openai"] or None
+        anthropic_api_key = keys["anthropic"] or None
+        translate_provider = tr_prov_var.get()
+        _set_tts_provider(tts_prov_var.get())
+        _init_translator()
         save_settings()
 
         result_label.config(text=get_msg("auth_saved"), bootstyle="success")
-        logging.info("Google API 키 설정됨")
-        log_to_console("Google API 키 설정됨 (TTS 키" + (", Gemini 키" if gem_key else ", Gemini 키 없음") + ")")
+        logging.info("API 키·공급자 설정됨")
+        log_to_console(f"API 키·공급자 설정됨 (읽기 {tts_provider} · 번역 {translate_provider} · 키 "
+                       + ", ".join(f for f in ("tts", "gemini", "openai", "anthropic") if keys[f]) + ")")
         result[0] = True
         dialog.after(1500, dialog.destroy)
 
     def cancel():
-        """"취소"·Esc·X 모두 여기로 온다. 필수 모드에서 클라이언트가 없으면 닫지 않고 안내만 한다."""
-        if required and not google_tts_client:
-            result_label.config(text=get_msg("auth_need_tts_key"), bootstyle="danger")
+        """"취소"·Esc·X 모두 여기로 온다. 필수 모드에서 아직 읽을 수 없으면 닫지 않고 안내만 한다."""
+        if required and not _reading_ready():
+            result_label.config(text=get_msg("auth_need_openai_key" if tts_provider == "openai" else "auth_need_tts_key"),
+                                bootstyle="danger")
             return
         dialog.destroy()
 
@@ -2550,14 +2675,16 @@ def show_api_key_dialog(required=False):
     dialog.bind("<Escape>", lambda event: cancel())
     dialog.protocol("WM_DELETE_WINDOW", cancel)
 
-    # 창 크기는 내용에 맞추고 화면 가운데에
+    # 칸을 고른 공급자에 맞춘 뒤, 창 크기는 내용에 맞추고 화면 가운데에
+    refresh()
     dialog.update_idletasks()
     width = max(600, dialog.winfo_reqwidth())
     height = dialog.winfo_reqheight()
     x = (dialog.winfo_screenwidth() // 2) - (width // 2)
     y = (dialog.winfo_screenheight() // 2) - (height // 2)
-    dialog.geometry(f"{width}x{height}+{x}+{y}")
-    (tts_entry if not tts_var.get() else gem_entry).focus_set()
+    dialog.geometry(f"+{x}+{y}")   # 크기는 내용에 맡기고(refresh 가 칸을 바꿔도 따라감) 자리만 가운데
+    shown = [rows[f] for f in ("tts", "gemini", "openai", "anthropic") if f in needed()]
+    next((entry for _n, entry, _no, var in shown if not var.get()), shown[0][1]).focus_set()   # 첫 빈 칸
 
     # 모달 대화 상자 실행
     dialog.wait_window()
@@ -2682,30 +2809,31 @@ def show_tts_settings_dialog():
         usage_now = tts_usage_counter.month_counts()
     except Exception:
         usage_now = None
-    voice_ids = list(KOREAN_VOICES)
-    if tts_voice_name and tts_voice_name not in voice_ids:
-        voice_ids.insert(0, tts_voice_name)
-
-    voice_options = []
+    # 2026-11-18 리규형님: 목록엔 고른 읽기 공급자(인증 창 맨 위)의 목소리만. 인증 창에서 공급자를 바꾸고 오면 다시 채운다
     voice_map = {}
+    voice_var = tk.StringVar()
 
-    current_voice_display = ""
+    def fill_voices():
+        """읽기 공급자의 목소리로 목록을 채운다 → 보일 글 목록. voice_map(글 → 목소리)·voice_var 도 맞춘다."""
+        voice_ids = _voices_for(tts_provider)
+        if tts_voice_name and tts_voice_name not in voice_ids and _voice_provider(tts_voice_name) == tts_provider:
+            voice_ids.insert(0, tts_voice_name)
+        options, current = [], ""
+        voice_map.clear()
+        for v_id in voice_ids:
+            used = None if usage_now is None else usage_now.get(tts_usage.usage_kind(v_id), 0)
+            display_str = tts_usage.voice_label(v_id, used, get_msg("voice_price"), get_msg("voice_usage"),
+                                              language=current_language)
+            if display_str in voice_map:   # 다른 언어의 같은 이름(en-US-Chirp3-HD-Zephyr 등)이 저장돼 있으면 구분
+                display_str = f"{display_str} [{v_id}]"
+            options.append(display_str)
+            voice_map[display_str] = v_id
+            if v_id == tts_voice_name:
+                current = display_str
+        voice_var.set(current or (options[0] if options else ""))
+        return options
 
-    for v_id in voice_ids:
-        used = None if usage_now is None else usage_now.get(tts_usage.usage_kind(v_id), 0)
-        display_str = tts_usage.voice_label(v_id, used, get_msg("voice_price"), get_msg("voice_usage"),
-                                          language=current_language)
-        if display_str in voice_map:   # 다른 언어의 같은 이름(en-US-Chirp3-HD-Zephyr 등)이 저장돼 있으면 구분
-            display_str = f"{display_str} [{v_id}]"
-        voice_options.append(display_str)
-        voice_map[display_str] = v_id
-        if v_id == tts_voice_name:
-            current_voice_display = display_str
-
-    if not current_voice_display and voice_options:
-        current_voice_display = voice_options[0]
-
-    voice_var = tk.StringVar(value=current_voice_display)
+    voice_options = fill_voices()
 
     # 상단: 콤보박스와 미리듣기 버튼을 가로로 배치
     voice_selection_row = ttk.Frame(voice_frame)
@@ -2846,6 +2974,7 @@ def show_tts_settings_dialog():
         이 설정 창은 뒤에 그대로 남는다. 인증 파일은 그 창의 "설정" 이 바로 저장한다(이 창의 저장과 무관).
         """
         show_api_key_dialog(required=False)
+        voice_combo.config(values=fill_voices())   # 읽기 공급자가 바뀌었을 수 있다 — 그 공급자의 목소리로 다시
 
     tool_row = ttk.Frame(general_frame)
     tool_row.pack(fill="x", pady=5)
@@ -2869,7 +2998,7 @@ def show_tts_settings_dialog():
         글자 칸이 비면 단축키 글자를 None 으로 둔다(→ 단축키가 꺼진다). 음성을 못 찾으면 기본값 DEFAULT_VOICE(Zephyr).
         언어가 바뀌었으면 _apply_language 가 전역 언어를 바꾸고 트레이 문구를 새 언어로 다시 만든다. 저장은 아래 한 번.
         """
-        global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, translate_enabled
+        global tts_hotkey_modifiers, tts_hotkey_key, tts_voice_name, tts_speaking_rate, translate_enabled, tts_google_voice
         global translation_overlay_enabled, tts_rate_step
 
         tts_hotkey_modifiers["ctrl"] = ctrl_var.get()
@@ -2879,7 +3008,9 @@ def show_tts_settings_dialog():
         tts_hotkey_key = k if k else None
 
         selected_disp = voice_var.get()
-        tts_voice_name = voice_map.get(selected_disp, DEFAULT_VOICE)
+        tts_voice_name = voice_map.get(selected_disp, tts_voice_name)
+        if _voice_provider(tts_voice_name) == "google":
+            tts_google_voice = tts_voice_name   # OpenAI 로 바꿨다 돌아오면 이 목소리(2026-11-18)
         # 간격이 바뀌면 지금 속도를 새 목록의 가장 가까운 값으로 맞추고(가운데면 빠른 쪽) 하단 바 목록도 바꾼다(2026-10-24).
         # 읽는 중이면 맞춘 속도를 바로 반영한다. 음성은 읽기마다 정해지므로 다음 읽기부터 바뀐다.
         tts_rate_step = current_step()
@@ -3225,9 +3356,10 @@ def setup_usage_receiver():
 
     def on_noeul(payload, cancelled):
         # 크롬 확장 대신 노을로 읽기(2026-11-18) — 창구 스레드(요청마다 하나)에서 불린다. Tk 를 만지지 않는다.
-        # 키 = Paseo 키 파일의 OPENAI_API_KEY(요청마다 다시 읽음). 사용량은 이 앱이 세지 않는다 — 확장이 자기 기록에 센다.
+        # 키 = 인증 창의 OpenAI 키(요청마다 지금 값 — 인증 창에서 바꾸면 바로 따른다). 사용량은 이 앱이 세지 않는다 — 확장이 센다.
         # cancelled() = 확장이 요청을 끊었나 — 참이면 라이브 연결을 닫는다(멈춤·건너뛰기, 과금 줄이기)
-        return noeul_live.handle_extension_request(payload, cancelled, log=log_to_console)
+        return noeul_live.handle_extension_request(payload, cancelled, key_reader=lambda: openai_api_key,
+                                                   log=log_to_console)
 
     usage_receiver = tts_usage.UsageReceiver(extension_usage_reports, on_report=on_report, log=log_to_console,
                                              on_reject=on_reject, noeul=on_noeul)
@@ -3609,7 +3741,7 @@ def _start_noeul_preview(text, rate):
     import noeul_live
     import tts_usage as usage
     global tts_preview_session
-    key = noeul_live.read_paseo_openai_key()
+    key = openai_api_key   # 인증 창의 OpenAI 키(2026-11-18)
     mark = usage.key_mark(key) if key else None
     synthesize = tts_engine.make_noeul_synthesize(
         key, log=log_to_console,
@@ -3691,7 +3823,7 @@ def speak_text(text, hl_area=None):
         if is_noeul:
             import noeul_live
             import tts_usage as usage
-            key = noeul_live.read_paseo_openai_key()
+            key = openai_api_key   # 인증 창의 OpenAI 키(2026-11-18)
             key_for_usage = usage.key_mark(key) if key else None
             synthesize = tts_engine.make_noeul_synthesize(
                 key, log=log_to_console,
@@ -3703,7 +3835,7 @@ def speak_text(text, hl_area=None):
                 on_sent=lambda sent: _count_tts_usage(voice_for_usage, sent, key_for_usage))
         if raw_texts:
             # 번역 대상 조각만 번역 → 읽기용 변환 → 합성. 번역 실패는 SegmentFailed → 그 조각 차례에 멈추고 알림
-            translator = gemini_translator or translation.MissingTranslator("번역기가 준비되지 않았습니다(인증 전)")
+            translator = active_translator or translation.MissingTranslator("번역기가 준비되지 않았습니다(인증 전)")
             # on_translated: 번역이 끝나면(합성 스레드) Tk 메인에 알려 지금 칠하는 조각을 번역문 막으로 다시 칠하게 한다.
             # box["session"] 은 아래에서 세션을 만든 뒤 채워진다 — 번역은 start() 뒤에야 일어나므로 늘 채워져 있다.
             spoken_lang = spoken_text.speech_lang(lang)

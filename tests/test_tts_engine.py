@@ -1433,7 +1433,7 @@ def _load_glue(ui_log):
         "SourceHighlighter": None, "source_highlighter": None, "source_highlight_enabled": True,
         "_source_hl_session": None, "_source_hl_state": None, "_reading_ui_session": None,
         # 번역(2026-09-29): 기본은 끔 — 예전 흐름 그대로. 번역을 시험할 땐 테스트가 켜고 가짜 번역기를 넣는다
-        "translation": translation, "translate_enabled": False, "gemini_translator": None,
+        "translation": translation, "translate_enabled": False, "active_translator": None,
         "translation_overlay_enabled": True, "_translation_lookup": None,
         "_notify_segment_failed": lambda data: ui_log.append(("notify_failed", data)),
         "_synth_texts": synth_texts,
@@ -1485,7 +1485,7 @@ class TestWhispererGlue(EngineTestBase):
         ui = []
         ns = self.ns = _load_glue(ui)
         calls = []
-        dict.__setitem__(ns, "gemini_translator", lambda xs: calls.append(xs) or xs)
+        dict.__setitem__(ns, "active_translator", lambda xs: calls.append(xs) or xs)
         ns["speak_text"](self.KO_LINE + "\n\n" + self.EN_LINE)   # 두 문단(2026-10-28 문단 단위)
         self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))
         self.assertEqual(calls, [])
@@ -1501,7 +1501,7 @@ class TestWhispererGlue(EngineTestBase):
             calls.append(list(xs))
             return ["영어로만 쓴 줄입니다" for _ in xs]
         dict.__setitem__(ns, "translate_enabled", True)
-        dict.__setitem__(ns, "gemini_translator", fake_translate)
+        dict.__setitem__(ns, "active_translator", fake_translate)
         ns["speak_text"](self.KO_LINE + "\n\n" + self.EN_LINE)   # 두 문단(2026-10-28 문단 단위)
         self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))
         self.assertEqual(calls, [[self.EN_LINE]])               # 한국어 조각은 번역하지 않는다
@@ -1526,7 +1526,7 @@ class TestWhispererGlue(EngineTestBase):
             def highlight(self, idx, caption=None):
                 self.calls.append((idx, caption))
         dict.__setitem__(ns, "translate_enabled", True)
-        dict.__setitem__(ns, "gemini_translator", lambda xs: ["영어로만 쓴 줄입니다" for _ in xs])
+        dict.__setitem__(ns, "active_translator", lambda xs: ["영어로만 쓴 줄입니다" for _ in xs])
         ns["speak_text"](self.KO_LINE + "\n\n" + self.EN_LINE)   # 두 문단(2026-10-28 문단 단위)
         session = dict.__getitem__(ns, "tts_session")
         self.assertTrue(_pump(ns, lambda: len(ns["_synth_texts"]) >= 2))   # 두 조각 모두 번역·합성 끝
@@ -1566,7 +1566,7 @@ class TestWhispererGlue(EngineTestBase):
             gate.wait(5)
             return ["영어로만 쓴 줄입니다" for _ in xs]
         dict.__setitem__(ns, "translate_enabled", True)
-        dict.__setitem__(ns, "gemini_translator", slow_translate)
+        dict.__setitem__(ns, "active_translator", slow_translate)
         ns["speak_text"](self.EN_LINE)                       # 조각 하나 = 첫 조각이 번역 대상
         session = dict.__getitem__(ns, "tts_session")
         hl = FakeHL()
@@ -1589,7 +1589,7 @@ class TestWhispererGlue(EngineTestBase):
         def broken(xs):
             raise translation.TranslationError("번역 요청 실패 (HTTP 403): 권한 없음")
         dict.__setitem__(ns, "translate_enabled", True)
-        dict.__setitem__(ns, "gemini_translator", broken)
+        dict.__setitem__(ns, "active_translator", broken)
         ns["speak_text"](self.EN_LINE + "\n" + self.KO_LINE)   # 첫 조각이 번역 대상 → 바로 멈춤
         self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
         failed = [u for u in ui if u[0] == "notify_failed"]
@@ -1602,7 +1602,7 @@ class TestWhispererGlue(EngineTestBase):
     def test_translation_without_translator_stops_and_notifies(self):
         ui = []
         ns = self.ns = _load_glue(ui)
-        dict.__setitem__(ns, "translate_enabled", True)       # gemini_translator 는 None(인증 전)
+        dict.__setitem__(ns, "translate_enabled", True)       # active_translator 는 None(인증 전)
         ns["speak_text"](self.EN_LINE)
         self.assertTrue(_pump(ns, lambda: dict.__getitem__(ns, "tts_session") is None))
         failed = [u for u in ui if u[0] == "notify_failed"]

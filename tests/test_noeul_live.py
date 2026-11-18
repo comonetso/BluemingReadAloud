@@ -357,36 +357,42 @@ class TestWavAndKey(unittest.TestCase):
     def test_usage_key_id_matches_tts_usage(self):
         self.assertEqual(noeul_live.usage_key_id(" sk-abc "), tts_usage.key_mark("sk-abc")["id"])
 
-    def test_read_paseo_key_file(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "google.env")
-            self.assertIsNone(noeul_live.read_paseo_openai_key(path))     # 파일 없음
-            cases = [
-                ("﻿GOOGLE_TTS_KEY=g\nOPENAI_API_KEY=sk-plain\n", "sk-plain"),
-                ("export OPENAI_API_KEY = \"sk-quoted\"  # 메모\n", "sk-quoted"),
-                ("OPENAI_API_KEY='sk-single'\n", "sk-single"),
-                ("OPENAI_API_KEY=sk-x # 주석\n", "sk-x"),
-                ("OPENAI_API_KEY=\"sk-bad\" 꼬리\n", None),
-                ("OPENAI_API_KEY=sk-1\nOPENAI_API_KEY=sk-2\n", "sk-2"),
-                ("OPENAI_API_KEY=sk-1\nOPENAI_API_KEY=\n", None),
-                ("GOOGLE_TTS_KEY=g\n", None),
-            ]
-            for content, want in cases:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                self.assertEqual(noeul_live.read_paseo_openai_key(path), want, content)
+    def test_check_openai_key(self):
+        # 인증 창 저장 때 키 확인(2026-11-18 — Paseo 키 파일 대신 이 앱 설정). 모델 목록 조회, 가짜 opener 로 인터넷 없이
+        import io
+        import urllib.error
+        seen = []
 
-    def test_paseo_keys_path_follows_paseo_home(self):
-        old = os.environ.get("PASEO_HOME")
-        try:
-            os.environ["PASEO_HOME"] = os.path.join("X:", "ph")
-            self.assertEqual(noeul_live.paseo_keys_path(), os.path.join("X:", "ph", "claude-state-bar", "google.env"))
-            del os.environ["PASEO_HOME"]
-            self.assertTrue(noeul_live.paseo_keys_path().endswith(os.path.join(".paseo", "claude-state-bar", "google.env")))
-        finally:
-            if old is not None:
-                os.environ["PASEO_HOME"] = old
+        class Ok:
+            def __enter__(self):
+                return self
 
+            def __exit__(self, *exc):
+                return False
+
+        def ok(request, timeout):
+            seen.append((request.full_url, request.get_header("Authorization"), timeout))
+            return Ok()
+        self.assertIsNone(noeul_live.check_openai_key("sk-good", 3.0, opener=ok))
+        self.assertEqual(seen, [("https://api.openai.com/v1/models", "Bearer sk-good", 3.0)])
+
+        def http(code, body):
+            def opener(request, timeout):
+                raise urllib.error.HTTPError(request.full_url, code, "x", {}, io.BytesIO(body))
+            return opener
+        bad = b'{"error":{"code":"invalid_api_key","message":"Incorrect API key provided: sk-go***od"}}'
+        with self.assertRaises(RuntimeError) as ctx:
+            noeul_live.check_openai_key("sk-good", 3.0, opener=http(401, bad))
+        self.assertEqual(str(ctx.exception), "HTTP 401 invalid_api_key")   # message(키 조각)는 쓰지 않는다
+        with self.assertRaises(RuntimeError) as ctx:
+            noeul_live.check_openai_key("sk-good", 3.0, opener=http(500, b"<html>"))
+        self.assertEqual(str(ctx.exception), "HTTP 500")
+
+        def offline(request, timeout):
+            raise urllib.error.URLError("timed out")
+        with self.assertRaises(RuntimeError) as ctx:
+            noeul_live.check_openai_key("sk-good", 3.0, opener=offline)
+        self.assertEqual(str(ctx.exception), "URLError: timed out")
 
 class TestHandleExtensionRequest(unittest.TestCase):
     def handle(self, payload, key="sk-k", reader=None, cancelled=None, log=None):

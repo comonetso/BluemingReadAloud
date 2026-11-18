@@ -317,31 +317,112 @@ messages = {
         "ko": "문장을 번역하지 못해 읽기를 멈췄습니다.\n\n{0}",
         "en": "Reading stopped because a sentence could not be translated.\n\n{0}"
     },
-    # ── 인증 창 — API 키 두 개 (2026-09-29, whisperer.py show_api_key_dialog) ──
+    # ── 인증 창 — API 키 세 개 (2026-09-29 두 개 · 2026-11-18 OpenAI 키 칸, 칸마다 한 줄 설명 — 리규형님 초안 승인) ──
     "auth_title": {
-        "ko": "Google API 키 설정",
-        "en": "Google API Keys"
+        "ko": "API 키 설정",
+        "en": "API Keys"
     },
-    "auth_help": {
-        "ko": ("API 키 두 개를 넣어 주세요.\n\n"
-               "· TTS 키 (필수): Cloud Text-to-Speech API 를 허용한 키\n"
-               "· Gemini 키 (번역용): Gemini API 를 허용한 키. 비워 두면 번역할 문장이 나올 때 읽기를 멈추고 알립니다.\n\n"
-               "구글 정책상 키 하나로 둘 다 쓸 수 없습니다. 키는 Google Cloud 콘솔 → API 및 서비스 → 사용자 인증 정보에서 만듭니다:\n"
-               "https://console.cloud.google.com/apis/credentials"),
-        "en": ("Enter two API keys.\n\n"
-               "· TTS key (required): a key allowed to use the Cloud Text-to-Speech API\n"
-               "· Gemini key (for translation): a key allowed to use the Gemini API. If empty, reading stops with a notice "
-               "when a sentence needs translation.\n\n"
-               "Google does not allow one key for both. Create keys in Google Cloud Console → APIs & Services → Credentials:\n"
-               "https://console.cloud.google.com/apis/credentials")
+    # 맨 위 공급자 고르기(2026-11-18 리규형님 — Paseo 처럼 읽기·번역 공급자를 고르고, 고른 공급자의 칸·설명만 보인다)
+    "auth_tts_provider": {
+        "ko": "읽기 공급자",
+        "en": "Reading provider"
+    },
+    "auth_translate_provider": {
+        "ko": "번역 공급자",
+        "en": "Translation provider"
+    },
+    "provider_google": {
+        "ko": "Google",
+        "en": "Google"
+    },
+    "provider_gemini": {
+        "ko": "Google (Gemini)",
+        "en": "Google (Gemini)"
+    },
+    "provider_openai": {
+        "ko": "OpenAI",
+        "en": "OpenAI"
+    },
+    "provider_claude": {
+        "ko": "Claude",
+        "en": "Claude"
+    },
+    # 맨 아래 "키 만드는 곳" — 보이는 칸의 줄만
+    "auth_where_title": {
+        "ko": "키 만드는 곳",
+        "en": "Where to create keys"
+    },
+    "auth_where_google": {
+        "ko": "· Google 키: https://console.cloud.google.com/apis/credentials",
+        "en": "· Google key: https://console.cloud.google.com/apis/credentials"
+    },
+    "auth_where_google_two": {
+        "ko": "· Google 두 키: https://console.cloud.google.com/apis/credentials (두 키는 서로 달라야 합니다)",
+        "en": "· Both Google keys: https://console.cloud.google.com/apis/credentials (the two keys must differ)"
+    },
+    "auth_where_openai": {
+        "ko": "· OpenAI 키: https://platform.openai.com/api-keys",
+        "en": "· OpenAI key: https://platform.openai.com/api-keys"
+    },
+    "auth_where_anthropic": {
+        "ko": "· Claude 키: https://console.anthropic.com/settings/keys",
+        "en": "· Claude key: https://console.anthropic.com/settings/keys"
     },
     "auth_tts_key": {
-        "ko": "TTS 키:",
-        "en": "TTS key:"
+        "ko": "Google TTS 키 (필수)",
+        "en": "Google TTS key (required)"
+    },
+    "auth_tts_note": {
+        "ko": "기본 목소리(Zephyr 등)로 읽을 때 씁니다 · Cloud Text-to-Speech API 를 허용한 키",
+        "en": "Used to read with the default voices (Zephyr etc.) · a key allowed to use the Cloud Text-to-Speech API"
     },
     "auth_gemini_key": {
-        "ko": "Gemini 키:",
-        "en": "Gemini key:"
+        "ko": "Gemini 키 (선택)",
+        "en": "Gemini key (optional)"
+    },
+    "auth_gemini_note": {
+        "ko": "한글이 없는 문장을 번역할 때 씁니다 · 비우면 그런 문장에서 읽기를 멈추고 알립니다",
+        "en": "Used to translate sentences without Korean · if empty, reading stops at such a sentence with a notice"
+    },
+    "auth_openai_key": {
+        "ko": "OpenAI 키 (선택)",
+        "en": "OpenAI key (optional)"
+    },
+    "auth_openai_key_required": {
+        "ko": "OpenAI 키 (필수)",
+        "en": "OpenAI key (required)"
+    },
+    "auth_openai_note": {   # 읽기 공급자가 OpenAI
+        "ko": "목소리 \"노을\"로 읽을 때 씁니다(크롬 확장의 노을 읽기 포함)",
+        "en": "Used to read with the \"Noeul\" voice (including the Chrome extension's Noeul reading)"
+    },
+    "auth_openai_note_translate": {   # 번역 공급자만 OpenAI
+        "ko": "한글이 없는 문장을 번역할 때 씁니다 · 비우면 그런 문장에서 읽기를 멈추고 알립니다",
+        "en": "Used to translate sentences without Korean · if empty, reading stops at such a sentence with a notice"
+    },
+    "auth_openai_note_both": {   # 읽기·번역 모두 OpenAI
+        "ko": "목소리 \"노을\"로 읽을 때와 한글이 없는 문장을 번역할 때 씁니다(크롬 확장의 노을 읽기 포함)",
+        "en": "Used to read with the \"Noeul\" voice and to translate sentences without Korean (including the Chrome extension's Noeul reading)"
+    },
+    "auth_openai_key_failed": {
+        "ko": "OpenAI 키 확인 실패: {0}",
+        "en": "OpenAI key check failed: {0}"
+    },
+    "auth_need_openai_key": {
+        "ko": "OpenAI 키를 넣어 주세요.",
+        "en": "Enter the OpenAI key."
+    },
+    "auth_anthropic_key": {
+        "ko": "Claude 키 (선택)",
+        "en": "Claude key (optional)"
+    },
+    "auth_anthropic_note": {
+        "ko": "한글이 없는 문장을 번역할 때 씁니다 · 비우면 그런 문장에서 읽기를 멈추고 알립니다",
+        "en": "Used to translate sentences without Korean · if empty, reading stops at such a sentence with a notice"
+    },
+    "auth_anthropic_key_failed": {
+        "ko": "Claude 키 확인 실패: {0}",
+        "en": "Claude key check failed: {0}"
     },
     "auth_show_keys": {
         "ko": "키 보이기",

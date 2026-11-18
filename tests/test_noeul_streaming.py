@@ -650,6 +650,7 @@ class TestAppNoeul(unittest.TestCase):
         self.ns = _load_glue(self.ui)
         self.ns['tts_voice_name'] = engine.NOEUL_VOICE
         self.ns['google_tts_client'] = self.ns['google_tts'] = None
+        self.ns['openai_api_key'] = None   # 인증 창의 OpenAI 키(2026-11-18 — Paseo 키 파일 대신)
 
     def tearDown(self):
         for name in ('tts_session', 'tts_preview_session'):
@@ -667,7 +668,7 @@ class TestAppNoeul(unittest.TestCase):
             sink(pcm(1000, 0.2))
             return b'ignored'
         self.fake_factory(reader)
-        with patch.object(live, 'read_paseo_openai_key', return_value='fake-openai-key'):
+        with patch.dict(self.ns, openai_api_key='fake-openai-key'):
             self.ns['speak_text']('첫 문단입니다.\n\n두 번째 문단입니다.')
             s = self.ns['tts_session']
             self.assertIsNotNone(s)
@@ -681,7 +682,7 @@ class TestAppNoeul(unittest.TestCase):
 
     def test_missing_key_stops_and_warns_instead_of_skipping(self):
         self.fake_factory(live.read_noeul)   # no_key 는 opener 이전에 끝난다.
-        with patch.object(live, 'read_paseo_openai_key', return_value=None):
+        with patch.dict(self.ns, openai_api_key=None):
             self.ns['speak_text']('읽을 문단입니다.')
             s = self.ns['tts_session']
             self.assertIsNotNone(s)
@@ -711,7 +712,7 @@ class TestAppNoeul(unittest.TestCase):
         self.fake_factory(reader)
         self.extract('_start_noeul_preview')
         self.ns['tts_preview_session'] = None
-        with patch.object(live, 'read_paseo_openai_key', return_value='fake-preview'):
+        with patch.dict(self.ns, openai_api_key='fake-preview'):
             self.ns['_start_noeul_preview']('미리 들을 문장입니다.', 1.5)
             s = self.ns['tts_preview_session']
             self.assertTrue(s.join(3))
@@ -724,7 +725,7 @@ class TestAppNoeul(unittest.TestCase):
         self.fake_factory(live.read_noeul)
         self.extract('_start_noeul_preview')
         self.ns['tts_preview_session'] = None
-        with patch.object(live, 'read_paseo_openai_key', return_value=None):
+        with patch.dict(self.ns, openai_api_key=None):
             self.ns['_start_noeul_preview']('미리 들을 문장입니다.', 1)
             s = self.ns['tts_preview_session']
             self.assertTrue(s.join(3))
@@ -744,6 +745,27 @@ class TestAppNoeul(unittest.TestCase):
         callbacks[0]()
         self.assertEqual(warnings, [('dialog_tts_title', live.MESSAGES['ip_not_authorized'])])
 
+    def test_reading_provider_filters_voices_and_remembers_google_voice(self):
+        # 2026-11-18 리규형님: 목록엔 읽기 공급자의 목소리만. OpenAI 로 갔다 돌아오면 마지막 Google 목소리(Paseo voice.google)
+        path = Path(__file__).resolve().parents[1] / 'whisperer.py'
+        nodes = ast.parse(path.read_text(encoding='utf-8')).body
+        selected = [n for n in nodes if isinstance(n, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in ('KOREAN_VOICES', 'DEFAULT_VOICE', 'TTS_PROVIDERS')
+            for target in n.targets)]
+        exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), 'exec'), self.ns)
+        self.extract('_voice_provider', '_voices_for', '_set_tts_provider')
+        voices = self.ns['_voices_for']
+        self.assertEqual(voices('openai'), [engine.NOEUL_VOICE])
+        self.assertEqual(len(voices('google')), 8)
+        self.assertNotIn(engine.NOEUL_VOICE, voices('google'))
+        self.ns.update(tts_provider='google', tts_voice_name='ko-KR-Chirp3-HD-Kore', tts_google_voice='ko-KR-Chirp3-HD-Kore')
+        self.ns['_set_tts_provider']('openai')
+        self.assertEqual((self.ns['tts_provider'], self.ns['tts_voice_name']), ('openai', engine.NOEUL_VOICE))
+        self.ns['_set_tts_provider']('google')
+        self.assertEqual((self.ns['tts_provider'], self.ns['tts_voice_name']), ('google', 'ko-KR-Chirp3-HD-Kore'))
+        self.ns['_set_tts_provider']('bogus')
+        self.assertEqual(self.ns['tts_provider'], 'google')
+
     def test_voice_list_default_and_actual_settings_roundtrip(self):
         path = Path(__file__).resolve().parents[1] / 'whisperer.py'
         nodes = ast.parse(path.read_text(encoding='utf-8')).body
@@ -752,8 +774,9 @@ class TestAppNoeul(unittest.TestCase):
         exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), 'exec'), self.ns)
         self.assertEqual(self.ns['KOREAN_VOICES'][-1], engine.NOEUL_VOICE)
         self.assertEqual(self.ns['DEFAULT_VOICE'], 'ko-KR-Chirp3-HD-Zephyr')
-        self.extract('save_settings', 'load_settings')
-        self.ns.update(current_language='ko', google_tts_api_key=None, gemini_api_key=None,
+        self.extract('save_settings', 'load_settings', '_voice_provider', '_voices_for', '_set_tts_provider')
+        self.ns.update(current_language='ko', google_tts_api_key=None, gemini_api_key=None, openai_api_key='fake-openai-key',
+            anthropic_api_key='fake-claude-key', tts_provider='openai', translate_provider='anthropic', tts_google_voice='ko-KR-Chirp3-HD-Kore', TTS_PROVIDERS=('google', 'openai'),
             tts_hotkey_modifiers={'ctrl': True}, tts_hotkey_key='D', tts_voice_name=engine.NOEUL_VOICE,
             tts_speaking_rate=1.5, tts_rate_step=0.1, reader_window_geometry=None, bottom_bar_monitor='foreground',
             selection_button_enabled=True, disable_in_browsers=True, usage_pill_visible=False,
@@ -766,10 +789,16 @@ class TestAppNoeul(unittest.TestCase):
             self.ns['save_settings']()
             saved = json.loads(settings_path.read_text(encoding='utf-8'))
             self.assertEqual(saved['tts_settings']['voice_name'], engine.NOEUL_VOICE)
+            self.assertEqual(saved['openai_api_key'], 'fake-openai-key')   # OpenAI 키도 설정 파일에
             self.ns['tts_voice_name'] = self.ns['DEFAULT_VOICE']
+            self.assertEqual((saved['tts_provider'], saved['translate_provider'], saved['anthropic_api_key'], saved['tts_settings']['google_voice']), ('openai', 'anthropic', 'fake-claude-key', 'ko-KR-Chirp3-HD-Kore'))
+            self.ns['openai_api_key'] = None
+            self.ns.update(tts_provider='google', translate_provider='google', anthropic_api_key=None, tts_google_voice='ko-KR-Chirp3-HD-Zephyr')
             self.ns['load_settings']()
             self.assertEqual(self.ns['tts_voice_name'], engine.NOEUL_VOICE)
             self.assertEqual(self.ns['tts_speaking_rate'], 1.5)
+            self.assertEqual(self.ns['openai_api_key'], 'fake-openai-key')   # 불러오기도 OpenAI 키를 되살린다
+            self.assertEqual((self.ns['tts_provider'], self.ns['translate_provider'], self.ns['anthropic_api_key'], self.ns['tts_google_voice']), ('openai', 'anthropic', 'fake-claude-key', 'ko-KR-Chirp3-HD-Kore'))   # 공급자(11-18)
 
 
 if __name__ == '__main__':
