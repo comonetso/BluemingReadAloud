@@ -1,0 +1,7 @@
+{
+  "at": "2026-11-18T07:26:23.958Z",
+  "type": "transport_accepted",
+  "recipient": "peer",
+  "attempt_id": "404f9571-b703-483f-ba77-b313e7d748a5",
+  "detail": "relay: delivered to BluemingWebReadAloud · [peer mail] 2026-11-18 00:02"
+}
