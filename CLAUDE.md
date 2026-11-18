@@ -32,6 +32,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   browser / Telegram checks the same way; `tests/test_tts_usage.py` covers the billing month, counting, the extension
   records, Paseo's file and a real receiver on a random port; `tests/test_noeul_live.py` / `tests/test_noeul_streaming.py`
   cover the noeul reader on a fake socket, the extension route, the play-as-it-arrives engine and the provider glue;
+  `tests/test_noeul_stream_route.py` covers the extension streaming route (widening, slot order, jobs, a real receiver);
+  `test_noeul_streaming.py` imports `test_noeul_live`, so pick noeul tests with `discover -s tests -p "test_noeul*.py"`,
+  not by module name;
   `tests/test_translation.py` covers the three translators). Verification order used in this project:
   edit → `py_compile` → unit tests → dev run → user checks it for real → build (only after the user says it passed).
 - Check build success by the output file timestamp too, not only the exit code
@@ -143,6 +146,21 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   Key = the auth dialog's OpenAI key (`openai_api_key`) for both — **never Paseo's key file** (user decision 2026-11-18:
   do not read another repository's file; the extension was told, peer_mail 557092cb). Errors → `STATUS` / `MESSAGES`
   (`no_key` 503, `ip_not_authorized` 401, …). `check_openai_key` = `GET /v1/models` (free) on Save. Logs keep lengths only.
+  **Streaming route for the extension** (2026-11-18, extension request peer_mail 20321079, pre-approved by the user there —
+  the old route's first sound was 3–4× later than this app's: 76 chars → 17.5 s): `ExtensionStreams`.
+  `POST /v1/tts/noeul/stream` `{"v":1,"text","lang","rate"}` → `{"ok":true,"id"}` + `X-Usage-Key`, and the paragraph is
+  made at once with this app's play-as-it-arrives engine (`make_noeul_synthesize(key).stream(..., lang=, group=)`, no usage
+  callback — the extension counts). `GET …/stream/<id>` (audio element, `crossOrigin="anonymous"`) streams a WAV of unknown
+  length (RIFF/data sizes 0xFFFFFFFF) at 48 kHz stereo once the start-gather (`stream_start_sec`) is in — Chrome starts after
+  ~250 KB (extension measurement: 24 kHz mono = 5.2 s, 48 kHz stereo = 1.3 s), so `StreamWidener` doubles the rate
+  (midpoints between samples, not plain repeats) and the channels. One GET per id; a closed connection cancels within ~0.2 s;
+  `GET …/<id>/result` → `done:true` only after the last byte was sent; `DELETE …/<id>` cancels. Jobs never opened are dropped
+  after `STREAM_KEEP_S` = 10 min, finished results are kept 10 min (Claude's value — the extension left it to this side; made
+  audio costs memory only). All routes: `Origin` chrome-extension:// only, answers carry Access-Control-Allow-Origin (Chrome
+  will not play 127.0.0.1 audio in an extension page without it), OPTIONS answered. The connection slots became an ordered
+  queue (`_Slots`, ticket = (job group, piece index)) so the paragraph handed over first gets slots first; this app's own
+  reading queues in arrival order. Measured 11-18 (dev run, 52 chars): first byte 3.5 s, 250 KB at 3.9 s, 6.4 s of sound in
+  6.7 s. The old `POST /v1/tts/noeul` stays.
 - **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules are in its header.
   Voices are Korean only, so "primary language" = Hangul. **Providers** (2026-11-18 user decision, Paseo `speech.ts` /
   `translate.ts`): `google` = Gemini `gemini-3.5-flash-lite`, `openai` = `gpt-4.1-mini` (chat completions, temperature 0),
@@ -447,7 +465,8 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   is a user decision — an old exe and a new exe could then run together and both catch the hotkey.
   Since 2026-11-01 the same number is also a **TCP** listener on 127.0.0.1 (the extension usage receiver, tts_usage.py) —
   the Chrome extension posts to it, so moving it means changing the extension too. Since 2026-11-18 it also serves
-  `POST /v1/tts/noeul` (the extension's noeul reading, noeul_live.py). Refusals read the whole request body first
+  `POST /v1/tts/noeul` (the extension's noeul reading, noeul_live.py) and the streaming route `/v1/tts/noeul/stream…`
+  (POST / GET / GET result / DELETE / OPTIONS — see noeul_live.py above). Refusals read the whole request body first
   (`tts_usage._read_body_first`) — answering before reading made Windows send a reset instead of the refusal.
 - Do not register Windows reserved shortcuts (Win+L, Ctrl+Alt+Del, ...) as hotkeys. The code has no filter for this.
 - Keep the pynput `on_press`/`on_release` handlers free of I/O (Windows low-level hook timeout); hand work off with

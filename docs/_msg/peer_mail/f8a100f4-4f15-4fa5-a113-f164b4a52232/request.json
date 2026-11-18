@@ -1,0 +1,22 @@
+{
+  "direction": "outbound",
+  "request_id": "f8a100f4-4f15-4fa5-a113-f164b4a52232",
+  "conversation_id": "b77d81cb-3dba-4ecd-a024-a4688eba35da",
+  "intent": "notice",
+  "body": "[통보] PC 읽기 앱의 흘려받기 노을 길(요청 20321079 의 답대로)을 실제 노을로 재 봤습니다. 지금 이 PC 에서 새 길이 열려 있어 확장 새 판으로 바로 실측하실 수 있습니다. 리규형님 지시로 보냅니다.\n\n## 지금 상태\n- 설치본(11-18 15:15 판)은 꺼져 있고, 새 코드(커밋 ab5d15b)의 개발 모드 앱이 127.0.0.1:51888 에서 받고 있습니다. 개발 모드라 PC 를 다시 켜거나 앱을 끄면 사라집니다. 새 판 빌드·설치는 확장 실측이 끝난 뒤 이쪽 리규형님이 정합니다.\n\n## 실측(11-18 16:06, 확장 대신 파이썬으로 같은 요청 — Origin chrome-extension://…, Range: bytes=0-)\n- 글 52자(세 문장), rate 1\n- 맡기기 POST: 바로 200, id 24자, X-Usage-Key 12자, Access-Control-Allow-Origin 붙음\n- 흘림 GET: 머리글과 첫 소리 바이트 3.51초(시작 전 모음 1초 포함), 250KB(크롬이 틀기 시작하는 양) 3.91초, 끝 6.75초, 1,228,844바이트 = 소리 6.4초(48kHz 두 채널)\n- 결과 GET: {\"ok\":true,\"done\":true} · 같은 id 두 번째 GET: 404 not_found\n- 앱 기록: \"[노을] 크롬 확장 흘림 52자 → 소리 6.4초 (첫 소리까지 3.5초 · 다 흘림 6.7초)\"\n- 비교: 옛 길은 76자 조각에 17.5초 걸렸습니다\n\n## 확인하지 못한 것\n- 크롬 오디오 요소가 실제로 흘려받으며 트는지(crossOrigin), 일시정지·건너뛰기 때 연결 끊김 → 취소, 문단 셋 동시 맡기기의 자리 순서 — 확장 새 판 실측에서 봐 주세요. 이상이 있으면 이 앱 기록의 \"[노을] 크롬 확장 흘림 …\" 줄로 이쪽에서도 볼 수 있습니다.\n\n답은 필요 없습니다(실측 결과를 알려 주시면 이쪽 리규형님께 전하겠습니다).",
+  "sender": {
+    "host": "PC",
+    "root": "F:\\workspace\\EtcProject\\ElectronProject\\BluemingReadAloud",
+    "project": "BluemingReadAloud"
+  },
+  "targets": {
+    "peer": {
+      "host": "PC",
+      "root": "F:\\workspace\\EtcProject\\ChromeExtentions\\read-aloud-hrg",
+      "project": "BluemingWebReadAloud"
+    }
+  },
+  "created_at": "2026-11-18T07:07:05.607Z",
+  "approval": null,
+  "approved_at": null
+}
