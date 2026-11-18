@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**BluemingReadAloud** — a Windows tray app that reads selected text aloud with Google Cloud Text-to-Speech.
+**BluemingReadAloud** — a Windows tray app that reads selected text aloud with Google Cloud Text-to-Speech
+(or, since 2026-11-18, OpenAI's GPT-Live voice noeul — the reading provider is chosen in the auth dialog).
 It started as "Yeogiaen STT Typer" (speech-to-text + TTS). Speech-to-text has been removed; the app is TTS-only.
 The target behavior follows the Chrome extension `F:\workspace\EtcProject\ChromeExtentions\read-aloud-hrg`.
 
@@ -29,7 +30,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 - Unit tests: `python -m unittest discover -s tests` (engine, text splitting, whisperer glue extracted by AST —
   the tests never import `whisperer.py`; `tests/test_whisperer_selection.py` extracts the mouse hook and the
   browser / Telegram checks the same way; `tests/test_tts_usage.py` covers the billing month, counting, the extension
-  records, Paseo's file and a real receiver on a random port). Verification order used in this project:
+  records, Paseo's file and a real receiver on a random port; `tests/test_noeul_live.py` / `tests/test_noeul_streaming.py`
+  cover the noeul reader on a fake socket, the extension route, the play-as-it-arrives engine and the provider glue;
+  `tests/test_translation.py` covers the three translators). Verification order used in this project:
   edit → `py_compile` → unit tests → dev run → user checks it for real → build (only after the user says it passed).
 - Check build success by the output file timestamp too, not only the exit code
   (`cmd > log 2>&1; echo ...` returns the exit code of `echo`).
@@ -126,8 +129,28 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   once on "usage_changed" (this app counted / the receiver accepted), and every `USAGE_TICK_MS` = 5 s while the pill or the
   usage window is open (the usage window redraws only when its data changed). The receiver logs each rejection reason once
   per run (`[사용량] 크롬 확장 기록 거절: origin_missing|origin_other|json|source|months|size|path|…`).
-- **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules and the Gemini API
-  client are in its header. Voices are Korean only, so "primary language" = Hangul.
+- **noeul_live.py** — the OpenAI GPT-Live voice **noeul** (2026-11-18 user decision: the three reading apps' OpenAI voice
+  is noeul only). Live model `gpt-live-1` over a websocket (`wss://api.openai.com/v1/live/sessions`, key in the
+  Authorization header; `LiveSocket` = a minimal client on the standard library, no new package). Order, prompts and values
+  follow the Paseo plugin's `server/presentation/tts.ts liveRead` (11-18 version): `session.start` → input silence every
+  0.1 s → the text via `session.instructions.append`; end = 1.5 s quiet after real sound (0.3 s once the transcript covered
+  the source); a new connection when there is no sound within 7 s or the transcript's first three characters differ from a
+  Hangul start (3 tries, 30 s to start); whole limit max(90 s, chars × 0.3 s + 30 s); at most 12 connections at once
+  (`LIVE_SESSIONS_MAX`). Billed per connected second ($0.05/min), so a cancelled request closes its connection within 0.1 s.
+  Two users: `read_noeul(..., sink=)` for this app's own reading (PCM handed over as it arrives; no retry once something was
+  handed over) and `handle_extension_request` for the Chrome extension route (`POST /v1/tts/noeul` on 127.0.0.1:51888 —
+  a browser cannot put a header on a websocket; peer_mail 91cd11f0 · 090a8be2; returns a whole WAV and is not counted here).
+  Key = the auth dialog's OpenAI key (`openai_api_key`) for both — **never Paseo's key file** (user decision 2026-11-18:
+  do not read another repository's file; the extension was told, peer_mail 557092cb). Errors → `STATUS` / `MESSAGES`
+  (`no_key` 503, `ip_not_authorized` 401, …). `check_openai_key` = `GET /v1/models` (free) on Save. Logs keep lengths only.
+- **translation.py** — translate sentences that are not in the voice language (2026-09-29). Rules are in its header.
+  Voices are Korean only, so "primary language" = Hangul. **Providers** (2026-11-18 user decision, Paseo `speech.ts` /
+  `translate.ts`): `google` = Gemini `gemini-3.5-flash-lite`, `openai` = `gpt-4.1-mini` (chat completions, temperature 0),
+  `anthropic` = `claude-haiku-5-5` (messages API, `anthropic-version 2023-06-01`, max_tokens 128000, no temperature,
+  5 sentences per request in parallel) — `make_translator(provider, …)`; no key → `MissingTranslator` (reading stops at that
+  paragraph with a "key not set" box). A refusal or a malformed reply is sent once more (`_Retry`); a reply that contains
+  the key is not resent. Request limit `TIMEOUT` = 10 s (2026-11-18 user decision, = Paseo `REQUEST_TIMEOUT_MS`); the
+  Save-time key check limit `KEY_CHECK_TIMEOUT` = 3 s is separate.
 - **messages.py** — Korean/English UI strings. Add every user-facing message to both `ko` and `en`.
   Keep the nested `messages["ko"]` / `messages["en"]` blocks: `get_message()` indexes them first,
   and removing them turns every message into "[Missing message]".
@@ -182,11 +205,13 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    → `SourceHighlighter.begin(source_text, segments, on_result)` while the selection is still alive. Sound never waits
    for that result.
    **Translation** (setting `translate_enabled`, default on — user decisions 2026-09-29): a sentence with **no Hangul at
-   all** is translated to Korean by Gemini (`gemini-3.5-flash-lite`, Gemini API key) before synthesis; Korean sentences
-   with English terms stay as they are. A paragraph with such a sentence (`keep_whole=translation.plan`) stays one piece
-   with its raw text (URLs masked as "URL" so addresses never go to Gemini) → `translation.mark_for_translation` →
+   all** is translated to Korean by the chosen translation provider (Gemini / OpenAI / Claude — translation.py) before
+   synthesis; Korean sentences with English terms stay as they are. A paragraph with such a sentence
+   (`keep_whole=translation.plan`) stays one piece with its raw text (URLs masked as "URL" so addresses never go to the
+   translator) → `translation.mark_for_translation` →
    `make_translating_synthesize` wraps `synthesize`: translate → `spoken_text.make_spoken_text` → TTS (a translated text
-   over 2000 bytes is split inside `make_google_synthesize`). Timeout 3 s (user decision; measured 0.87–1.55 s). A failed translation raises `tts_engine.SegmentFailed` →
+   over 2000 bytes is split inside `make_google_synthesize`). Request limit 10 s (2026-11-18 user decision, = Paseo; it was
+   3 s from 2026-09-29 — Gemini measured 0.87–1.55 s, Claude 2–3 s on 11-18). A failed translation raises `tts_engine.SegmentFailed` →
    reading **stops at that segment's turn** and a warning box appears (`segment_failed` event → `_notify_segment_failed`).
 4. **`tts_engine.TtsSession`** — one object per reading. Thread `tts-producer` synthesizes up to 2 segments ahead
    (`PREFETCH_AHEAD`) with Google Cloud TTS v1 (`make_google_synthesize`, LINEAR16 24 kHz, synthesized at 1.0);
@@ -197,6 +222,18 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
    **Voice / requests** (2026-10-28, Paseo `tts.ts`): default voice `ko-KR-Chirp3-HD-Zephyr` (was Callirrhoe; a saved
    voice is kept). Korean Chirp3-HD asks for pauses with markup first and falls back to plain text **only on HTTP 400**
    (auth, quota, timeout fail at once). LINEAR16 stays (the player writes samples itself; the plugin uses MP3).
+   **OpenAI noeul** (2026-11-18, reading provider `openai`): voice `tts_engine.NOEUL_VOICE` = `ko-KR-OpenAI-noeul` (a saved
+   name — language / type checks read ko-KR / OpenAI). A noeul paragraph is not cut at 2000 bytes
+   (`split_paragraphs_for_reading(..., streaming=True)`); `make_noeul_synthesize(...).stream` plans its pieces once when the
+   paragraph opens — `readaloud_text.stream_pieces_growing` (first piece ≤ 45 chars, cut at a comma, then growing pieces)
+   and `stream_start_sec` (sound gathered before playing starts) — a port of Paseo `tts.ts:595-641` (checked against
+   Paseo's own function via node: 506 inputs, 0 mismatches). Up to 8 connections per paragraph; PCM plays **as it
+   arrives** (`GrowingAudio`: an empty read means "not yet", not "done" — the player used to treat an empty block as the
+   end of a piece; `_StreamingStretcher` does not flush on a receive gap); moving / stopping cancels the open connections.
+   Usage = characters sent (Paseo `countUsage`), kind `openai`, in the OpenAI key's cell (`key_mark`); the pill and the
+   Google free-tier sums ignore that kind (`tts_usage.IGNORED_KINDS`). Works on this PC (measured 11-18 — an earlier
+   guess that the PC was outside OpenAI's IP allow list was wrong). Implemented by Codex (2 turns) and reviewed by Claude
+   (`docs/codex_rescue/261118_055840_*`).
    **Speed** (2026-10-24 list in the bottom bar; ranges from the Paseo plugin 2026-10-28): the step is chosen in the
    settings dialog (`tts_rate_step`: 0.1 → 0.5–2×, 0.25 → 0.5–5×, default 0.1 — `tts_engine.RATE_STEPS`); speeds are
    1× ± steps, rounded like `normalizeRate` (`tts_engine.snap_rate`). The bottom bar list shows 1× and up only, plus the
@@ -248,6 +285,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   $4 tier); a saved voice outside the list is put first (Paseo `voiceOptions`). Each entry reads like Paseo's button:
   "Zephyr · Chirp 3 HD · 100만 자 30달러 (이번 달 PC 앱 12,345자)" (`tts_usage.voice_label`, this app's own count per kind).
   Preview text = Paseo `PREVIEW_TEXT.ko`, and the preview is counted.
+  Only the chosen reading provider's voices are listed (2026-11-18 user decision): Google → the eight above, OpenAI →
+  noeul only (`_voices_for`). The last Google voice is kept (`tts_settings.google_voice`) for switching back; the list is
+  refilled when the auth dialog (where the provider is chosen) closes.
   **Reading Usage window** (`show_usage_dialog`): billing month and its local start/end, then (2026-11-13) "Google key …ABCD"
   — the key whose share is counted (Key basis in tts_usage.py above) —, a row per kind — Paseo · PC app ·
   Chrome extension · total · free tier · free left (or chars over + dollars, red; "—" = unknown) — then Paseo per host on
@@ -311,17 +351,26 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
   2026-09-28 measurements in VS Code: only the ancestor **Document** element (ControlType 50030) has TextPattern;
   `GetCurrentPattern(UIA_TextPatternId).QueryInterface(IUIAutomationTextPattern)` works (`GetCurrentPatternAs` failed);
   `RangeFromPoint` → `ExpandToEnclosingUnit(TextUnit_Line)` → `GetBoundingRectangles()` takes 1–2 ms.
-- **Auth** (user decision 2026-09-29, replaced the service account JSON): **two API keys** typed into the auth dialog
-  and saved in the settings file — a TTS key (Cloud Text-to-Speech) and a Gemini key (Gemini API). One key cannot do
-  both (measured: the Gemini key is service-account-bound → TTS 401; the TTS key → Gemini 403). The dialog checks each
-  key once on Save (`_check_tts_key` list_voices / `translation.check_gemini_key`); startup does not. `.env` is not read.
-  `google_credentials.json` in the app folder is no longer used (not deleted).
+- **Auth** (user decision 2026-09-29, replaced the service account JSON): API keys typed into the auth dialog and saved
+  in the settings file. Google needs two (measured: the Gemini key is service-account-bound → TTS 401; the TTS key →
+  Gemini 403). **Providers** (2026-11-18 user decisions, like Paseo): the top of the auth dialog picks the **reading**
+  provider (Google / OpenAI) and the **translation** provider (Google Gemini / OpenAI / Claude); only the chosen providers'
+  key rows are shown (`needed()` / `refresh()` — Google TTS key, Gemini key, OpenAI key, Claude key), each with a one-line
+  note, and "where to make keys" at the bottom. The reading provider's key is required, the translation one optional.
+  Save checks the shown keys once — free lookups only (`_check_tts_key` list_voices / `translation.check_gemini_key` /
+  `noeul_live.check_openai_key` GET /v1/models / `translation.check_anthropic_key`, 3 s each); hidden rows keep their keys.
+  Startup does not check; it opens the required auth dialog when `_reading_ready()` is false. The keys live in this app's
+  settings only — Paseo's key file is not read (the OpenAI and Claude keys were copied from it once, by hand, 11-18).
+  `.env` is not read. `google_credentials.json` in the app folder is no longer used (not deleted).
 
 ### Settings
 
 - `whisperer_settings.json` in the working directory (git-ignored — it holds API keys in plain text). Keys: `language`,
-  `google_tts_api_key`, `gemini_api_key`,
-  `tts_hotkey`, `tts_settings` (`voice_name`, `speaking_rate` — snapped to the step's list on load, `rate_step`),
+  `google_tts_api_key`, `gemini_api_key`, `openai_api_key`, `anthropic_api_key` (2026-11-18), `tts_provider`
+  (`google` / `openai`), `translate_provider` (`google` / `openai` / `anthropic`) — a file without `tts_provider` takes it
+  from the saved voice —,
+  `tts_hotkey`, `tts_settings` (`voice_name`, `speaking_rate` — snapped to the step's list on load, `rate_step`,
+  `google_voice` — the last Google voice),
   `reader_window_enabled`,
   `reader_window_geometry`, `bottom_bar_monitor`, `selection_button_enabled`, `disable_in_browsers` (default true),
   `source_highlight_enabled` (default true — deliberately **not** in the tray or the settings dialog; the user fixed the
@@ -397,7 +446,9 @@ python -m PyInstaller BluemingReadAloud.spec --noconfirm
 - Single-instance port is **51888** (51889 in older docs was wrong). Changing the mutex name or port
   is a user decision — an old exe and a new exe could then run together and both catch the hotkey.
   Since 2026-11-01 the same number is also a **TCP** listener on 127.0.0.1 (the extension usage receiver, tts_usage.py) —
-  the Chrome extension posts to it, so moving it means changing the extension too.
+  the Chrome extension posts to it, so moving it means changing the extension too. Since 2026-11-18 it also serves
+  `POST /v1/tts/noeul` (the extension's noeul reading, noeul_live.py). Refusals read the whole request body first
+  (`tts_usage._read_body_first`) — answering before reading made Windows send a reset instead of the refusal.
 - Do not register Windows reserved shortcuts (Win+L, Ctrl+Alt+Del, ...) as hotkeys. The code has no filter for this.
 - Keep the pynput `on_press`/`on_release` handlers free of I/O (Windows low-level hook timeout); hand work off with
   `root.after(...)` (keyboard) or `gui_queue.put(...)` (mouse).

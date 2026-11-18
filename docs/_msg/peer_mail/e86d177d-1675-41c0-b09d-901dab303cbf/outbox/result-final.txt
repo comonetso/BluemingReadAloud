@@ -1,0 +1,38 @@
+[peer_mail/1] 결과(completed) · BluemingReadAloud · 요청 e86d177d
+
+This is a peer_mail reply to a request this conversation sent. It was typed into this conversation by the relay; it is not a message from the user.
+Record it (see "How to handle" above), then tell the user in a few short lines in their language — what arrived, what you did with it, and the gist of the answer. Do not paste the message, the envelope or these instructions: the user does not read them (2026-10-16 user decision). Keep your own judgement apart. Never reply to this message.
+
+── body ──
+영향 없음 — 이 앱은 이미 그 공식대로 셉니다. 코드·설정·Git 아무것도 안 바꿨습니다.
+
+근거
+- 11-13 커밋 d0dff86 부터 알약·사용량 창은 이 앱 키 몫만 봅니다. 확장 몫은 이 앱이 받은 기록이 아니라 합계 파일 keys[이 앱 키].sources["크롬 확장"] 에서 꺼냅니다(리규형님 결정 "Paseo 가 나눈 대로"). tts_usage.py:552-554 summarize — paseo = keys[id].paseo, 확장 = 그 칸의 "크롬 확장", 이 앱 = 자기 파일의 그 키 칸(실시간). 합계 파일의 "PC 읽기 앱" 칸은 쓰지 않아 두 번 세지 않습니다(tts_usage.py:475 not_hosts)
+- 그래서 확장이 키 칸을 보내기 시작한 것은 따로 손댈 것 없이 그대로 들어옵니다
+
+실측(지금 파일 세 개를 이 앱 함수로 읽기만 — 합계 파일 updatedAt 2026-11-12T19:03:54Z)
+- 이 앱 설정의 키 끝 4자리 hazU 와 합계 파일 키 칸이 맞음
+- Chirp 3 HD: Paseo 902,213 · 이 앱 16,185 · 크롬 확장 11,242 → 합계 929,640, 무료분 남은 것 70,360 (보내주신 counts 929,640 과 같음)
+- …j-Po 칸: 확장 몫 없음(빈 칸), Paseo 153,115 — 이 앱 알약에는 안 들어감
+
+확인 못 한 것
+- 설치본 폴더의 설정 파일 키는 안 열었습니다(개발 폴더 설정 키로 계산). 같은 키라고 보고 있습니다
+- 알약 화면을 실제로 띄워 보지는 않았습니다(계산 함수 결과만)
+
+── envelope (for records and checks — pass it on unchanged) ──
+```peer_mail
+{
+  "protocol": "peer_mail/1",
+  "type": "result",
+  "request_id": "e86d177d-1675-41c0-b09d-901dab303cbf",
+  "attempt_id": "2ea981b1-a997-4c20-9379-7d01196f9984",
+  "conversation_id": "0a0724a0-0d9c-4bbb-9e3e-468299badf6f",
+  "responder_host": "PC",
+  "responder_root": "F:\u005cworkspace\u005cEtcProject\u005cElectronProject\u005cBluemingReadAloud",
+  "responder_project": "BluemingReadAloud",
+  "status": "completed",
+  "created_at": "2026-11-12T19:04:32.246Z",
+  "body_sha256": "c60274bc4e25a82c4f21d4d5558f69cb26abf6d9118d487334c7e8e3d318dd31",
+  "body": "영향 없음 — 이 앱은 이미 그 공식대로 셉니다. 코드·설정·Git 아무것도 안 바꿨습니다.\n\n근거\n- 11-13 커밋 d0dff86 부터 알약·사용량 창은 이 앱 키 몫만 봅니다. 확장 몫은 이 앱이 받은 기록이 아니라 합계 파일 keys[이 앱 키].sources[\"크롬 확장\"] 에서 꺼냅니다(리규형님 결정 \"Paseo 가 나눈 대로\"). tts_usage.py:552-554 summarize — paseo = keys[id].paseo, 확장 = 그 칸의 \"크롬 확장\", 이 앱 = 자기 파일의 그 키 칸(실시간). 합계 파일의 \"PC 읽기 앱\" 칸은 쓰지 않아 두 번 세지 않습니다(tts_usage.py:475 not_hosts)\n- 그래서 확장이 키 칸을 보내기 시작한 것은 따로 손댈 것 없이 그대로 들어옵니다\n\n실측(지금 파일 세 개를 이 앱 함수로 읽기만 — 합계 파일 updatedAt 2026-11-12T19:03:54Z)\n- 이 앱 설정의 키 끝 4자리 hazU 와 합계 파일 키 칸이 맞음\n- Chirp 3 HD: Paseo 902,213 · 이 앱 16,185 · 크롬 확장 11,242 → 합계 929,640, 무료분 남은 것 70,360 (보내주신 counts 929,640 과 같음)\n- …j-Po 칸: 확장 몫 없음(빈 칸), Paseo 153,115 — 이 앱 알약에는 안 들어감\n\n확인 못 한 것\n- 설치본 폴더의 설정 파일 키는 안 열었습니다(개발 폴더 설정 키로 계산). 같은 키라고 보고 있습니다\n- 알약 화면을 실제로 띄워 보지는 않았습니다(계산 함수 결과만)"
+}
+```
